@@ -20,7 +20,6 @@ sigfox_download <- function(ID = NULL, # PIT-tag
                             plot_vedba = TRUE,
                             plot_activity = TRUE,
                             buffer = 1,
-                            country_map = TRUE,
                             facet_location = TRUE,
                             save_maps = TRUE,
                             save_path = ""){
@@ -158,7 +157,8 @@ sigfox_download <- function(ID = NULL, # PIT-tag
       geom_path()+
       geom_point()+
       theme(legend.key.size = unit(.1, "cm"), legend.text = element_text(size=6),
-            legend.position = "bottom")
+            legend.position = "bottom",
+            axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
     if(facet_location == TRUE){
       all_vedba <- all_vedba + facet_wrap(~Operator)
     }
@@ -171,7 +171,8 @@ sigfox_download <- function(ID = NULL, # PIT-tag
       geom_path()+
       geom_point()+ ylab("24h Activity (%)")+
       theme(legend.key.size = unit(.1, "cm"), legend.text = element_text(size=6),
-            legend.position = "bottom")
+            legend.position = "bottom",
+            axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
     if(facet_location == TRUE){
       all_activity <- all_activity + facet_wrap(~Operator)
     }
