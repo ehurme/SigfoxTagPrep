@@ -10,7 +10,7 @@ p_load(tidyverse, data.table, # utilities
        update = FALSE)
 
 ## deployments must be a data frame with ID, deployment day,
-deployments = readxl::read_xlsx("//10.0.16.7/grpDechmann/Bat projects/Noctule captures/2023/July, August 2023 TinyFoxBatt deployments.xlsx", sheet = 1)
+deployments = readxl::read_xlsx("//10.0.16.7/grpDechmann/Bat projects/Noctule captures/2023/July, August 2023 TinyFoxBatt deployments_EH.xlsx", sheet = 1)
 deployments$latitude = sapply(strsplit(deployments$location, ","), "[", 1) %>% as.numeric()
 deployments$longitude = sapply(strsplit(deployments$location, ","), "[", 2) %>% as.numeric()
 
@@ -181,3 +181,5 @@ ggplot() +
                    max(sp23$latitude, na.rm = TRUE)+buffer))+
   theme(legend.key.size = unit(.1, "cm"), legend.text = element_text(size=6),
         legend.position = "bottom")+facet_wrap(~Device)
+
+save(deployments, summer23, brittany23, spain23, poland23, file = "../../../Dropbox/MPI/Noctule/Data/rdata/summer23.robj")
