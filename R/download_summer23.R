@@ -84,4 +84,4 @@ d_poland <- deployments[deployments$latitude > 50,]
 
 
 
-save(deployments, summer23, brittany, toulouse, spain, poland, file = "../../../Dropbox/MPI/Noctule/Data/rdata/summer23.robj")
+save(deployments, summer23, brittany, toulouse, spain, file = "../../../Dropbox/MPI/Noctule/Data/rdata/summer23.robj")
