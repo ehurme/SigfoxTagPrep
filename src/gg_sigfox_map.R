@@ -2,7 +2,8 @@ gg_sigfox_map <- function(data, facet_location = TRUE,
                           legend = TRUE,
                           save_maps = TRUE, buffer = 1,
                           save_path = "../../../Dropbox/MPI/Noctule/Plots/Summer23/"){
-  require(ggplot2)
+  require(pacman)
+  p_load(ggplot2, ggpubr)
   world_map <- map_data("world")
   keep_countries <- c("Spain", "Portugal", "France",
                       "Belgium", "Netherlands", "Denmark",
