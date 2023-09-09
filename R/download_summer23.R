@@ -15,7 +15,6 @@ deployments = readxl::read_xlsx("//10.0.16.7/grpDechmann/Bat projects/Noctule ca
 deployments$latitude = sapply(strsplit(deployments$location, ","), "[", 1) %>% as.numeric()
 deployments$longitude = sapply(strsplit(deployments$location, ","), "[", 2) %>% as.numeric()
 
-
 # View(deployments)
 deployments = deployments[deployments$`tag ID` != "0120D1F8",]
 deployments$`tag ID` %>% unique
@@ -85,3 +84,6 @@ d_poland <- deployments[deployments$latitude > 50,]
 
 
 save(deployments, summer23, brittany, toulouse, spain, file = "../../../Dropbox/MPI/Noctule/Data/rdata/summer23.robj")
+
+
+with(belgium[belgium$Device == "120CF91",], plot(datetime, `24h Active (%)`, type = "l"))
