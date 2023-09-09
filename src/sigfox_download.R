@@ -1,23 +1,23 @@
 # function to download tracks
 
-sigfox_download <- function(ID = NULL, # PIT-tag
-                            ring = NULL,
-                            tag_ID = NULL, # biologger ID
-                            attachment_type = NULL, # glue or collar
-                            capture_weight = NULL, # weight in grams
-                            capture_time = NULL, # date time
-                            FA_length = NULL, # length in mm
-                            tag_weight = NULL, # weight in grams
-                            sex = NULL,
-                            age = NULL,
-                            repro_status = NULL,
-                            species = NULL,
-                            release_time = NULL,
-                            latitude = NULL,
-                            longitude = NULL,
-                            roost = NULL){
+sigfox_download <- function(ID = NA, # PIT-tag
+                            ring = NA,
+                            tag_ID = NA, # biologger ID
+                            attachment_type = NA, # glue or collar
+                            capture_weight = NA, # weight in grams
+                            capture_time = NA, # date time
+                            FA_length = NA, # length in mm
+                            tag_weight = NA, # weight in grams
+                            sex = NA,
+                            age = NA,
+                            repro_status = NA,
+                            species = NA,
+                            release_time = NA,
+                            latitude = NA,
+                            longitude = NA,
+                            roost = NA){
   require(pacman)
-  p_load(tidyverse, data.table, # utilities
+  p_load(tidyverse, data.table, lubridate, # utilities
          rvest, # scrape html
          stringr, # clean strings
          update = FALSE)
