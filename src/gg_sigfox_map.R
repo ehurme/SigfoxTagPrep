@@ -1,5 +1,5 @@
 gg_sigfox_map <- function(data, facet_location = TRUE,
-                          legend = TRUE,
+                          legend = TRUE, point_size = 1,
                           save_maps = TRUE, buffer = 1,
                           save_path = "../../../Dropbox/MPI/Noctule/Plots/Summer23/"){
   require(pacman)
@@ -22,8 +22,10 @@ gg_sigfox_map <- function(data, facet_location = TRUE,
                    aes(x = long, y = lat, group = group), fill = "lightgrey", color = "gray") +
       xlab("Longitude")+ylab("Latitude")+
       coord_equal()+
+      geom_path(data = data,
+                aes(longitude, latitude, group = Device), col = 1, alpha = 0.2)+
       geom_point(data = data,
-                 aes(longitude, latitude, col = Device))+ #, shape = sex, size = age))+
+                 aes(longitude, latitude, col = Device), size = point_size)+
       coord_map(projection="mercator",
                 xlim=c(min(data$longitude, na.rm = TRUE)-buffer,
                        max(data$longitude, na.rm = TRUE)+buffer),
@@ -37,7 +39,7 @@ gg_sigfox_map <- function(data, facet_location = TRUE,
 
     all_vedba <- ggplot(data, aes(x = datetime, y = vedba, col = Device))+
       geom_path()+
-      geom_point()+
+      geom_point(size = point_size)+
       theme(legend.key.size = unit(.1, "cm"), legend.text = element_text(size=6),
             legend.position = "bottom",
             axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
@@ -51,7 +53,7 @@ gg_sigfox_map <- function(data, facet_location = TRUE,
     all_activity <- ggplot(data, aes(x = datetime, y = data$`24h Active (%)`,
                                      col = Device))+
       geom_path()+
-      geom_point()+ ylab("24h Activity (%)")+
+      geom_point(size = point_size)+ ylab("24h Activity (%)")+
       theme(legend.key.size = unit(.1, "cm"), legend.text = element_text(size=6),
             legend.position = "bottom",
             axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
@@ -63,8 +65,9 @@ gg_sigfox_map <- function(data, facet_location = TRUE,
     }
 
       map_vedba <- ggarrange(map, all_vedba, common.legend = TRUE)
-      map_vedba_activity <- ggarrange(ggarrange(map, legend = "right"), ggarrange(all_vedba, all_activity, legend = "none"),
-                nrow = 2)
+      map_vedba_activity <- ggarrange(ggarrange(map, legend = "bottom"),
+                                      ggarrange(all_vedba, all_activity, legend = "none", nrow = 2),
+                nrow = 1, widths = c(2,1))
   if(save_maps == TRUE){
       ggsave(map_vedba, filename = paste0(save_path, "map_vedba.png"))
       ggsave(map_vedba_activity, filename = paste0(save_path, "map_vedba_activity.png"))

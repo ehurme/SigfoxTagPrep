@@ -51,7 +51,9 @@ d_belgium$`tag ID` %>% unique
 belgium <- summer23[summer23$species == 'Nyctalus leisleri',]
 belgium$Device %>% unique
 b_plots <- gg_sigfox_map(data = belgium, facet_location = FALSE,
-              save_path = "../../../Dropbox/MPI/Noctule/Plots/Summer23/belgium_")
+                         save_path = "../../../Dropbox/MPI/Noctule/Plots/Summer23/belgium_")
+b_plots <- gg_sigfox_map(data = belgium[belgium$datetime > ymd("2023-08-30"),], facet_location = FALSE,
+              save_path = "../../../Dropbox/MPI/Noctule/Plots/Summer23/belgium_recent_")
 plot(date(belgium$datetime), belgium$datetime %>% hour)
 ggplot(belgium, aes(date(datetime), hour(datetime), col = Device))+
   geom_point()+facet_wrap(~Device)+ylab("hour")+xlab("date")
@@ -87,3 +89,4 @@ save(deployments, summer23, brittany, toulouse, spain, file = "../../../Dropbox/
 
 
 with(belgium[belgium$Device == "120CF91",], plot(datetime, `24h Active (%)`, type = "l"))
+

@@ -3,7 +3,7 @@ p_load(move, janitor, data.table, lubridate, tidyverse, moveVis, basemaps)
 source("./../../../Desktop/movebank_login.R")
 source("src/df_to_movestack.R")
 
-n <- df_to_movestack(belgium)
+n <- df_to_movestack(full[full$longitude < 7,])
 use_multicore(n_cores = 20)
 
 # align move_data to a uniform time scale
