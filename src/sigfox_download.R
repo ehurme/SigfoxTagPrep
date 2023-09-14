@@ -59,13 +59,14 @@ sigfox_download <- function(ID = NA, # PIT-tag
         html_nodes("table") %>%
         html_table(fill = T)
     })
-
+    d[[2]]$tag_ID <- bats[i]
     df <- rbind(df, d[[2]])
   }
 
   # clean and format data
   n <- unique(df)
   n <- n[n$Device != "",]
+  n$Device <- as.character(n$Device)
   tags <- n$Device %>% unique
   tags[order(tags)]
 
@@ -80,7 +81,7 @@ sigfox_download <- function(ID = NA, # PIT-tag
   sp23 <- data.table()
   i = 2
   for(i in 1:nrow(data)){
-    idx <- which(n$Device == data$tag_ID[i])
+    idx <- which(n$tag_ID == data$tag_ID[i])
     if(length(idx) > 0){
       temp <- n[idx,]
       if(!is.na(data$capture_time[i])){

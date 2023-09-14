@@ -9,7 +9,26 @@ p_load(tidyverse, data.table, # utilities
        sf, raster, rnaturalearth, rnaturalearthdata, maps,# plot maps
        update = FALSE)
 
+weird_bats <- c("12102E3", "120E836")
+w <- sigfox_download(tag_ID = weird_bats)
+wp <- gg_sigfox_map(n,facet_location = FALSE,
+                   save_path = "../../../Dropbox/MPI/Noctule/Plots/Summer23/weird_belgium_")
+w$Device %>% table()
 
-new_bats <- c("120F1B4", "120F576")
+new_bats <- c("120F1B4", "120F576", "120D38F")
 n <- sigfox_download(tag_ID = new_bats)
-p <- gg_sigfox_map(n)
+n$Device %>% table()
+p <- gg_sigfox_map(n,facet_location = FALSE,
+                   save_path = "../../../Dropbox/MPI/Noctule/Plots/Summer23/new_belgium_")
+d_belgium <- deployments[which(deployments$species == "leisleri"),]
+o <- sigfox_download(tag_ID = d_belgium$`tag ID`)
+d_belgium$`tag ID` %>% unique
+o$Device %>% unique
+
+
+full <- rbind(n,o)
+b <- gg_sigfox_map(full[full$longitude < 7,],#[full$datetime > ymd("2023-09-05"),],
+                   facet_location = FALSE,
+                   save_path = "../../../Dropbox/MPI/Noctule/Plots/Summer23/full_belgium_")
+b[[1]]
+
