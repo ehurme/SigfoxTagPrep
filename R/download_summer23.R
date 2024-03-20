@@ -1,6 +1,8 @@
 # download and plot summer 23 data
 source("./src/sigfox_download.R")
 source("./src/gg_sigfox_map.R")
+source("../NoctuleMigration/scr/sensor_plot.R")
+source("../NoctuleMigration/scr/dailydistance.R")
 
 require(pacman)
 p_load(tidyverse, data.table, # utilities
@@ -52,8 +54,9 @@ belgium <- summer23[summer23$species == 'Nyctalus leisleri',]
 belgium$Device %>% unique
 b_plots <- gg_sigfox_map(data = belgium, facet_location = FALSE,
                          save_path = "../../../Dropbox/MPI/Noctule/Plots/Summer23/belgium_")
-b_plots <- gg_sigfox_map(data = belgium[belgium$datetime > ymd("2023-08-30"),], facet_location = FALSE,
+b_plots <- gg_sigfox_map(data = belgium[belgium$datetime > Sys.Date()-7,], facet_location = FALSE,
               save_path = "../../../Dropbox/MPI/Noctule/Plots/Summer23/belgium_recent_")
+b_plots[[3]]
 plot(date(belgium$datetime), belgium$datetime %>% hour)
 ggplot(belgium, aes(date(datetime), hour(datetime), col = Device))+
   geom_point()+facet_wrap(~Device)+ylab("hour")+xlab("date")
@@ -77,16 +80,17 @@ b_plots <- gg_sigfox_map(data = brittany, facet_location = FALSE,
                          save_path = "../../../Dropbox/MPI/Noctule/Plots/Summer23/brittany_")
 
 d_toulouse <- deployments[which(deployments$species == "lasiopterus" & deployments$latitude > 40),]
-toulouse <- summer23[which(summer23$species == "Nyctalus lasiopterus" & summer23$latitude > 40),]
+toulouse <- summer23[which(summer23$species == "Nyctalus lasiopterus" & summer23$latitude > 40 &
+                             summer23$datetime > ymd("2023-09-01")),]
 t_plots <- gg_sigfox_map(data = toulouse, facet_location = FALSE,
                          save_path = "../../../Dropbox/MPI/Noctule/Plots/Summer23/toulouse_")
-
+t_plots[[1]]
+ggarrange(t_plots[[2]]+theme_bw(), t_plots[[3]]+theme_bw(),
+          common.legend = TRUE, ncol = 1, align = "hv")
 d_poland <- deployments[deployments$latitude > 50,]
 
-
-
 save(deployments, summer23, brittany, toulouse, spain, file = "../../../Dropbox/MPI/Noctule/Data/rdata/summer23.robj")
-
+load("../../../Dropbox/MPI/Noctule/Data/rdata/summer23.robj")
 
 with(belgium[belgium$Device == "120CF91",], plot(datetime, `24h Active (%)`, type = "l"))
 

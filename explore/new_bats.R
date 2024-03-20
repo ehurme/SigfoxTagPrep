@@ -1,5 +1,5 @@
-source("./src/sigfox_download.R")
-source("./src/gg_sigfox_map.R")
+source("../../SigfoxTagPrep/src/sigfox_download.R")
+source("../../SigfoxTagPrep/src/gg_sigfox_map.R")
 
 require(pacman)
 p_load(tidyverse, data.table, # utilities
@@ -11,7 +11,7 @@ p_load(tidyverse, data.table, # utilities
 
 weird_bats <- c("12102E3", "120E836")
 w <- sigfox_download(tag_ID = weird_bats)
-wp <- gg_sigfox_map(n,facet_location = FALSE,
+wp <- gg_sigfox_map(w,facet_location = FALSE,
                    save_path = "../../../Dropbox/MPI/Noctule/Plots/Summer23/weird_belgium_")
 w$Device %>% table()
 
@@ -27,8 +27,15 @@ o$Device %>% unique
 
 
 full <- rbind(n,o)
-b <- gg_sigfox_map(full[full$longitude < 7,],#[full$datetime > ymd("2023-09-05"),],
+b <- gg_sigfox_map(full[which(full$longitude < 7),],
+  #full[which(full$longitude < 7 & full$datetime > Sys.Date()-7 & full$`24h Active (%)` > 0),],#[full$datetime > ymd("2023-09-05"),],
                    facet_location = FALSE,
                    save_path = "../../../Dropbox/MPI/Noctule/Plots/Summer23/full_belgium_")
 b[[1]]
+b[[2]]
+b[[3]]
 
+save(full, file = "../../../Dropbox/MPI/Noctule/Data/rdata/leislers23.robj")
+
+deployments$`mass of bat`[deployments$species == "leisleri"] |> summary()
+deployments[which(deployments$species == "leisleri"),] |> View()

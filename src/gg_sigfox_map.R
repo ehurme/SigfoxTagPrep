@@ -23,9 +23,9 @@ gg_sigfox_map <- function(data, facet_location = TRUE,
       xlab("Longitude")+ylab("Latitude")+
       coord_equal()+
       geom_path(data = data,
-                aes(longitude, latitude, group = Device), col = 1, alpha = 0.2)+
+                aes(longitude, latitude, group = tag_ID), col = 1, alpha = 0.2)+
       geom_point(data = data,
-                 aes(longitude, latitude, col = Device), size = point_size)+
+                 aes(longitude, latitude, col = tag_ID), size = point_size)+
       coord_map(projection="mercator",
                 xlim=c(min(data$longitude, na.rm = TRUE)-buffer,
                        max(data$longitude, na.rm = TRUE)+buffer),
@@ -37,7 +37,7 @@ gg_sigfox_map <- function(data, facet_location = TRUE,
       map <- map+theme(legend.position = "none")
     }
 
-    all_vedba <- ggplot(data, aes(x = datetime, y = vedba, col = Device))+
+    all_vedba <- ggplot(data, aes(x = datetime, y = vedba, col = tag_ID))+
       geom_path()+
       geom_point(size = point_size)+
       theme(legend.key.size = unit(.1, "cm"), legend.text = element_text(size=6),
@@ -51,12 +51,23 @@ gg_sigfox_map <- function(data, facet_location = TRUE,
     }
 
     all_activity <- ggplot(data, aes(x = datetime, y = data$`24h Active (%)`,
-                                     col = Device))+
+                                     col = tag_ID))+
       geom_path()+
       geom_point(size = point_size)+ ylab("24h Activity (%)")+
       theme(legend.key.size = unit(.1, "cm"), legend.text = element_text(size=6),
             legend.position = "bottom",
             axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+
+    all_temp <- ggplot(data, aes(x = datetime, y = `24h Max. Temperature (°C)`,
+                                     col = tag_ID))+
+      geom_path()+
+      geom_point(size = point_size)+ ylab("Temperature")+
+      geom_path(aes(x = datetime, y = `24h Min. Temperature (°C)`, col = tag_ID), lty = 2)+
+      geom_point(aes(x = datetime, y = `24h Min. Temperature (°C)`, col = tag_ID), size = point_size)+
+      theme(legend.key.size = unit(.1, "cm"), legend.text = element_text(size=6),
+            legend.position = "bottom",
+            axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+    all_temp+theme_bw()
     if(facet_location == TRUE){
       all_activity <- all_activity + facet_wrap(~Operator)
     }
@@ -72,5 +83,5 @@ gg_sigfox_map <- function(data, facet_location = TRUE,
       ggsave(map_vedba, filename = paste0(save_path, "map_vedba.png"))
       ggsave(map_vedba_activity, filename = paste0(save_path, "map_vedba_activity.png"))
   }
-      return(list(map, all_vedba, all_activity))
+      return(list(map, all_vedba, all_activity, all_temp))
 }

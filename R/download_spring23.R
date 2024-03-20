@@ -37,11 +37,17 @@ n23 <- sigfox_download(ID = deployments$bat.id,
                 latitude = coordinates_df$latitude,
                 longitude = coordinates_df$longitude,
                 roost = deployments$roost)
-write.csv(n23[which(!is.na(n23$longitude)),], file = "../../../Dropbox/MPI/Noctule/Data/TinyFoxBattNoctules/Common_Noctule_migration_Spring23.csv", row.names = FALSE)
+write.csv(n23[which(!is.na(n23$longitude)),],
+          file = "../../../Dropbox/MPI/Noctule/Data/TinyFoxBattNoctules/Common_Noctule_migration_Spring23.csv", row.names = FALSE)
+p23 <- gg_sigfox_map(n23)
+p23[[1]]
 
-
-write.csv(n23[which(is.na(n23$longitude)),], file = "../../../Dropbox/MPI/Noctule/Data/TinyFoxBattNoctules/Common_Noctule_missing_locations_migration_Spring23.csv", row.names = FALSE)
+write.csv(n23[which(is.na(n23$longitude)),],
+          file = "../../../Dropbox/MPI/Noctule/Data/TinyFoxBattNoctules/Common_Noctule_missing_locations_migration_Spring23.csv", row.names = FALSE)
 
 
 with(n23[n23$sex == "M",], plot(longitude, latitude, asp = 1, col = factor(Device)))
 lines(countries)
+
+n23$tag_ID[which(is.na(n23$longitude))] %>% table()
+
