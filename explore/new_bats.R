@@ -1,5 +1,5 @@
-source("../../SigfoxTagPrep/src/sigfox_download.R")
-source("../../SigfoxTagPrep/src/gg_sigfox_map.R")
+source("./src/sigfox_download.R")
+source("./src/gg_sigfox_map.R")
 
 require(pacman)
 p_load(tidyverse, data.table, # utilities
@@ -36,6 +36,7 @@ b[[2]]
 b[[3]]
 
 save(full, file = "../../../Dropbox/MPI/Noctule/Data/rdata/leislers23.robj")
+load("../../../Dropbox/MPI/Noctule/Data/rdata/leislers23.robj")
 
 deployments$`mass of bat`[deployments$species == "leisleri"] |> summary()
 deployments[which(deployments$species == "leisleri"),] |> View()
