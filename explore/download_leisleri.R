@@ -1,6 +1,15 @@
 # download leisleri data
 df <- summer23
 
+l <- df[df$species == "Nyctalus leisleri",]
+plot(l$longitude, l$latitude, asp = 1, col = factor(l$Device))
+l$Device |> table() |> length()
+# migrated bats
+m <- l[l$latitude < 50,]
+m$Device |> table() |> length()
+
+
+
 l23 <- df[df$datetime > "2023-08-22" & df$activity > 0 & df$latitude > 45 & df$longitude < 10,]
 plot(l23$longitude, l23$latitude, asp = 1, col = factor(l23$Device))
 lines(countries)

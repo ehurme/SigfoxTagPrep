@@ -4,6 +4,7 @@ source("./src/gg_sigfox_map.R")
 
 require(pacman)
 p_load(tidyverse, data.table, # utilities
+       dplyr,
        ggplot2, ggpubr, # plot
        rvest, # scrape html
        stringr, # clean strings
@@ -86,7 +87,10 @@ d_poland <- deployments[deployments$latitude > 50,]
 
 
 save(deployments, summer23, brittany, toulouse, spain, file = "../../../Dropbox/MPI/Noctule/Data/rdata/summer23.robj")
-
+load("../../../Dropbox/MPI/Noctule/Data/rdata/summer23.robj")
 
 with(belgium[belgium$Device == "120CF91",], plot(datetime, `24h Active (%)`, type = "l"))
 
+summer23 |> reframe(country = last(Operator),
+                    species = first(species),
+                    .by = Device) |> View()
