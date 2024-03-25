@@ -36,3 +36,6 @@ df_to_movestack <- function(data, species = "Nyctalus noctula"){
   datas <- move::moveStack(datal)
   return(datas)
 }
+
+
+
