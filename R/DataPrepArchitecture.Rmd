@@ -1,0 +1,18 @@
+---
+title: "Readme"
+output: html_document
+date: "2024-03-25"
+---
+
+Architecture for ICARUS TinyfoxBatt tag data using the original firmware
+
+1. Scrape data from website
+2. Add metadata from capture sheet
+3. Clean data
+  a. clean names
+  b. add day night times
+  c. determine bursts
+  d. calculate change in VeDBA
+  e. calculate change in distance
+  
+  

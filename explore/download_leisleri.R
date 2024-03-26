@@ -1,9 +1,41 @@
 # download leisleri data
-df <- summer23
-
-l <- df[df$species == "Nyctalus leisleri",]
+library(pacman)
+p_load(tidyverse, lubridate,
+       sf, rnaturalearth,
+       mapview, mapdeck,
+       move2
+       )
+load("../../../Dropbox/MPI/Noctule/Data/rdata/summer23.robj")
+l <- summer23[summer23$species == "Nyctalus leisleri",]
 plot(l$longitude, l$latitude, asp = 1, col = factor(l$Device))
 l$Device |> table() |> length()
+
+l
+
+m <- sigfox_to_move2(l)
+m2 <- m[[1]]
+
+m2 %>% group_by(device) %>%
+  mutate(diff_vedba = c(diff(total_ve_dba), NA),
+         diff_vedba = c(diff(datetime), NA)) -> m2
+m2
+m2$diff_vedba %>% hist()
+
+m2 %>%
+  filter(!st_is_empty(.)) %>%
+  mt_filter_per_interval(unit = "1 day") -> test
+
+
+mapview(m2, zcol = "diff_vedba", layer.name = "24hr Activity %", color = heat.colors(8))+
+  mapView(m[[2]], layer.name = "Tracks")
+mapview(m[[2]])
+?mapview
+
+dat <- mt_read(mt_example());mapView(dat, zcol='eobs:used-time-to-get-fix')+ mapView(mt_track_lines(dat), zcol="individual-local-identifier",color=heat.colors(8), layer.name="Tracks")
+
+mapview(breweries)
+breweries |> is()
+m[[1]] |> is()
 # migrated bats
 m <- l[l$latitude < 50,]
 m$Device |> table() |> length()
