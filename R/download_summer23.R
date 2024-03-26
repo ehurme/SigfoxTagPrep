@@ -1,6 +1,7 @@
 # download and plot summer 23 data
 source("./src/sigfox_download.R")
 source("./src/gg_sigfox_map.R")
+source(".scr/determine_day_night.R")
 source("../NoctuleMigration/scr/sensor_plot.R")
 source("../NoctuleMigration/scr/dailydistance.R")
 

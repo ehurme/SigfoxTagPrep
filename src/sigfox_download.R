@@ -49,18 +49,38 @@ sigfox_download <- function(ID = NA, # PIT-tag
   df <- data.table()
   i = 1
   # download data
-  for(i in 1:length(bats)){
+  for(i in seq_along(bats)) {
     print(paste0("bat ", bats[i], ": ", i, " out of ", length(bats)))
-    url <-  paste0("https://mpiab.4lima.de/batt.php?id=", bats[i])
+    url <- paste0("https://mpiab.4lima.de/batt.php?id=", bats[i])
 
-    try({
-      d <- url %>%
-        read_html() %>%
-        html_nodes("table") %>%
-        html_table(fill = T)
-    })
-    d[[2]]$tag_ID <- bats[i]
-    df <- rbind(df, d[[2]])
+    # Initialize 'd' outside the try block
+    d <- NULL
+
+    # Retry mechanism
+    attempt <- 1
+    max_attempts <- 5
+    while(is.null(d) && attempt <= max_attempts) {
+      try({
+        d <- url %>%
+          read_html() %>%
+          html_nodes("table") %>%
+          html_table(fill = TRUE)
+        # Assign tag_ID only if 'd' is successfully retrieved
+        if (!is.null(d) && length(d) >= 2) {
+          d[[2]]$tag_ID <- bats[i]
+          df <- rbind(df, d[[2]])
+        }
+      }, silent = TRUE) # silent=TRUE to suppress warnings/errors in try
+
+      if(is.null(d)) {
+        Sys.sleep(2) # Wait for 2 seconds before retrying
+        attempt <- attempt + 1
+      }
+    }
+
+    if(is.null(d)) {
+      message(paste("Failed to retrieve data for bat", bats[i], "after", max_attempts, "attempts."))
+    }
   }
 
   # clean and format data
@@ -72,25 +92,25 @@ sigfox_download <- function(ID = NA, # PIT-tag
 
   n$latitude <- sapply(n$Position %>% strsplit(","), "[", 1) %>% as.numeric
   n$longitude <- sapply(n$Position %>% strsplit(","), "[", 2) %>% as.numeric
-  n$datetime <- dmy_hms(n$`Time (Paris)`, tz = "Europe/Berlin")
+  n$timestamp <- dmy_hms(n$`Time (Paris)`, tz = "Europe/Berlin")
   n$vedba <- n$`Total VeDBA`
 
   # add deployment info
   data$capture_time
   # filter data by deployments
-  sp23 <- data.table()
+  data_deployment <- data.table()
   i = 2
   for(i in 1:nrow(data)){
     idx <- which(n$tag_ID == data$tag_ID[i])
     if(length(idx) > 0){
       temp <- n[idx,]
       if(!is.na(data$capture_time[i])){
-        temp <- temp[temp$datetime > data$capture_time[i],]
+        temp <- temp[temp$timestamp > data$capture_time[i],]
       }
       temp$pit_tag <- data$ID[i]
       temp$ring <- data$ring[i]
       temp$attachment_type <- data$attachment_type[i]
-      temp$capture_datetime <- data$capture_time[i]
+      temp$capture_timestamp <- data$capture_time[i]
       temp$tag_weight <- data$tag_weight[i]
       temp$bat_weight <- data$capture_weight[i]
       temp$FA_length <- data$FA_length[i]
@@ -102,9 +122,8 @@ sigfox_download <- function(ID = NA, # PIT-tag
       temp$capture_longitude <- data$longitude[i]
       temp$roost <- data$roost[i]
 
-      sp23 <- rbind(sp23, temp)
+      data_deployment <- rbind(data_deployment, temp)
     }
   }
-
-  return(sp23)
+  return(data_deployment)
 }

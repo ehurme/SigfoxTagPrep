@@ -1,16 +1,16 @@
 # download leisleri data
 library(pacman)
+# devtools::install_git('https://gitlab.com/bartk/move2.git')
 p_load(tidyverse, lubridate,
        sf, rnaturalearth,
        mapview, mapdeck,
        move2
        )
+source("./src/sigfox_to_move2.R")
 load("../../../Dropbox/MPI/Noctule/Data/rdata/summer23.robj")
 l <- summer23[summer23$species == "Nyctalus leisleri",]
 plot(l$longitude, l$latitude, asp = 1, col = factor(l$Device))
 l$Device |> table() |> length()
-
-l
 
 m <- sigfox_to_move2(l)
 m2 <- m[[1]]
