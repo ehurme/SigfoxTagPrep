@@ -6,13 +6,14 @@ p_load(tidyverse, lubridate,
        mapview, mapdeck,
        move2
        )
-source("./src/sigfox_to_move2.R")
+#source("./src/sigfox_to_move2.R")
 load("../../../Dropbox/MPI/Noctule/Data/rdata/summer23.robj")
 l <- summer23[summer23$species == "Nyctalus leisleri",]
 plot(l$longitude, l$latitude, asp = 1, col = factor(l$Device))
 l$Device |> table() |> length()
 
 m <- sigfox_to_move2(l)
+ggsave(m[[4]], file = "fig/N_leisleri.png")
 m2 <- m[[1]]
 
 test <- m2 %>% filter(timestamp > ymd("2023-09-01"))
