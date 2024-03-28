@@ -1,0 +1,40 @@
+---
+title: "Example TinyFoxBatt Download"
+output: html_document
+date: "2024-03-28"
+---
+
+ICARUS TinyFoxBatt Tag prep
+```{r setup, include=FALSE}
+require(pacman)
+p_load(tidyverse,
+       mapview)
+
+```
+
+
+# Import your tag data
+```{r}
+capture_sheet <- data.frame(tag_id = c("120CC52", "120AFC0", "120CCDB"),
+                            bat_weight = NA,
+                            tag_weight = NA,
+                            ring = NA)
+```
+
+
+# Download data
+```{r}
+data <- sigfox_download(tag_ID = capture_sheet$tag_id)
+```
+# Process data 
+```{r}
+deployment_date <- ymd("2024-03-22")
+m <- sigfox_to_move2(data %>% filter(timestamp > deployment_date))
+```
+
+# View data on an interactive map
+```{r}
+mapview(m[[1]], zcol = "x24h_active_percent", layer.name = "24hr Activity %", color = heat.colors(8))+
+  mapView(m[[2]], layer.name = "Tracks", color = rainbow(10))
+```
+

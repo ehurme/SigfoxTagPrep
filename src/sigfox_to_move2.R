@@ -12,6 +12,9 @@ sigfox_to_move2 <- function(data, plot = TRUE, legend = FALSE){
   sourceDir("./src")
 
   data <- data |> clean_names()
+  if(is.null(data$timestamp)){
+    data$timestamp <- data$datetime
+  }
 
   data$radius <- sapply(strsplit(data$radius_m_source_status, split = " "), "[", 1) %>% as.numeric
 
