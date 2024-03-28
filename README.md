@@ -20,5 +20,5 @@ d. plot the data in a static map
 # 3. View data on an interactive map
 We can take the ```move2``` tracks and plot them on an interactive ```mapview()``` map. If you click on a point you can then see all sensor and metadata associated with that location.
 
-See the example in the vignettes folder for more details.
+See the example code for more details.
 
