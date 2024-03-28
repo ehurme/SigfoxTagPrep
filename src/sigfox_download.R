@@ -22,7 +22,7 @@ sigfox_download <- function(ID = NA, # PIT-tag
          stringr, # clean strings
          update = FALSE)
 
-  data <- data.frame(ID, # PIT-tag
+  capture_data <- data.frame(ID, # PIT-tag
              ring,
              tag_ID, # biologger ID
              attachment_type, # glue or collar
@@ -40,8 +40,8 @@ sigfox_download <- function(ID = NA, # PIT-tag
              roost)
 
   # remove leading 0s from tag IDs
-  data$tag_ID <- str_remove(data$tag_ID, "^0+")
-  bats <- unique(data$tag_ID)
+  capture_data$tag_ID <- str_remove(capture_data$tag_ID, "^0+")
+  bats <- unique(capture_data$tag_ID)
   # make sure tag names are 7 characters
   bats <- bats[nchar(bats) == 7] %>% na.omit()
 
@@ -90,37 +90,41 @@ sigfox_download <- function(ID = NA, # PIT-tag
   tags <- n$Device %>% unique
   tags[order(tags)]
 
-  n$latitude <- sapply(n$Position %>% strsplit(","), "[", 1) %>% as.numeric
-  n$longitude <- sapply(n$Position %>% strsplit(","), "[", 2) %>% as.numeric
+  if(!is.null(n$Position)){
+    n$latitude <- sapply(n$Position %>% strsplit(","), "[", 1) %>% as.numeric
+    n$longitude <- sapply(n$Position %>% strsplit(","), "[", 2) %>% as.numeric
+  }
+
   n$timestamp <- dmy_hms(n$`Time (Paris)`, tz = "Europe/Berlin")
   n$vedba <- n$`Total VeDBA`
 
   # add deployment info
-  data$capture_time
+  # capture_data$capture_time
+
   # filter data by deployments
   data_deployment <- data.table()
   i = 2
-  for(i in 1:nrow(data)){
-    idx <- which(n$tag_ID == data$tag_ID[i])
+  for(i in 1:nrow(capture_data)){
+    idx <- which(n$tag_ID == capture_data$tag_ID[i])
     if(length(idx) > 0){
       temp <- n[idx,]
-      if(!is.na(data$capture_time[i])){
-        temp <- temp[temp$timestamp > data$capture_time[i],]
+      if(!is.na(capture_data$capture_time[i])){
+        temp <- temp[temp$timestamp > capture_data$capture_time[i],]
       }
-      temp$pit_tag <- data$ID[i]
-      temp$ring <- data$ring[i]
-      temp$attachment_type <- data$attachment_type[i]
-      temp$capture_timestamp <- data$capture_time[i]
-      temp$tag_weight <- data$tag_weight[i]
-      temp$bat_weight <- data$capture_weight[i]
-      temp$FA_length <- data$FA_length[i]
-      temp$sex <- data$sex[i]
-      temp$age <- data$age[i]
-      temp$repro_status <- data$repro_status[i]
-      temp$species <- data$species[i]
-      temp$capture_latitude <- data$latitude[i]
-      temp$capture_longitude <- data$longitude[i]
-      temp$roost <- data$roost[i]
+      temp$pit_tag <- capture_data$ID[i]
+      temp$ring <- capture_data$ring[i]
+      temp$attachment_type <- capture_data$attachment_type[i]
+      temp$capture_timestamp <- capture_data$capture_time[i]
+      temp$tag_weight <- capture_data$tag_weight[i]
+      temp$bat_weight <- capture_data$capture_weight[i]
+      temp$FA_length <- capture_data$FA_length[i]
+      temp$sex <- capture_data$sex[i]
+      temp$age <- capture_data$age[i]
+      temp$repro_status <- capture_data$repro_status[i]
+      temp$species <- capture_data$species[i]
+      temp$capture_latitude <- capture_data$latitude[i]
+      temp$capture_longitude <- capture_data$longitude[i]
+      temp$roost <- capture_data$roost[i]
 
       data_deployment <- rbind(data_deployment, temp)
     }

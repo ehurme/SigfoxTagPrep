@@ -4,36 +4,49 @@ output: html_document
 date: "2024-03-28"
 ---
 
-ICARUS TinyFoxBatt Tag prep
-```{r setup, include=FALSE}
+# ICARUS TinyFoxBatt Tag prep
+
+Here we provide code to download tag data, do some basic data cleaning steps, and then plot the tracks.
+
+```{r setup, echo=FALSE, message=FALSE, error=FALSE, warning=FALSE}
 require(pacman)
 p_load(tidyverse,
        mapview)
 
 ```
 
+# 1. Import your tag data
+Provide the tag IDs and all other capture data you have available for your bats.
 
-# Import your tag data
-```{r}
+```{r import_data}
 capture_sheet <- data.frame(tag_id = c("120CC52", "120AFC0", "120CCDB"),
                             bat_weight = NA,
                             tag_weight = NA,
-                            ring = NA)
+                            ring = NA,
+                            species = rep("N. noctula", 3))
 ```
 
 
-# Download data
-```{r}
-data <- sigfox_download(tag_ID = capture_sheet$tag_id)
+# 2. Download the data
+All Sigfox messages should be stored on a database associated with the tag. Here we can include all the fields from the capture sheet to add to our tracks.
+```{r download_data}
+data <- sigfox_download(tag_ID = capture_sheet$tag_id,
+                        species = capture_sheet$species)
 ```
 # Process data 
-```{r}
+Here we can do some basic processing and cleaning steps to the data
+a. remove locations before deployment
+b. format the tracks as a move object
+c. calculate basic movement statistics (e.g. ground speed)
+d. plot the data in a static map
+```{r process_data}
 deployment_date <- ymd("2024-03-22")
 m <- sigfox_to_move2(data %>% filter(timestamp > deployment_date))
 ```
 
-# View data on an interactive map
-```{r}
+# 3. View data on an interactive map
+We can take the move2 tracks and plot them on an interactive mapview map. If you click on a point you can then see all sensor and metadata associated with that location.
+```{r plot_map}
 mapview(m[[1]], zcol = "x24h_active_percent", layer.name = "24hr Activity %", color = heat.colors(8))+
   mapView(m[[2]], layer.name = "Tracks", color = rainbow(10))
 ```

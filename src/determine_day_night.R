@@ -10,13 +10,15 @@ determine_day_night <- function(data) {
   data$sunset <- NA
   data$noon <- NA
 
+  # print("Calculating sun times:")
+
   # Initialize progress bar
-  pb <- txtProgressBar(min = 0, max = nrow(data), style = 3)
+  # pb <- txtProgressBar(min = 0, max = nrow(data), style = 3)
 
   # Loop through each row
   for (i in 1:nrow(data)) {
     # Update progress bar
-    setTxtProgressBar(pb, i)
+    # setTxtProgressBar(pb, i)
     # Ensure that sunrise, sunset, and timestamp are in POSIXct format
     current_time <- as.POSIXct(data$timestamp[i], origin="1970-01-01", tz = "CET")
     current_date <- as.Date(current_time)
@@ -70,7 +72,7 @@ determine_day_night <- function(data) {
   }
 
   # Close the progress bar
-  close(pb)
+  # close(pb)
   data$sunrise <- as.POSIXct(data$sunrise, origin="1970-01-01")
   data$sunset <- as.POSIXct(data$sunset, origin="1970-01-01")
   data$noon <- as.POSIXct(data$noon, origin="1970-01-01")
