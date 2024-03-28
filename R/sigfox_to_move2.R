@@ -25,8 +25,32 @@
 #' }
 #' @export
 sigfox_to_move2 <- function(data, plot = TRUE, legend = FALSE) {
+
+
   # Load required libraries dynamically
   pacman::p_load(tidyverse, dplyr, mapview, sf, move2, janitor, rnaturalearth, update = FALSE)
+
+  # Ensure devtools is available
+  if (!requireNamespace("devtools", quietly = TRUE)) {
+    install.packages("devtools")
+  }
+
+  # Check if move2 is installed and compare version
+  if ("move2" %in% rownames(installed.packages())) {
+    current_version <- packageVersion("move2")
+    required_version <- as.package_version("0.2.7")
+
+    if (current_version < required_version) {
+      message("Updating 'move2' package to the latest version from GitLab.")
+      devtools::install_git('https://gitlab.com/bartk/move2.git')
+    } else {
+      message("Installed 'move2' package is up to date (Version: ", as.character(current_version), ").")
+    }
+  } else {
+    message("'move2' package is not installed. Installing the latest version from GitLab.")
+    devtools::install_git('https://gitlab.com/bartk/move2.git')
+  }
+
 
   # Clean column names for consistency
   data <- data |> janitor::clean_names()
