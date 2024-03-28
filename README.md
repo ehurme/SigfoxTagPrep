@@ -1,4 +1,4 @@
-# ICARUS TinyFoxBatt Data prep
+# ICARUS TinyFoxBatt data prep
 
 Here we provide code to download tag data, do some basic data cleaning steps, and then plot the tracks.
 
@@ -18,7 +18,7 @@ c. calculate basic movement statistics (e.g. ground speed)
 d. plot the data in a static map
 
 # 3. View data on an interactive map
-We can take the move2 tracks and plot them on an interactive ```mapview()``` map. If you click on a point you can then see all sensor and metadata associated with that location.
+We can take the ```move2``` tracks and plot them on an interactive ```mapview()``` map. If you click on a point you can then see all sensor and metadata associated with that location.
 
-See the example vignette for more details.
+See the example in the vignettes folder for more details.
 

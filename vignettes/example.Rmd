@@ -12,7 +12,9 @@ Here we provide code to download tag data, do some basic data cleaning steps, an
 require(pacman)
 p_load(tidyverse,
        mapview)
-
+source("./R/sigfox_download.R")
+source("./R/sigfox_to_move2.R")
+source("./R/tracking_data_processing.R")
 ```
 
 # 1. Import your tag data
