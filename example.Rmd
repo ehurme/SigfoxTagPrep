@@ -43,7 +43,7 @@ c. calculate basic movement statistics (e.g. ground speed)
 d. plot the data in a static map
 ```{r process_data}
 deployment_date <- ymd("2024-03-22")
-m <- sigfox_to_move2(data %>% filter(timestamp > deployment_date))
+m <- sigfox_to_move2(data %>% filter(timestamp > deployment_date), motionless = FALSE)
 ```
 
 # 3. View data on an interactive map
