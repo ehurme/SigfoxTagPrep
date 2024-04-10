@@ -4,8 +4,9 @@
 #' and optionally plots it using move2 and related geospatial packages.
 #'
 #' @param data A data frame containing tracking data.
-#' @param plot Logical; if TRUE, generates a plot of the tracking data.
-#' @param legend Logical; controls the presence of a legend in the plot.
+#' @param plot_tracks Logical; if TRUE, generates a plot of the tracking data.
+#' @param include_legend Logical; controls the presence of a legend in the plot.
+#' @param motionless Logical; check if the tag fell off
 #' @return A list containing move2 objects and optionally a plot.
 #' @importFrom pacman p_load
 #' @importFrom dplyr filter arrange group_by
@@ -24,8 +25,7 @@
 #'   }
 #' }
 #' @export
-sigfox_to_move2 <- function(data, plot = TRUE, legend = FALSE) {
-
+sigfox_to_move2 <- function(data, plot_tracks = TRUE, include_legend = FALSE, motionless = TRUE) {
 
   # Load required libraries dynamically
   pacman::p_load(tidyverse, dplyr, mapview, sf, move2, janitor, rnaturalearth, update = FALSE)
@@ -61,7 +61,7 @@ sigfox_to_move2 <- function(data, plot = TRUE, legend = FALSE) {
   }
 
   # Process radius from source status
-  data$radius <- sapply(strsplit(data$radius_m_source_status, split = " "), "[", 1) %>% as.numeric
+  try({data$radius <- sapply(strsplit(data$radius_m_source_status, split = " "), "[", 1) %>% as.numeric()})
 
   # Additional data processing steps
   data <- determine_day_night(data)
@@ -79,9 +79,12 @@ sigfox_to_move2 <- function(data, plot = TRUE, legend = FALSE) {
   motionless_tag <- 280800 / (60 * 24) * 3.9 / 1000
   data <- tag_fell_off(data, vedba_threshold = motionless_tag * 2)
 
+  if(motionless == TRUE){
+    data <- data[data$tag_fell_off == FALSE,]
+  }
   # Convert to move2 object
   m2 <- move2::mt_as_move2(
-    x = data[data$tag_fell_off == FALSE,],
+    x = data,
     coords = c("longitude", "latitude"),
     time_column = "timestamp",
     na.fail = FALSE,
@@ -98,11 +101,11 @@ sigfox_to_move2 <- function(data, plot = TRUE, legend = FALSE) {
     move2::mt_track_lines()
 
   # Regularize to daily locations
-  m_day <- regularize_to_daily(data[data$tag_fell_off == FALSE,])
+  m_day <- regularize_to_daily(data)
 
   # Plotting
-  if (plot) {
-    p <- plot_tracking_data(m2, ml, legend)
+  if (plot_tracks) {
+    p <- plot_tracking_data(m2, ml, include_legend)
     m <- list(m2, ml, m_day, p)
   } else {
     m <- list(m2, ml, m_day)
@@ -142,11 +145,12 @@ mt_preprocess <- function(m2) {
 #' @param m2 move2 object with tracking data.
 #' @param ml Lines representing movements of tags.
 #' @param legend Logical; whether to include a legend.
+#' @param motionless Logical; whether to remove locations where the tag likely fell off the animal.
 #' @return A ggplot object.
 plot_tracking_data <- function(m2, ml, legend) {
   extent <- m2$geometry %>% sf::st_bbox()
   p <- ggplot() +
-    geom_sf(data = rnaturalearth::ne_coastline(returnclass = "sf")) +
+    geom_sf(data = rnaturalearth::ne_countries(returnclass = "sf", scale = 10)) +
     theme_linedraw() +
     geom_sf(data = m2, aes(color = tag_id)) +
     geom_sf(data = ml, aes(color = tag_id)) +

@@ -286,16 +286,18 @@ tag_fell_off <- function(data, vedba_threshold) {
     # Subset data for the current tag
     tag_data <- data[data$tag_id == tag,]
 
-    # Identify points where VeDBA drops below the threshold and never recovers
-    # Assuming 'vpm' column represents VeDBA per minute; adjust as necessary for your dataset
-    if (!is.null(tag_data$vpm)) {
+    # Check for a single-row scenario with vpm = NA
+    if (nrow(tag_data) == 1 && is.na(tag_data$vpm)) {
+      data$tag_fell_off[data$tag_id == tag] <- TRUE
+    } else {
+      # Identify points where VeDBA drops below the threshold and never recovers
       below_threshold <- tag_data$vpm < vedba_threshold
-      if (all(below_threshold)) {
+      if (all(below_threshold, na.rm = TRUE)) {
         # If all VeDBA values are below the threshold, mark the entire tag as potentially fallen off
         data$tag_fell_off[data$tag_id == tag] <- TRUE
       } else {
         # Find the last index where VeDBA is above the threshold
-        last_above <- max(which(below_threshold == FALSE), na.rm = TRUE)
+        last_above <- max(which(!below_threshold), na.rm = TRUE)
         # Mark as fallen off after the last point where VeDBA was above the threshold
         if (last_above < nrow(tag_data)) {
           data$tag_fell_off[(which(data$tag_id == tag)[last_above + 1]):nrow(data)] <- TRUE
@@ -306,6 +308,7 @@ tag_fell_off <- function(data, vedba_threshold) {
 
   return(data)
 }
+
 
 #' Regularize Tracking Data to Daily Summaries
 #'
