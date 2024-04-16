@@ -18,8 +18,8 @@ sigfox_download(
   repro_status = NA,
   species = NA,
   release_time = NA,
-  latitude = NA,
-  longitude = NA,
+  capture_latitude = NA,
+  capture_longitude = NA,
   roost = NA
 )
 }
@@ -50,9 +50,9 @@ sigfox_download(
 
 \item{release_time}{POSIXct; DateTime of release.}
 
-\item{latitude}{Numeric; Latitude of capture location.}
+\item{capture_latitude}{Numeric; Latitude of capture location.}
 
-\item{longitude}{Numeric; Longitude of capture location.}
+\item{capture_longitude}{Numeric; Longitude of capture location.}
 
 \item{roost}{Character; Roost identifier.}
 }
