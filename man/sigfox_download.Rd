@@ -20,7 +20,8 @@ sigfox_download(
   release_time = NA,
   capture_latitude = NA,
   capture_longitude = NA,
-  roost = NA
+  roost = NA,
+  download_attempts = 5
 )
 }
 \arguments{
@@ -55,6 +56,8 @@ sigfox_download(
 \item{capture_longitude}{Numeric; Longitude of capture location.}
 
 \item{roost}{Character; Roost identifier.}
+
+\item{download_attempts}{Numeric; Number of times to retry downloads of the sigfox data}
 }
 \value{
 A data frame of the deployment data including tracking and bat information.

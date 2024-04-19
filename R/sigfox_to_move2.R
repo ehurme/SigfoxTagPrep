@@ -148,7 +148,6 @@ mt_preprocess <- function(m2) {
 #' @param m2 move2 object with tracking data.
 #' @param ml Lines representing movements of tags.
 #' @param legend Logical; whether to include a legend.
-#' @param motionless Logical; whether to remove locations where the tag likely fell off the animal.
 #' @return A ggplot object.
 plot_tracking_data <- function(m2, ml, legend) {
   extent <- m2$geometry %>% sf::st_bbox()

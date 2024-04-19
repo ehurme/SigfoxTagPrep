@@ -12,8 +12,6 @@ plot_tracking_data(m2, ml, legend)
 \item{ml}{Lines representing movements of tags.}
 
 \item{legend}{Logical; whether to include a legend.}
-
-\item{motionless}{Logical; whether to remove locations where the tag likely fell off the animal.}
 }
 \value{
 A ggplot object.
