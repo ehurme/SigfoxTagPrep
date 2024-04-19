@@ -38,13 +38,10 @@ sigfox_download <- function(tag_ID = NA, ID = NA, ring = NA,
                             tag_weight = NA,
                             sex = NA, age = NA, repro_status = NA,
                             species = NA, release_time = NA,
-<<<<<<< HEAD
-                            latitude = NA, longitude = NA, roost = NA, download_attempts = 5) {
-=======
                             capture_latitude = NA,
                             capture_longitude = NA,
-                            roost = NA) {
->>>>>>> f986b42ee572a7c92136e958fa011ad7fdbfdeb6
+                            roost = NA,
+                            download_attempts = 5) {
 
   # Ensure required packages are installed and loaded
   pacman::p_load(tidyverse, data.table, lubridate, rvest, stringr, pacman, update = FALSE)
