@@ -76,7 +76,8 @@ determine_bursts <- function(data) {
   # Loop through each tag to identify bursts
   for (tag in unique(data$tag_id)) {
     sub_data <- data %>%
-      filter(tag_id == tag)
+      filter(tag_id == tag, !is.na(timestamp))
+    #sub_data %>% View()
 
     if (nrow(sub_data) > 1) {
       burst_id <- 1
@@ -96,7 +97,7 @@ determine_bursts <- function(data) {
       sub_data$burst_id[1] <- 1
     }
 
-    data[data$tag_id == tag, ] <- sub_data
+    data[data$tag_id == tag & !is.na(data$timestamp), ] <- sub_data
   }
 
   return(data)

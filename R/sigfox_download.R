@@ -16,8 +16,8 @@
 #' @param repro_status Character; Reproductive status of the bat.
 #' @param species Character; Species of the bat.
 #' @param release_time POSIXct; DateTime of release.
-#' @param latitude Numeric; Latitude of capture location.
-#' @param longitude Numeric; Longitude of capture location.
+#' @param capture_latitude Numeric; Latitude of capture location.
+#' @param capture_longitude Numeric; Longitude of capture location.
 #' @param roost Character; Roost identifier.
 #' @param download_attempts Numeric; Number of times to retry downloads of the sigfox data
 #' @return A data frame of the deployment data including tracking and bat information.
@@ -31,11 +31,20 @@
 #' @importFrom data.table data.table rbindlist
 #' @importFrom lubridate dmy_hms
 sigfox_download <- function(tag_ID = NA, ID = NA, ring = NA,
-                            attachment_type = NA, capture_weight = NA,
-                            capture_time = NA, FA_length = NA, tag_weight = NA,
+                            attachment_type = NA,
+                            capture_weight = NA,
+                            capture_time = NA,
+                            FA_length = NA,
+                            tag_weight = NA,
                             sex = NA, age = NA, repro_status = NA,
                             species = NA, release_time = NA,
+<<<<<<< HEAD
                             latitude = NA, longitude = NA, roost = NA, download_attempts = 5) {
+=======
+                            capture_latitude = NA,
+                            capture_longitude = NA,
+                            roost = NA) {
+>>>>>>> f986b42ee572a7c92136e958fa011ad7fdbfdeb6
 
   # Ensure required packages are installed and loaded
   pacman::p_load(tidyverse, data.table, lubridate, rvest, stringr, pacman, update = FALSE)
@@ -43,8 +52,9 @@ sigfox_download <- function(tag_ID = NA, ID = NA, ring = NA,
   # Prepare capture data
   capture_data <- data.frame(tag_ID, ID, ring, attachment_type, capture_weight,
                              capture_time, FA_length, tag_weight, sex, age,
-                             repro_status, species, release_time, latitude,
-                             longitude, roost, stringsAsFactors = FALSE)
+                             repro_status, species, release_time, capture_latitude,
+                             capture_longitude, roost, stringsAsFactors = FALSE)
+  capture_data <- capture_data[which(nchar(capture_data$tag_ID) > 1),]
 
   capture_data$tag_ID <- stringr::str_remove(capture_data$tag_ID, "^0+")
   bats <- na.omit(unique(capture_data$tag_ID[nchar(capture_data$tag_ID) == 7]))
@@ -67,6 +77,8 @@ sigfox_download <- function(tag_ID = NA, ID = NA, ring = NA,
 
   # Process and return the compiled data
   processed_data <- process_data(df, capture_data)
+
+  processed_data %>% group_by(Device) %>% reframe(first(timestamp), last(timestamp), n())
   return(processed_data)
 }
 
@@ -105,6 +117,52 @@ process_data <- function(df, capture_data) {
   df$timestamp <- lubridate::dmy_hms(df$`Time (Paris)`, tz = "Europe/Berlin")
   df$latitude <- sapply(strsplit(as.character(df$Position), ","), `[`, 1) %>% as.numeric
   df$longitude <- sapply(strsplit(as.character(df$Position), ","), `[`, 2) %>% as.numeric
+
+  df <- df %>%
+    left_join(capture_data, by = "tag_ID")
+  # Creating initial rows based on capture data
+  initial_rows <- capture_data %>%
+    transmute(
+      tag_ID = tag_ID,
+      Device = tag_ID,
+      `Time (Paris)` = NA_character_,
+      `Raw Data` = NA_character_,
+      Position = NA_character_,
+      `Radius (m) (Source/Status)` = NA_character_,
+      `Total VeDBA` = NA_integer_,
+      `24h Min. Temperature (°C)` = NA_real_,
+      `24h Max. Temperature (°C)` = NA_real_,
+      `24h Active (%)` = NA_real_,
+      `24h Min. Pressure (mbar)` = NA_character_,
+      `Seq. Number` = NA_integer_,
+      LQI = NA_character_,
+      `Link Quality` = NA_integer_,
+      Operator = NA_character_,
+      `Country Code` = NA_integer_,
+      `Base Stations (ID, RSSI, Reps)` = NA_character_,
+      timestamp = as.POSIXct(release_time),
+      latitude = capture_latitude,
+      longitude = capture_longitude,
+      tag_ID, ID, ring, attachment_type, capture_weight,
+      capture_time, FA_length, tag_weight, sex, age,
+      repro_status, species, release_time, capture_latitude,
+      capture_longitude, roost)
+
+  # Combine initial rows with the main data frame
+  df <- bind_rows(initial_rows, df) %>%
+    arrange(tag_ID, timestamp)  # Ensure the data is sorted
+
+  # remove undeployed locations
+  min_time_by_tag <- df %>%
+    group_by(tag_ID) %>%
+    summarise(initial_timestamp = min(timestamp, na.rm = TRUE)) %>%
+    ungroup()
+  # Join the minimum timestamp back to the main df and filter
+  df <- df %>%
+    left_join(min_time_by_tag, by = "tag_ID") %>%
+    filter(timestamp >= initial_timestamp) %>%
+    select(-initial_timestamp)  # Remove the extra column after filtering
+
   return(df)
 }
 

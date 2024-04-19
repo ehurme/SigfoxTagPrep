@@ -68,10 +68,13 @@ sigfox_to_move2 <- function(data, plot_tracks = TRUE, include_legend = FALSE, mo
   data$time_to_noon <- difftime(data$timestamp, data$noon, units = "hours")
   data <- determine_bursts(data)
   data$total_vedba <- data$total_ve_dba * 3.9 / 1000  # Conversion factor
-  data <- diff_dist(data)
-  data$ground_sp <- data$distance / (data$diff_time * 60)
+
   data <- diff_vedba(data)
   data$vpm <- data$diff_vedba / data$diff_time
+
+  data <- diff_dist(data)
+  data$ground_sp <- data$distance / (data$diff_time * 60)
+
   data$hour <- lubridate::hour(data$timestamp) + lubridate::minute(data$timestamp) / 60
   data$doy <- lubridate::yday(data$timestamp)
 
@@ -149,13 +152,52 @@ mt_preprocess <- function(m2) {
 #' @return A ggplot object.
 plot_tracking_data <- function(m2, ml, legend) {
   extent <- m2$geometry %>% sf::st_bbox()
+
+  first_points <- m2 %>%
+    group_by(tag_id) %>%
+    slice_min(order_by = timestamp, n = 1) %>%
+    ungroup()
+
+  last_points <- m2 %>%
+    group_by(tag_id) %>%
+    slice_max(order_by = timestamp, n = 1) %>%
+    ungroup()
+
+  # Base plot with naturalearth background
   p <- ggplot() +
     geom_sf(data = rnaturalearth::ne_countries(returnclass = "sf", scale = 10)) +
-    theme_linedraw() +
-    geom_sf(data = m2, aes(color = tag_id)) +
-    geom_sf(data = ml, aes(color = tag_id)) +
-    coord_sf(xlim = c(extent$xmin, extent$xmax), ylim = c(extent$ymin, extent$ymax))
+    theme_linedraw()
 
+  # Add the full tracks
+  p <- p + geom_sf(data = m2, aes(color = tag_id))
+
+  # If ml is another data layer for lines between points:
+  p <- p + geom_sf(data = ml, aes(color = tag_id))
+
+  # Highlight first and last points
+  p <- p +
+    geom_sf(data = first_points, aes(fill = tag_id), shape = 21, size = 6) +
+    geom_sf(data = last_points, aes(fill = tag_id), shape = 24, size = 6) +
+    scale_shape_manual(
+      name = "Point Type",
+      values = c(First = 24, Last = 21),  # 24 is triangle, 21 is circle
+      labels = c("First Point", "Last Point")
+    )+
+    guides(
+      color = guide_legend(title = "Tag ID"),
+      shape = guide_legend(title = "Point Type")
+    )
+
+  # Coordinate system setup, assuming extent is defined as xmin, xmax, ymin, ymax
+  p <- p + coord_sf(xlim = c(extent$xmin, extent$xmax), ylim = c(extent$ymin, extent$ymax))
+
+  # p <- ggplot() +
+  #   geom_sf(data = rnaturalearth::ne_countries(returnclass = "sf", scale = 10)) +
+  #   theme_linedraw() +
+  #   geom_sf(data = m2, aes(color = tag_id)) +
+  #   geom_sf(data = ml, aes(color = tag_id)) +
+  #   coord_sf(xlim = c(extent$xmin, extent$xmax), ylim = c(extent$ymin, extent$ymax))
+  p
   if (!legend) {
     p <- p + theme(legend.position = "none")
   }

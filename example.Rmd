@@ -11,12 +11,20 @@ Here we provide code to download tag data, do some basic data cleaning steps, an
 ```{r setup, echo=FALSE, message=FALSE, error=FALSE, warning=FALSE}
 # devtools::install_github("ehurme/SigfoxTagPrep")
 library(SigfoxTagPrep)
+# source("R/sigfox_download.R")
+# source("R/sigfox_to_move2.R")
+# source("R/tracking_data_processing.R")
 ```
 
 # 1. Import your tag data
 Provide the tag IDs and all other capture data you have available for your bats.
 ```{r import_data, cache = TRUE}
 capture_sheet <- data.frame(tag_id = c("120CC52", "120AFC0", "120CCDB"),
+                            time = rep(as.POSIXct("2024-03-21 11:30:00"), 3),
+                            attachment_type = c("Sauer", "Sauer", "Sauer"),
+                            capture_weight = NA,
+                            latitude = c(9.18641, 9.18641, 9.18641), 
+                            longtitude = c(47.65004,47.65004,47.65004),
                             bat_weight = NA,
                             tag_weight = NA,
                             ring = NA,
@@ -27,8 +35,12 @@ capture_sheet <- data.frame(tag_id = c("120CC52", "120AFC0", "120CCDB"),
 # 2. Download the data
 All Sigfox messages should be stored on a database associated with the tag. Here we can include all the fields from the capture sheet to add to our tracks.
 ```{r download_data, cache = TRUE}
-data <- sigfox_download(tag_ID = capture_sheet$tag_id,
+data <- sigfox_download(tag_ID = capture_sheet$tag_id, 
+                        release_time = capture_sheet$time,
+                        capture_longitude = capture_sheet$longtitude,
+                        capture_latitude = capture_sheet$latitude,
                         species = capture_sheet$species)
+data$tag_ID %>% table
 ```
 # Process data 
 Here we can do some basic processing and cleaning steps to the data
@@ -38,13 +50,21 @@ c. calculate basic movement statistics (e.g. ground speed)
 d. plot the data in a static map
 ```{r process_data, cache=TRUE}
 deployment_date <- ymd("2024-03-22")
-m <- sigfox_to_move2(data %>% filter(timestamp > deployment_date), motionless = FALSE)
+Data <- data %>% filter(timestamp > deployment_date)
+m <- sigfox_to_move2(Data, motionless = FALSE)
+m
 ```
 
 # 3. View data on an interactive map
 We can take the move2 tracks and plot them on an interactive mapview map. If you click on a point you can then see all sensor and metadata associated with that location.
 ```{r plot_map}
-# mapview(m[[1]], zcol = "x24h_active_percent", layer.name = "24hr Activity %", color = heat.colors(8))+
-#   mapView(m[[2]], layer.name = "Tracks", color = rainbow(10))
+mapview(m[[1]], zcol = "x24h_active_percent", layer.name = "24hr Activity %", color = heat.colors(8))+
+  mapView(m[[2]], layer.name = "Tracks", color = rainbow(10))
+```
+
+```{r}
+ggplot(m[[1]], aes(timestamp, device, size = x24h_active_percent))+geom_point()
+ggplot(m[[1]], aes(timestamp, x24h_active_percent, col = device))+geom_path()+geom_point()
+
 ```
 
