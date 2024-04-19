@@ -19,6 +19,7 @@
 #' @param latitude Numeric; Latitude of capture location.
 #' @param longitude Numeric; Longitude of capture location.
 #' @param roost Character; Roost identifier.
+#' @param download_attempts Numeric; Number of times to retry downloads of the sigfox data
 #' @return A data frame of the deployment data including tracking and bat information.
 #' @examples
 #' \dontrun{
@@ -34,7 +35,7 @@ sigfox_download <- function(tag_ID = NA, ID = NA, ring = NA,
                             capture_time = NA, FA_length = NA, tag_weight = NA,
                             sex = NA, age = NA, repro_status = NA,
                             species = NA, release_time = NA,
-                            latitude = NA, longitude = NA, roost = NA) {
+                            latitude = NA, longitude = NA, roost = NA, download_attempts = 5) {
 
   # Ensure required packages are installed and loaded
   pacman::p_load(tidyverse, data.table, lubridate, rvest, stringr, pacman, update = FALSE)
@@ -54,7 +55,7 @@ sigfox_download <- function(tag_ID = NA, ID = NA, ring = NA,
     message(paste0("bat ", bats[i], ": ", i, " out of ", length(bats)))
     url <- paste0("https://mpiab.4lima.de/batt.php?id=", bats[i])
 
-    d <- retry_download(url, max_attempts = 5)
+    d <- retry_download(url, max_attempts = download_attempts)
 
     if (!is.null(d) && length(d) >= 2) {
       d[[2]]$tag_ID <- bats[i]

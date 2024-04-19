@@ -7,6 +7,7 @@ Here we provide code to download tag data, do some basic data cleaning steps, an
 # 1. Install the package
 Install devtools and then install the package from github.
 ```install.package(devtools)```
+
 ```devtools::install_github("ehurme/SigfoxTagPrep")```
 
 # 2. Import your tag data
