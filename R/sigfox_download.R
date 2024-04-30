@@ -67,6 +67,7 @@ sigfox_download <- function(tag_ID = NA, ID = NA, ring = NA,
     if (!is.null(d) && length(d) >= 2) {
       d[[2]]$tag_ID <- bats[i]
       df <- rbind(df, d[[2]])
+      #TODO extract activation messages
     } else {
       message(paste("Failed to retrieve data for bat", bats[i], "after 5 attempts."))
     }
@@ -89,6 +90,12 @@ retry_download <- function(url, max_attempts = 5) {
   d <- NULL
   while(is.null(d) && attempt <= max_attempts) {
     try({
+      #TODO
+      # D <- url %>%
+      #   read_html()
+      # D %>% html_nodes("body") %>% html_text()
+      # grep between last activation and (Paris)
+
       d <- url %>%
         read_html() %>%
         html_nodes("table") %>%
@@ -130,7 +137,7 @@ process_data <- function(df, capture_data) {
       `24h Min. Temperature (??C)` = NA_real_,
       `24h Max. Temperature (??C)` = NA_real_,
       `24h Active (%)` = NA_real_,
-      `24h Min. Pressure (mbar)` = NA_character_,
+      `24h Min. Pressure (mbar)` = NA_real_,
       `Seq. Number` = NA_integer_,
       LQI = NA_character_,
       `Link Quality` = NA_integer_,
