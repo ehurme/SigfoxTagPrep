@@ -72,12 +72,7 @@ sigfox_download <- function(tag_ID = NA, ID = NA, ring = NA,
       message(paste("Failed to retrieve data for bat", bats[i], "after 5 attempts."))
     }
   }
-
-  # Process and return the compiled data
-  processed_data <- process_data(df, capture_data)
-
-  processed_data %>% group_by(Device) %>% reframe(first(timestamp), last(timestamp), n())
-  return(processed_data)
+  return(df)
 }
 
 #' Retry downloading HTML data
