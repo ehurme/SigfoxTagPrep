@@ -69,7 +69,7 @@ sigfox_download <- function(tag_ID = NA, ID = NA, ring = NA,
       df <- rbind(df, d[[2]])
       #TODO extract activation messages
     } else {
-      message(paste("Failed to retrieve data for bat", bats[i], "after 5 attempts."))
+      message(paste("Failed to retrieve data for bat", bats[i], "after", download_attempts, "attempts."))
     }
   }
   # return(df)
@@ -151,20 +151,21 @@ process_data <- function(df, capture_data) {
       capture_longitude, roost)
 
   # Combine initial rows with the main data frame
-  df <- bind_rows(initial_rows, df) %>%
+  joined_df <- bind_rows(initial_rows, df) %>%
     arrange(tag_ID, timestamp)  # Ensure the data is sorted
 
-  # remove undeployed locations
-  min_time_by_tag <- df %>%
-    group_by(tag_ID) %>%
-    summarise(initial_timestamp = min(timestamp, na.rm = TRUE)) %>%
-    ungroup()
-  # Join the minimum timestamp back to the main df and filter
-  df <- df %>%
-    left_join(min_time_by_tag, by = "tag_ID") %>%
-    filter(timestamp >= initial_timestamp) %>%
-    select(-initial_timestamp)  # Remove the extra column after filtering
+  # # remove undeployed locations
+  # min_time_by_tag <- joined_df %>%
+  #   group_by(tag_ID) %>%
+  #   summarise(initial_timestamp = min(timestamp, na.rm = TRUE)) %>%
+  #   ungroup()
 
-  return(df)
+  # Join the minimum timestamp back to the main df and filter
+  joined_df <- joined_df %>%
+    #left_join(min_time_by_tag, by = "tag_ID") %>%
+    filter(timestamp >= capture_data$release_time) # %>%
+    #select(-initial_timestamp)  # Remove the extra column after filtering
+
+  return(joined_df)
 }
 
