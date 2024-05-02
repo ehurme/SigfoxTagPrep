@@ -72,7 +72,10 @@ sigfox_download <- function(tag_ID = NA, ID = NA, ring = NA,
       message(paste("Failed to retrieve data for bat", bats[i], "after 5 attempts."))
     }
   }
-  return(df)
+  # return(df)
+  df$`24h Min. Pressure (mbar)` <- as.numeric(df$`24h Min. Pressure (mbar)`)
+  processed_data <- process_data(df, capture_data)
+  return(processed_data)
 }
 
 #' Retry downloading HTML data
