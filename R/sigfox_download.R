@@ -75,6 +75,7 @@ sigfox_download <- function(tag_ID = NA, ID = NA, ring = NA,
   # return(df)
   df$`24h Min. Pressure (mbar)` <- as.numeric(df$`24h Min. Pressure (mbar)`)
   processed_data <- process_data(df, capture_data)
+  # processed_data %>% group_by(Device) %>% reframe(first(timestamp), last(timestamp), n())
   return(processed_data)
 }
 
@@ -161,9 +162,9 @@ process_data <- function(df, capture_data) {
   #   ungroup()
 
   # Join the minimum timestamp back to the main df and filter
-  joined_df <- joined_df %>%
+  joined_df <- joined_df %>% group_by(Device) %>%
     #left_join(min_time_by_tag, by = "tag_ID") %>%
-    filter(timestamp >= capture_data$release_time) # %>%
+    filter(timestamp >= release_time) # %>%
     #select(-initial_timestamp)  # Remove the extra column after filtering
 
   return(joined_df)
