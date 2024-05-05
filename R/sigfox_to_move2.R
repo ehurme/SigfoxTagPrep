@@ -136,7 +136,9 @@ mt_preprocess <- function(m2) {
   }
 
   if (!move2::mt_has_no_empty_points(m2)) {
-    m2 <- dplyr::filter(m2, !sf::st_is_empty(m2))
+    # m2 <- dplyr::filter(m2, !sf::st_is_empty(m2))
+    # m2[sf::st_is_empty(m2),]$geometry
+    m2 <- m2[!sf::st_is_empty(m2),]
   }
 
   return(m2)
