@@ -360,7 +360,7 @@ regularize_to_daily <- function(data) {
       capture_mass = first(capture_weight),
       fa = first(fa_length),
       tag_mass = first(tag_weight),
-      is_capture_location = is.na(raw_data),
+      #is_capture_location = is.na(raw_data),
       day_night = first(day_night)
       #.groups = 'drop'
     ) -> m_day
