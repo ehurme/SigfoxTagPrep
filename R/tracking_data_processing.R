@@ -344,6 +344,8 @@ regularize_to_daily <- function(data) {
   data %>%
     group_by(ID, burst_id) %>%
     reframe(
+      species = species[1],
+      sex = sex[1],
       lat = location_lat[which.min(abs(time_to_noon))],
       lon = location_lon[which.min(abs(time_to_noon))],
       diff_noon = time_to_noon[which.min(abs(time_to_noon))],
