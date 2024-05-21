@@ -61,7 +61,9 @@ sigfox_to_move2 <- function(data, plot_tracks = TRUE, include_legend = FALSE, mo
   }
 
   # Process radius from source status
-  try({data$radius <- sapply(strsplit(data$radius_m_source_status, split = " "), "[", 1) %>% as.numeric()})
+  suppressWarnings(
+    try({data$radius <- sapply(strsplit(data$radius_m_source_status, split = " "), "[", 1) %>% as.numeric()})
+  )
 
   # Additional data processing steps
   data <- determine_day_night(data)
