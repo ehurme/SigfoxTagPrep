@@ -301,7 +301,8 @@ tag_fell_off <- function(data, vedba_threshold) {
         last_above <- max(which(!below_threshold), na.rm = TRUE)
         # Mark as fallen off after the last point where VeDBA was above the threshold
         if (last_above < nrow(tag_data)) {
-          data$tag_fell_off[(which(data$tag_id == tag)[last_above + 1]):nrow(data)] <- TRUE
+          idx <- which(data$tag_id == tag)
+          data$tag_fell_off[(idx[last_above + 1]):idx[length(idx)]] <- TRUE
         }
       }
     }
