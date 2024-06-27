@@ -99,11 +99,75 @@ sigfox_to_move2 <- function(data, plot_tracks = TRUE, include_legend = FALSE, mo
   # Ensure data is properly ordered and filtered
   m2 <- mt_preprocess(m2)
 
+  # add attributes to move2 object
+  track_data <- m2 %>% group_by(tag_id) %>%
+    reframe(
+      deployment_id = NA,
+      individual_id = NA,
+      animal_life_stage = factor("Adult"),
+      animal_mass = first(na.omit(capture_weight)),
+      animal_reproductive_condition = factor(repro_status),
+      attachment_body_part = factor("back"),
+      attachment_comments = NA,
+      attachment_type = attachment_type,
+      capture_method = NA,
+      capture_timestamp = first(timestamp),
+      deployment_comments = NA,
+      deploy_on_person = factor("Edward Hurme"),
+      deploy_on_timestamp = first(timestamp),
+      manipulation_type = NA,
+      tag_firmware = factor("V13P"),
+      tag_mass_total = first(tag_weight),
+      tag_readout_method = factor("LPWAN"),
+      tag_settings = factor("tinyfox"),
+      sensor_type_ids = factor("sigfox-geolocation"),
+      capture_location = NA,
+      #st_point()
+      deploy_on_location = NA,
+      # st_point())
+      deploy_off_location = NA,
+      individual_comments = NA,
+      sex = first(sex),
+      taxon_canonical_name = paste0("Nyctalus ", species),
+      individual_number_of_deployments = 1,
+      mortality_location = NA,
+      weight = first(capture_weight),
+      tag_number_of_deployments = 1,
+      study_id = NA,
+      has_quota = TRUE,
+      i_am_owner = TRUE,
+      is_test = FALSE,
+      license_type = factor("CC_BY"),
+      name = factor("Noctule spring migration 2024"),
+      study_number_of_deployments = n(),
+      number_of_individuals = n(),
+      number_of_tags = n(),
+      principal_investigator_name = "edwardhurme (Edward Hurme)",
+      study_type = factor("research"),
+      suspend_license_terms = FALSE,
+      i_can_see_data = TRUE,
+      there_are_data_which_i_cannot_see = FALSE,
+      i_have_download_access = TRUE,
+      i_am_collaborator = FALSE,
+      study_permission = factor("data_manager", levels = c("collaborator", "data_manager", "na")),
+      timestamp_first_deployed_location = NA,
+      timestamp_last_deployed_location = NA,
+      number_of_deployed_locations = NA,
+      taxon_ids = paste0("Nyctalus ", species),
+      contact_person_name = "Edward Hurme",
+      main_location = NA #sf::st_point()
+    )
+
   # Check for tags with more than one location
   ml <- m2 %>%
     dplyr::group_by(tag_id) %>%
     dplyr::filter(n() > 1) %>%
-    move2::mt_track_lines()
+    move2::mt_track_lines(
+      n = dplyr::n(),
+      minTime = min(timestamp),
+      maxTime = max(timestamp),
+
+    )
 
   # Regularize to daily locations
   m_day <- regularize_to_daily(data)
@@ -207,3 +271,4 @@ plot_tracking_data <- function(m2, ml, legend) {
 
   return(p)
 }
+
