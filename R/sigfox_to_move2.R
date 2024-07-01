@@ -157,6 +157,7 @@ sigfox_to_move2 <- function(data, plot_tracks = TRUE, include_legend = FALSE, mo
       contact_person_name = "Edward Hurme",
       main_location = NA #sf::st_point()
     )
+  m2 <- mt_set_track_data(m2, track_data)
 
   # Check for tags with more than one location
   ml <- m2 %>%
