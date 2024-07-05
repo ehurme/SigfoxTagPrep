@@ -183,8 +183,8 @@ calculate_bearing_for_sequential_points <- function(data) {
 #'
 #' @param data A data frame with tracking data that must include `tag_id`, `latitude`, and `longitude` columns,
 #'             and a `timestamp` to ensure the points are in sequential order.
-#' @return The input data frame with an additional column `distance` indicating the distance in meters
-#'         from each point to the next in the sequence.
+#' @return The input data frame with an additional column `distance` and `distance_from_start` indicating the distance in meters
+#'         from each point to the next in the sequence and from the origin.
 diff_dist <- function(data) {
   if (!requireNamespace("geosphere", quietly = TRUE)) {
     stop("Package 'geosphere' is required but not installed.")
@@ -195,14 +195,14 @@ diff_dist <- function(data) {
 
   # Initialize the distance column with NAs
   data$distance <- NA_real_
-
+  df$distance_from_start <- NA_real_
   # Get unique tag IDs
   unique_tags <- unique(data$tag_id)
 
   for (tag in unique_tags) {
     # Subset data for the current tag
     tag_data <- data[data$tag_id == tag,]
-
+    #tag_data$distance_from_start[1] <- 0
     if (nrow(tag_data) > 1) {
       for (i in 1:(nrow(tag_data) - 1)) {
         coord1 <- c(tag_data$longitude[i], tag_data$latitude[i])
@@ -210,7 +210,11 @@ diff_dist <- function(data) {
 
         # Calculate distance using the distGeo function from the geosphere package
         tag_data$distance[i] <- geosphere::distGeo(coord1, coord2)
+        tag_data$distance_from_start[i] <- geosphere::distGeo(start, coord1)
       }
+      # get last location distance
+      coord1 <- c(tag_data$longitude[nrow(tag_data)], tag_data$latitude[nrow(tag_data)])
+      tag_data$distance_from_start[nrow(tag_data)] <- geosphere::distGeo(start, coord1)
     }
 
     # Update the original data with distances calculated for the current tag
