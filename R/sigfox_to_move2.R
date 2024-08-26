@@ -96,8 +96,8 @@ sigfox_to_move2 <- function(data, plot_tracks = TRUE, include_legend = FALSE, mo
     track_id_column = "tag_id"
   ) |> sf::st_set_crs(4326L)
 
-  # Ensure data is properly ordered and filtered
-  m2 <- mt_preprocess(m2)
+  # # Ensure data is properly ordered and filtered
+  # m2 <- mt_preprocess(m2)
 
   # add attributes to move2 object
   track_data <- m2 %>% group_by(tag_id) %>%
@@ -113,13 +113,13 @@ sigfox_to_move2 <- function(data, plot_tracks = TRUE, include_legend = FALSE, mo
       capture_method = NA,
       capture_timestamp = first(timestamp),
       deployment_comments = NA,
-      deploy_on_person = factor("Edward Hurme"),
+      deploy_on_person = NA,#factor("Edward Hurme"),
       deploy_on_timestamp = first(timestamp),
       manipulation_type = NA,
-      tag_firmware = factor("V13P"),
+      tag_firmware = firmware, # factor("V13P"),
       tag_mass_total = first(tag_weight),
       tag_readout_method = factor("LPWAN"),
-      tag_settings = factor("tinyfox"),
+      tag_settings = NA, # factor("tinyfox"),
       sensor_type_ids = factor("sigfox-geolocation"),
       capture_location = NA,
       #st_point()

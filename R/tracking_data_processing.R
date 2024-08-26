@@ -195,7 +195,7 @@ diff_dist <- function(data) {
 
   # Initialize the distance column with NAs
   data$distance <- NA_real_
-  df$distance_from_start <- NA_real_
+  data$distance_from_start <- NA_real_
   # Get unique tag IDs
   unique_tags <- unique(data$tag_id)
 
