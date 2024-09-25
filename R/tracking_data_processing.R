@@ -202,7 +202,8 @@ diff_dist <- function(data) {
   for (tag in unique_tags) {
     # Subset data for the current tag
     tag_data <- data[data$tag_id == tag,]
-    #tag_data$distance_from_start[1] <- 0
+    # tag_data$distance_from_start[1] <- 0
+    start <- c(tag_data$longitude[1], tag_data$latitude[1])
     if (nrow(tag_data) > 1) {
       for (i in 1:(nrow(tag_data) - 1)) {
         coord1 <- c(tag_data$longitude[i], tag_data$latitude[i])
@@ -412,3 +413,4 @@ regularize_to_daily <- function(data) {
   m_day$daily_distance <- m_day$distance/m_day$diff_time
   return(m_day)
 }
+

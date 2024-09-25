@@ -1,6 +1,6 @@
 #' Download Sigfox Tracking Data
 #'
-#' This function downloads tracking data for individual bats from a specified source.
+#' This function downloads tracking data for individual tags from a specified source.
 #' It retries the download multiple times in case of connection failure.
 #'
 #' @param tag_ID Character; Biologger ID.
@@ -19,6 +19,7 @@
 #' @param capture_latitude Numeric; Latitude of capture location.
 #' @param capture_longitude Numeric; Longitude of capture location.
 #' @param roost Character; Roost identifier.
+#' @param firmware Character; Firmware version of the tag
 #' @param download_attempts Numeric; Number of times to retry downloads of the sigfox data
 #' @return A data frame of the deployment data including tracking and bat information.
 #' @examples
@@ -36,40 +37,70 @@ sigfox_download <- function(tag_ID = NA, ID = NA, ring = NA,
                             capture_time = NA,
                             FA_length = NA,
                             tag_weight = NA,
-                            sex = NA, age = NA, repro_status = NA,
-                            species = NA, release_time = NA,
+                            sex = NA, age = NA,
+                            repro_status = NA,
+                            species = NA,
+                            release_time = NA,
                             capture_latitude = NA,
                             capture_longitude = NA,
+                            deploy_on_latitude = NA,
+                            deploy_on_longitude = NA,
                             roost = NA,
+                            firmware = NA,
                             download_attempts = 5) {
 
   # Ensure required packages are installed and loaded
   pacman::p_load(tidyverse, data.table, lubridate, rvest, stringr, pacman, update = FALSE)
 
+  # Define the length of your main variable, for example, using tag_ID
+  num_rows <- length(tag_ID)
+
+  # Ensure that all variables have the same length, filling with NA if necessary
+  roost <- if(is.null(roost)) rep(NA, num_rows) else roost
+  firmware <- if(is.null(firmware)) rep(NA, num_rows) else firmware
+  ID <- if(length(ID) == 0) rep(NA, num_rows) else ID
+  ring <- if(length(ring) == 0) rep(NA, num_rows) else ring
+  attachment_type <- if(length(attachment_type) == 0) rep(NA, num_rows) else attachment_type
+  capture_weight <- if(length(capture_weight) == 0) rep(NA, num_rows) else capture_weight
+  capture_time <- if(length(capture_time) == 0) rep(NA, num_rows) else capture_time
+  FA_length <- if(length(FA_length) == 0) rep(NA, num_rows) else FA_length
+  tag_weight <- if(length(tag_weight) == 0) rep(NA, num_rows) else tag_weight
+  sex <- if(length(sex) == 0) rep(NA, num_rows) else sex
+  age <- if(length(age) == 0) rep(NA, num_rows) else age
+  repro_status <- if(length(repro_status) == 0) rep(NA, num_rows) else repro_status
+  species <- if(length(species) == 0) rep(NA, num_rows) else species
+  release_time <- if(length(release_time) == 0) rep(NA, num_rows) else release_time
+  capture_latitude <- if(length(capture_latitude) == 0) rep(NA, num_rows) else capture_latitude
+  capture_longitude <- if(length(capture_longitude) == 0) rep(NA, num_rows) else capture_longitude
+  deploy_on_latitude <- if(length(deploy_on_latitude) == 0) rep(NA, num_rows) else deploy_on_latitude
+  deploy_on_longitude <- if(length(deploy_on_longitude) == 0) rep(NA, num_rows) else deploy_on_longitude
+
   # Prepare capture data
   capture_data <- data.frame(tag_ID, ID, ring, attachment_type, capture_weight,
                              capture_time, FA_length, tag_weight, sex, age,
-                             repro_status, species, release_time, capture_latitude,
-                             capture_longitude, roost, stringsAsFactors = FALSE)
+                             repro_status, species, release_time,
+                             capture_latitude, capture_longitude,
+                             deploy_on_latitude, deploy_on_longitude,
+                             roost, firmware, stringsAsFactors = FALSE)
   capture_data <- capture_data[which(nchar(capture_data$tag_ID) > 1),]
 
   capture_data$tag_ID <- stringr::str_remove(capture_data$tag_ID, "^0+")
-  bats <- na.omit(unique(capture_data$tag_ID[nchar(capture_data$tag_ID) == 7]))
+  tags <- na.omit(unique(capture_data$tag_ID[nchar(capture_data$tag_ID) == 7]))
 
   df <- data.table()
 
-  for(i in seq_along(bats)) {
-    message(paste0("bat ", bats[i], ": ", i, " out of ", length(bats)))
-    url <- paste0("https://mpiab.4lima.de/batt.php?id=", bats[i])
+  for(i in seq_along(tags)) {
+    message(paste0("tag ", tags[i], ": ", i, " out of ", length(tags)))
+    url <- paste0("https://mpiab.4lima.de/batt.php?id=", tags[i])
 
     d <- retry_download(url, max_attempts = download_attempts)
 
     if (!is.null(d) && length(d) >= 2) {
-      d[[2]]$tag_ID <- bats[i]
+      d[[2]]$tag_ID <- tags[i]
       df <- rbind(df, d[[2]])
       #TODO extract activation messages
     } else {
-      message(paste("Failed to retrieve data for bat", bats[i], "after", download_attempts, "attempts."))
+      message(paste("Failed to retrieve data for bat", tags[i], "after", download_attempts, "attempts."))
     }
   }
   # return(df)
@@ -144,12 +175,14 @@ process_data <- function(df, capture_data) {
       `Country Code` = NA_integer_,
       `Base Stations (ID, RSSI, Reps)` = NA_character_,
       timestamp = as.POSIXct(release_time),
-      latitude = capture_latitude,
-      longitude = capture_longitude,
+      latitude = deploy_on_latitude,
+      longitude = deploy_on_longitude,
       tag_ID, ID, ring, attachment_type, capture_weight,
       capture_time, FA_length, tag_weight, sex, age,
-      repro_status, species, release_time, capture_latitude,
-      capture_longitude, roost)
+      repro_status, species, release_time,
+      capture_latitude, capture_longitude,
+      deploy_on_latitude, deploy_on_longitude,
+      roost, firmware)
 
   # Combine initial rows with the main data frame
   joined_df <- bind_rows(initial_rows, df) %>%

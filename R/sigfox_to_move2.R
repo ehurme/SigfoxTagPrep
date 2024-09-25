@@ -25,8 +25,8 @@
 #'   }
 #' }
 #' @export
-sigfox_to_move2 <- function(data, plot_tracks = TRUE, include_legend = FALSE, motionless = TRUE) {
-
+sigfox_to_move2 <- function(data, plot_tracks = TRUE, include_legend = FALSE, motionless = TRUE, make_lines = TRUE) {
+  # source("./R/tracking_data_processing.R")
   # Load required libraries dynamically
   pacman::p_load(tidyverse, dplyr, mapview, sf, move2, janitor, rnaturalearth, update = FALSE)
 
@@ -124,7 +124,7 @@ sigfox_to_move2 <- function(data, plot_tracks = TRUE, include_legend = FALSE, mo
       capture_location = NA,
       #st_point()
       deploy_on_location = NA,
-      # st_point())
+      # st_point()
       deploy_off_location = NA,
       individual_comments = NA,
       sex = first(sex),
@@ -138,11 +138,11 @@ sigfox_to_move2 <- function(data, plot_tracks = TRUE, include_legend = FALSE, mo
       i_am_owner = TRUE,
       is_test = FALSE,
       license_type = factor("CC_BY"),
-      name = factor("Noctule spring migration 2024"),
+      name = NA, # factor("Noctule spring migration 2024"),
       study_number_of_deployments = n(),
       number_of_individuals = n(),
       number_of_tags = n(),
-      principal_investigator_name = "edwardhurme (Edward Hurme)",
+      principal_investigator_name = NA, #"edwardhurme (Edward Hurme)",
       study_type = factor("research"),
       suspend_license_terms = FALSE,
       i_can_see_data = TRUE,
@@ -154,28 +154,38 @@ sigfox_to_move2 <- function(data, plot_tracks = TRUE, include_legend = FALSE, mo
       timestamp_last_deployed_location = NA,
       number_of_deployed_locations = NA,
       taxon_ids = paste0("Nyctalus ", species),
-      contact_person_name = "Edward Hurme",
+      contact_person_name = NA, # "Edward Hurme",
       main_location = NA #sf::st_point()
     )
   m2 <- mt_set_track_data(m2, track_data)
 
-  # Check for tags with more than one location
-  ml <- m2 %>%
-    dplyr::group_by(tag_id) %>%
-    dplyr::filter(n() > 1) %>%
-    move2::mt_track_lines(
-      n = dplyr::n(),
-      minTime = min(timestamp),
-      maxTime = max(timestamp),
+  # if(!mt_has_no_empty_points(m2)){
+  #   m2 <- dplyr::filter(m2, !sf::st_is_empty(m2))
+  # }
+  # sf::st_is_empty(m2)
 
-    )
+  # mt_is_track_id_cleaved(m2)
+  m2 <- dplyr::arrange(m2, mt_track_id(m2))
+
+  # Check for tags with more than one location
+  ml <- {}
+  if(make_lines){
+    ml <- m2 %>%
+      dplyr::group_by(tag_id) %>%
+      dplyr::filter(n() > 1) %>%  #, st_is_empty(geometry)) %>%
+      move2::mt_track_lines(
+        n = dplyr::n(),
+        minTime = min(timestamp),
+        maxTime = max(timestamp),
+      )
+  }
 
   # Regularize to daily locations
-  m_day <- regularize_to_daily(data)
+  suppressWarnings(m_day <- regularize_to_daily(data))
 
   # Plotting
   if (plot_tracks) {
-    p <- plot_tracking_data(m2, ml, include_legend)
+    p <- plot_tracking_data(m2, ml, include_legend, plot_lines = make_lines)
     m <- list(m2, ml, m_day, p)
   } else {
     m <- list(m2, ml, m_day)
@@ -218,7 +228,7 @@ mt_preprocess <- function(m2) {
 #' @param ml Lines representing movements of tags.
 #' @param legend Logical; whether to include a legend.
 #' @return A ggplot object.
-plot_tracking_data <- function(m2, ml, legend) {
+plot_tracking_data <- function(m2, ml, legend, plot_lines = TRUE) {
   extent <- m2$geometry %>% sf::st_bbox()
 
   first_points <- m2 %>%
@@ -239,8 +249,10 @@ plot_tracking_data <- function(m2, ml, legend) {
   # Add the full tracks
   p <- p + geom_sf(data = m2, aes(color = tag_id))
 
-  # If ml is another data layer for lines between points:
-  p <- p + geom_sf(data = ml, aes(color = tag_id))
+  if(plot_lines){
+    # If ml is another data layer for lines between points:
+    p <- p + geom_sf(data = ml, aes(color = tag_id))
+  }
 
   # Highlight first and last points
   p <- p +
