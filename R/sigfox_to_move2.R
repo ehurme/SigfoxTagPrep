@@ -100,23 +100,24 @@ sigfox_to_move2 <- function(data, plot_tracks = TRUE, include_legend = FALSE, mo
   # m2 <- mt_preprocess(m2)
 
   # add attributes to move2 object
-  track_data <- m2 %>% group_by(tag_id) %>%
+  track_data <-
+    m2 %>% group_by(tag_id) %>%
     reframe(
       deployment_id = NA,
       individual_id = NA,
-      animal_life_stage = factor("Adult"),
-      animal_mass = first(na.omit(capture_weight)),
-      animal_reproductive_condition = factor(repro_status),
+      animal_life_stage = first(m2$age),
+      animal_mass = first(capture_weight),
+      animal_reproductive_condition = first(repro_status),
       attachment_body_part = factor("back"),
       attachment_comments = NA,
-      attachment_type = attachment_type,
+      attachment_type = first(attachment_type),
       capture_method = NA,
       capture_timestamp = first(timestamp),
       deployment_comments = NA,
       deploy_on_person = NA,#factor("Edward Hurme"),
       deploy_on_timestamp = first(timestamp),
       manipulation_type = NA,
-      tag_firmware = firmware, # factor("V13P"),
+      tag_firmware = first(firmware), # factor("V13P"),
       tag_mass_total = first(tag_weight),
       tag_readout_method = factor("LPWAN"),
       tag_settings = NA, # factor("tinyfox"),
@@ -128,7 +129,7 @@ sigfox_to_move2 <- function(data, plot_tracks = TRUE, include_legend = FALSE, mo
       deploy_off_location = NA,
       individual_comments = NA,
       sex = first(sex),
-      taxon_canonical_name = paste0("Nyctalus ", species),
+      taxon_canonical_name = first(species),#paste0("Nyctalus ", species),
       individual_number_of_deployments = 1,
       mortality_location = NA,
       weight = first(capture_weight),
@@ -153,7 +154,7 @@ sigfox_to_move2 <- function(data, plot_tracks = TRUE, include_legend = FALSE, mo
       timestamp_first_deployed_location = NA,
       timestamp_last_deployed_location = NA,
       number_of_deployed_locations = NA,
-      taxon_ids = paste0("Nyctalus ", species),
+      taxon_ids = first(species), #paste0("Nyctalus ", first(species),
       contact_person_name = NA, # "Edward Hurme",
       main_location = NA #sf::st_point()
     )
