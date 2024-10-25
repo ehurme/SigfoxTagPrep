@@ -25,7 +25,7 @@
 #'   }
 #' }
 #' @export
-sigfox_to_move2 <- function(data, plot_tracks = TRUE, include_legend = FALSE, motionless = TRUE, make_lines = TRUE) {
+sigfox_to_move2 <- function(tracks, plot_tracks = TRUE, include_legend = FALSE, motionless = TRUE, make_lines = TRUE) {
   # source("./R/tracking_data_processing.R")
   # Load required libraries dynamically
   pacman::p_load(tidyverse, dplyr, mapview, sf, move2, janitor, rnaturalearth, update = FALSE)
@@ -53,43 +53,43 @@ sigfox_to_move2 <- function(data, plot_tracks = TRUE, include_legend = FALSE, mo
 
 
   # Clean column names for consistency
-  data <- data |> janitor::clean_names()
+  tracks <- tracks |> janitor::clean_names()
 
   # Ensure timestamp column exists
-  if (is.null(data$timestamp)) {
-    data$timestamp <- data$datetime
+  if (is.null(tracks$timestamp)) {
+    tracks$timestamp <- tracks$datetime
   }
 
   # Process radius from source status
   suppressWarnings(
-    try({data$radius <- sapply(strsplit(data$radius_m_source_status, split = " "), "[", 1) %>% as.numeric()})
+    try({tracks$radius <- sapply(strsplit(tracks$radius_m_source_status, split = " "), "[", 1) %>% as.numeric()})
   )
 
-  # Additional data processing steps
-  data <- determine_day_night(data)
-  data$time_to_noon <- difftime(data$timestamp, data$noon, units = "hours")
-  data <- determine_bursts(data)
-  data$total_vedba <- data$total_ve_dba * 3.9 / 1000  # Conversion factor
+  # Additional tracks processing steps
+  tracks <- determine_day_night(tracks)
+  tracks$time_to_noon <- difftime(tracks$timestamp, tracks$noon, units = "hours")
+  tracks <- determine_bursts(tracks)
+  tracks$total_vedba <- tracks$total_ve_dba * 3.9 / 1000  # Conversion factor
 
-  data <- diff_vedba(data)
-  data$vpm <- data$diff_vedba / data$diff_time
+  tracks <- diff_vedba(tracks)
+  tracks$vpm <- tracks$diff_vedba / tracks$diff_time
 
-  data <- diff_dist(data)
-  data$ground_sp <- data$distance / (data$diff_time * 60)
+  tracks <- diff_dist(tracks)
+  tracks$ground_sp <- tracks$distance / (tracks$diff_time * 60)
 
-  data$hour <- lubridate::hour(data$timestamp) + lubridate::minute(data$timestamp) / 60
-  data$doy <- lubridate::yday(data$timestamp)
+  tracks$hour <- lubridate::hour(tracks$timestamp) + lubridate::minute(tracks$timestamp) / 60
+  tracks$doy <- lubridate::yday(tracks$timestamp)
 
   # Check for motionless tags and determine if a tag fell off
   motionless_tag <- 280800 / (60 * 24) * 3.9 / 1000
-  data <- tag_fell_off(data, vedba_threshold = motionless_tag * 2)
+  tracks <- tag_fell_off(tracks, vedba_threshold = motionless_tag * 2)
 
   if(motionless == TRUE){
-    data <- data[data$tag_fell_off == FALSE,]
+    tracks <- tracks[tracks$tag_fell_off == FALSE,]
   }
   # Convert to move2 object
   m2 <- move2::mt_as_move2(
-    x = data,
+    x = tracks,
     coords = c("longitude", "latitude"),
     time_column = "timestamp",
     na.fail = FALSE,
@@ -100,35 +100,39 @@ sigfox_to_move2 <- function(data, plot_tracks = TRUE, include_legend = FALSE, mo
   # m2 <- mt_preprocess(m2)
 
   # add attributes to move2 object
-  track_data <- m2 %>% group_by(tag_id) %>%
+  track_data <-
+    m2 %>% group_by(tag_id) %>%
     reframe(
       deployment_id = NA,
       individual_id = NA,
-      animal_life_stage = factor("Adult"),
-      animal_mass = first(na.omit(capture_weight)),
-      animal_reproductive_condition = factor(repro_status),
+      animal_life_stage = if (all(is.na(age))) NA else factor(first(na.omit(age))),
+      animal_mass = if (all(is.na(capture_weight))) NA else as.numeric(first(na.omit(capture_weight))),
+      animal_reproductive_condition = if (all(is.na(repro_status))) NA else factor(first(na.omit(repro_status))),
       attachment_body_part = factor("back"),
       attachment_comments = NA,
-      attachment_type = attachment_type,
+      attachment_type = if (all(is.na(attachment_type))) NA else factor(first(na.omit(attachment_type))),
       capture_method = NA,
       capture_timestamp = first(timestamp),
       deployment_comments = NA,
       deploy_on_person = NA,#factor("Edward Hurme"),
       deploy_on_timestamp = first(timestamp),
       manipulation_type = NA,
-      tag_firmware = firmware, # factor("V13P"),
+      tag_firmware = if (all(is.na(firmware))) NA else factor(first(na.omit(firmware))),
       tag_mass_total = first(tag_weight),
       tag_readout_method = factor("LPWAN"),
       tag_settings = NA, # factor("tinyfox"),
       sensor_type_ids = factor("sigfox-geolocation"),
-      capture_location = NA,
-      #st_point()
-      deploy_on_location = NA,
+      # capture_location = if (all(is.na(capture_latitude))) st_point(x = c(NA_real_, NA_real_)) else factor(first(na.omit(st_point(x = c(capture_longitude,
+      capture_latitude = if (all(is.na(capture_latitude))) NA else as.numeric(first(na.omit(capture_latitude))),
+      capture_longitude = if (all(is.na(capture_longitude))) NA else as.numeric(first(na.omit(capture_longitude))),
+      deploy_on_latitude = if (all(is.na(deploy_on_latitude))) NA else as.numeric(first(na.omit(deploy_on_latitude))),
+      deploy_on_longitude = if (all(is.na(deploy_on_longitude))) NA else as.numeric(first(na.omit(deploy_on_longitude))),
+      # deploy_on_location = NA,
       # st_point()
       deploy_off_location = NA,
       individual_comments = NA,
       sex = first(sex),
-      taxon_canonical_name = paste0("Nyctalus ", species),
+      taxon_canonical_name = if (all(is.na(species))) NA else factor(first(na.omit(species))),
       individual_number_of_deployments = 1,
       mortality_location = NA,
       weight = first(capture_weight),
@@ -153,16 +157,24 @@ sigfox_to_move2 <- function(data, plot_tracks = TRUE, include_legend = FALSE, mo
       timestamp_first_deployed_location = NA,
       timestamp_last_deployed_location = NA,
       number_of_deployed_locations = NA,
-      taxon_ids = paste0("Nyctalus ", species),
+      taxon_ids = if (all(is.na(species))) NA else factor(first(na.omit(species))),
       contact_person_name = NA, # "Edward Hurme",
       main_location = NA #sf::st_point()
     )
-  m2 <- mt_set_track_data(m2, track_data)
+
+  track_data <- sf::st_as_sf(track_data, coords = c("capture_longitude","capture_latitude"),
+                             na.fail = FALSE, remove = FALSE,
+                             sf_column_name = "capture_location")
+  track_data <- sf::st_as_sf(as.data.frame(track_data), coords = c("deploy_on_longitude","deploy_on_latitude"),
+                             na.fail = FALSE, remove = FALSE,
+                             sf_column_name = "deploy_on_location")
+
+  m2 <- mt_set_track_data(x = m2, data = track_data)
 
   # if(!mt_has_no_empty_points(m2)){
   #   m2 <- dplyr::filter(m2, !sf::st_is_empty(m2))
   # }
-  # sf::st_is_empty(m2)
+  # any(sf::st_is_empty(m2))
 
   # mt_is_track_id_cleaved(m2)
   m2 <- dplyr::arrange(m2, mt_track_id(m2))
@@ -170,18 +182,23 @@ sigfox_to_move2 <- function(data, plot_tracks = TRUE, include_legend = FALSE, mo
   # Check for tags with more than one location
   ml <- {}
   if(make_lines){
-    ml <- m2 %>%
-      dplyr::group_by(tag_id) %>%
-      dplyr::filter(n() > 1) %>%  #, st_is_empty(geometry)) %>%
-      move2::mt_track_lines(
-        n = dplyr::n(),
-        minTime = min(timestamp),
-        maxTime = max(timestamp),
-      )
+    try({
+      m2_clean <- m2[!sf::st_is_empty(m2$geometry),]
+      ml <- m2_clean %>%
+        st_drop_geometry() %>%
+        dplyr::group_by(tag_id) %>%
+        dplyr::filter(n() > 1) %>%  #, st_is_empty(geometry)) %>%
+        # move2::mt_track_lines(
+        mt_track_lines(
+          n = dplyr::n(),
+          minTime = min(timestamp),
+          maxTime = max(timestamp)
+        )
+    })
   }
 
   # Regularize to daily locations
-  suppressWarnings(m_day <- regularize_to_daily(data))
+  suppressWarnings(m_day <- regularize_to_daily(tracks))
 
   # Plotting
   if (plot_tracks) {
@@ -249,9 +266,10 @@ plot_tracking_data <- function(m2, ml, legend, plot_lines = TRUE) {
   # Add the full tracks
   p <- p + geom_sf(data = m2, aes(color = tag_id))
 
-  if(plot_lines){
+  if(plot_lines & !is.null(ml)){
     # If ml is another data layer for lines between points:
-    p <- p + geom_sf(data = ml, aes(color = tag_id))
+    # p <- p + geom_sf(data = ml, aes(color = tag_id))
+    p <- p + geom_path(data = m2$geometry, aes(color = tag_id))
   }
 
   # Highlight first and last points
