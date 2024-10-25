@@ -8,7 +8,8 @@ sigfox_to_move2(
   data,
   plot_tracks = TRUE,
   include_legend = FALSE,
-  motionless = TRUE
+  motionless = TRUE,
+  make_lines = TRUE
 )
 }
 \arguments{

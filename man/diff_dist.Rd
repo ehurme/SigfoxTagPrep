@@ -11,8 +11,8 @@ diff_dist(data)
 and a \code{timestamp} to ensure the points are in sequential order.}
 }
 \value{
-The input data frame with an additional column \code{distance} indicating the distance in meters
-from each point to the next in the sequence.
+The input data frame with an additional column \code{distance} and \code{distance_from_start} indicating the distance in meters
+from each point to the next in the sequence and from the origin.
 }
 \description{
 This function iterates through tracking data for each unique tag ID, calculating the distance

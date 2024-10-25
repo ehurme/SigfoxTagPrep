@@ -20,7 +20,10 @@ sigfox_download(
   release_time = NA,
   capture_latitude = NA,
   capture_longitude = NA,
+  deploy_on_latitude = NA,
+  deploy_on_longitude = NA,
   roost = NA,
+  firmware = NA,
   download_attempts = 5
 )
 }
@@ -57,13 +60,15 @@ sigfox_download(
 
 \item{roost}{Character; Roost identifier.}
 
+\item{firmware}{Character; Firmware version of the tag}
+
 \item{download_attempts}{Numeric; Number of times to retry downloads of the sigfox data}
 }
 \value{
 A data frame of the deployment data including tracking and bat information.
 }
 \description{
-This function downloads tracking data for individual bats from a specified source.
+This function downloads tracking data for individual tags from a specified source.
 It retries the download multiple times in case of connection failure.
 }
 \examples{

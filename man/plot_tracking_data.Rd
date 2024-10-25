@@ -4,7 +4,7 @@
 \alias{plot_tracking_data}
 \title{Plot Tracking Data}
 \usage{
-plot_tracking_data(m2, ml, legend)
+plot_tracking_data(m2, ml, legend, plot_lines = TRUE)
 }
 \arguments{
 \item{m2}{move2 object with tracking data.}
