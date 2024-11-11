@@ -170,7 +170,9 @@ sigfox_to_move2 <- function(tracks, plot_tracks = TRUE, include_legend = FALSE, 
                              sf_column_name = "deploy_on_location")
 
   m2 <- mt_set_track_data(x = m2, data = track_data)
-
+  lat_lon <- sf::st_coordinates(m2$geometry)
+  m2$latitude <- lat_lon[,2]
+  m2$longitude <- lat_lon[,1]
   # if(!mt_has_no_empty_points(m2)){
   #   m2 <- dplyr::filter(m2, !sf::st_is_empty(m2))
   # }
@@ -202,7 +204,7 @@ sigfox_to_move2 <- function(tracks, plot_tracks = TRUE, include_legend = FALSE, 
 
   # Plotting
   if (plot_tracks) {
-    p <- plot_tracking_data(m2, ml, include_legend, plot_lines = make_lines)
+      p <- plot_tracking_data(m2, ml, include_legend, plot_lines = make_lines)
     m <- list(m2, ml, m_day, p)
   } else {
     m <- list(m2, ml, m_day)
@@ -266,11 +268,8 @@ plot_tracking_data <- function(m2, ml, legend, plot_lines = TRUE) {
   # Add the full tracks
   p <- p + geom_sf(data = m2, aes(color = tag_id))
 
-  if(plot_lines & !is.null(ml)){
-    # If ml is another data layer for lines between points:
-    # p <- p + geom_sf(data = ml, aes(color = tag_id))
-    p <- p + geom_path(data = m2$geometry, aes(color = tag_id))
-  }
+  p <- p + geom_path(data = m2, aes(longitude, latitude, color = tag_id))
+  # ggplot(m2, aes(longitude, latitude, group = tag_id))+geom_path()
 
   # Highlight first and last points
   p <- p +
@@ -295,11 +294,11 @@ plot_tracking_data <- function(m2, ml, legend, plot_lines = TRUE) {
   #   geom_sf(data = m2, aes(color = tag_id)) +
   #   geom_sf(data = ml, aes(color = tag_id)) +
   #   coord_sf(xlim = c(extent$xmin, extent$xmax), ylim = c(extent$ymin, extent$ymax))
-  p
+
   if (!legend) {
     p <- p + theme(legend.position = "none")
   }
-
+  p
   return(p)
 }
 

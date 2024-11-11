@@ -5,7 +5,7 @@
 \title{Convert Sigfox Tracking Data to move2 Format}
 \usage{
 sigfox_to_move2(
-  data,
+  tracks,
   plot_tracks = TRUE,
   include_legend = FALSE,
   motionless = TRUE,
@@ -13,13 +13,13 @@ sigfox_to_move2(
 )
 }
 \arguments{
-\item{data}{A data frame containing tracking data.}
-
 \item{plot_tracks}{Logical; if TRUE, generates a plot of the tracking data.}
 
 \item{include_legend}{Logical; controls the presence of a legend in the plot.}
 
 \item{motionless}{Logical; check if the tag fell off}
+
+\item{data}{A data frame containing tracking data.}
 }
 \value{
 A list containing move2 objects and optionally a plot.
