@@ -88,7 +88,7 @@ sigfox_to_move2 <- function(tracks, plot_tracks = TRUE, include_legend = FALSE, 
     tracks <- tracks[tracks$tag_fell_off == FALSE,]
   }
   # Convert to move2 object
-  m2 <- move2::mt_as_move2(
+  m <- move2::mt_as_move2(
     x = tracks,
     coords = c("longitude", "latitude"),
     time_column = "timestamp",
@@ -97,11 +97,11 @@ sigfox_to_move2 <- function(tracks, plot_tracks = TRUE, include_legend = FALSE, 
   ) |> sf::st_set_crs(4326L)
 
   # # Ensure data is properly ordered and filtered
-  # m2 <- mt_preprocess(m2)
+  # m <- mt_preprocess(m)
 
   # add attributes to move2 object
   track_data <-
-    m2 %>% group_by(tag_id) %>%
+    m %>% group_by(tag_id) %>%
     reframe(
       deployment_id = NA,
       individual_id = NA,
@@ -169,24 +169,24 @@ sigfox_to_move2 <- function(tracks, plot_tracks = TRUE, include_legend = FALSE, 
                              na.fail = FALSE, remove = FALSE,
                              sf_column_name = "deploy_on_location")
 
-  m2 <- mt_set_track_data(x = m2, data = track_data)
-  lat_lon <- sf::st_coordinates(m2$geometry)
-  m2$latitude <- lat_lon[,2]
-  m2$longitude <- lat_lon[,1]
-  # if(!mt_has_no_empty_points(m2)){
-  #   m2 <- dplyr::filter(m2, !sf::st_is_empty(m2))
+  m <- mt_set_track_data(x = m, data = track_data)
+  lat_lon <- sf::st_coordinates(m$geometry)
+  m$latitude <- lat_lon[,2]
+  m$longitude <- lat_lon[,1]
+  # if(!mt_has_no_empty_points(m)){
+  #   m <- dplyr::filter(m, !sf::st_is_empty(m))
   # }
-  # any(sf::st_is_empty(m2))
+  # any(sf::st_is_empty(m))
 
-  # mt_is_track_id_cleaved(m2)
-  m2 <- dplyr::arrange(m2, mt_track_id(m2))
+  # mt_is_track_id_cleaved(m)
+  m <- dplyr::arrange(m, mt_track_id(m))
 
   # Check for tags with more than one location
   ml <- {}
   if(make_lines){
     try({
-      m2_clean <- m2[!sf::st_is_empty(m2$geometry),]
-      ml <- m2_clean %>%
+      m_clean <- m[!sf::st_is_empty(m$geometry),]
+      ml <- m_clean %>%
         st_drop_geometry() %>%
         dplyr::group_by(tag_id) %>%
         dplyr::filter(n() > 1) %>%  #, st_is_empty(geometry)) %>%
@@ -204,10 +204,10 @@ sigfox_to_move2 <- function(tracks, plot_tracks = TRUE, include_legend = FALSE, 
 
   # Plotting
   if (plot_tracks) {
-      p <- plot_tracking_data(m2, ml, include_legend, plot_lines = make_lines)
-    m <- list(m2, ml, m_day, p)
+      p <- plot_tracking_data(m, ml, include_legend, plot_lines = make_lines)
+    m <- list(m, ml, m_day, p)
   } else {
-    m <- list(m2, ml, m_day)
+    m <- list(m, ml, m_day)
   }
 
   return(m)
@@ -216,46 +216,46 @@ sigfox_to_move2 <- function(tracks, plot_tracks = TRUE, include_legend = FALSE, 
 #' Preprocess move2 Data
 #'
 #' Ensures move2 data is clean and ready for analysis.
-#' @param m2 move2 object.
+#' @param m move2 object.
 #' @return Preprocessed move2 object.
-mt_preprocess <- function(m2) {
-  if (!move2::mt_is_track_id_cleaved(m2)) {
-    m2 <- dplyr::arrange(m2, move2::mt_track_id(m2))
+mt_preprocess <- function(m) {
+  if (!move2::mt_is_track_id_cleaved(m)) {
+    m <- dplyr::arrange(m, move2::mt_track_id(m))
   }
 
-  if (!move2::mt_is_time_ordered(m2)) {
-    m2 <- dplyr::arrange(m2, move2::mt_track_id(m2), move2::mt_time(m2))
+  if (!move2::mt_is_time_ordered(m)) {
+    m <- dplyr::arrange(m, move2::mt_track_id(m), move2::mt_time(m))
   }
 
-  if (!move2::mt_has_unique_location_time_records(m2)) {
-    m2 <- move2::mt_filter_unique(m2)
+  if (!move2::mt_has_unique_location_time_records(m)) {
+    m <- move2::mt_filter_unique(m)
   }
 
-  if (!move2::mt_has_no_empty_points(m2)) {
-    # m2 <- dplyr::filter(m2, !sf::st_is_empty(m2))
-    # m2[sf::st_is_empty(m2),]$geometry
-    m2 <- m2[!sf::st_is_empty(m2),]
+  if (!move2::mt_has_no_empty_points(m)) {
+    # m <- dplyr::filter(m, !sf::st_is_empty(m))
+    # m[sf::st_is_empty(m),]$geometry
+    m <- m[!sf::st_is_empty(m),]
   }
 
-  return(m2)
+  return(m)
 }
 
 #' Plot Tracking Data
 #'
 #' Creates a plot of tracking data using ggplot2 and rnaturalearth.
-#' @param m2 move2 object with tracking data.
+#' @param m move2 object with tracking data.
 #' @param ml Lines representing movements of tags.
 #' @param legend Logical; whether to include a legend.
 #' @return A ggplot object.
-plot_tracking_data <- function(m2, ml, legend, plot_lines = TRUE) {
-  extent <- m2$geometry %>% sf::st_bbox()
+plot_tracking_data <- function(m, ml, legend, plot_lines = TRUE) {
+  extent <- m$geometry %>% sf::st_bbox()
 
-  first_points <- m2 %>%
+  first_points <- m %>%
     group_by(tag_id) %>%
     slice_min(order_by = timestamp, n = 1) %>%
     ungroup()
 
-  last_points <- m2 %>%
+  last_points <- m %>%
     group_by(tag_id) %>%
     slice_max(order_by = timestamp, n = 1) %>%
     ungroup()
@@ -266,10 +266,10 @@ plot_tracking_data <- function(m2, ml, legend, plot_lines = TRUE) {
     theme_linedraw()
 
   # Add the full tracks
-  p <- p + geom_sf(data = m2, aes(color = tag_id))
+  p <- p + geom_sf(data = m, aes(color = tag_id))
 
-  p <- p + geom_path(data = m2, aes(longitude, latitude, color = tag_id))
-  # ggplot(m2, aes(longitude, latitude, group = tag_id))+geom_path()
+  p <- p + geom_path(data = m, aes(longitude, latitude, color = tag_id))
+  # ggplot(m, aes(longitude, latitude, group = tag_id))+geom_path()
 
   # Highlight first and last points
   p <- p +
@@ -291,7 +291,7 @@ plot_tracking_data <- function(m2, ml, legend, plot_lines = TRUE) {
   # p <- ggplot() +
   #   geom_sf(data = rnaturalearth::ne_countries(returnclass = "sf", scale = 10)) +
   #   theme_linedraw() +
-  #   geom_sf(data = m2, aes(color = tag_id)) +
+  #   geom_sf(data = m, aes(color = tag_id)) +
   #   geom_sf(data = ml, aes(color = tag_id)) +
   #   coord_sf(xlim = c(extent$xmin, extent$xmax), ylim = c(extent$ymin, extent$ymax))
 
