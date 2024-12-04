@@ -25,7 +25,11 @@
 #'   }
 #' }
 #' @export
-sigfox_to_move2 <- function(tracks, plot_tracks = TRUE, include_legend = FALSE, motionless = TRUE, make_lines = TRUE) {
+sigfox_to_move2 <- function(tracks,
+                            plot_tracks = TRUE,
+                            include_legend = FALSE,
+                            motionless = TRUE,
+                            make_lines = TRUE) {
   # source("./R/tracking_data_processing.R")
   # Load required libraries dynamically
   pacman::p_load(tidyverse, dplyr, mapview, sf, move2, janitor, rnaturalearth, update = FALSE)
