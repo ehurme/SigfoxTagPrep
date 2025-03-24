@@ -4,10 +4,10 @@
 \alias{mt_preprocess}
 \title{Preprocess move2 Data}
 \usage{
-mt_preprocess(m2)
+mt_preprocess(m)
 }
 \arguments{
-\item{m2}{move2 object.}
+\item{m}{move2 object.}
 }
 \value{
 Preprocessed move2 object.

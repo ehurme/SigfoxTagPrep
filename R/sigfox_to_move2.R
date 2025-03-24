@@ -28,11 +28,12 @@
 sigfox_to_move2 <- function(tracks,
                             plot_tracks = TRUE,
                             include_legend = FALSE,
-                            motionless = TRUE,
-                            make_lines = TRUE) {
+                            motionless = FALSE,
+                            make_lines = FALSE) {
   # source("./R/tracking_data_processing.R")
   # Load required libraries dynamically
-  pacman::p_load(tidyverse, dplyr, mapview, sf, move2, janitor, rnaturalearth, update = FALSE)
+  pacman::p_load(tidyverse, dplyr, mapview, sf, move2, janitor,
+                 rnaturalearth, update = FALSE)
 
   # Ensure devtools is available
   if (!requireNamespace("devtools", quietly = TRUE)) {
@@ -54,7 +55,6 @@ sigfox_to_move2 <- function(tracks,
     message("'move2' package is not installed. Installing the latest version from GitLab.")
     devtools::install_git('https://gitlab.com/bartk/move2.git')
   }
-
 
   # Clean column names for consistency
   tracks <- tracks |> janitor::clean_names()
@@ -88,7 +88,7 @@ sigfox_to_move2 <- function(tracks,
   motionless_tag <- 280800 / (60 * 24) * 3.9 / 1000
   tracks <- tag_fell_off(tracks, vedba_threshold = motionless_tag * 2)
 
-  if(motionless == TRUE){
+  if(motionless){
     tracks <- tracks[tracks$tag_fell_off == FALSE,]
   }
   # Convert to move2 object
@@ -208,7 +208,9 @@ sigfox_to_move2 <- function(tracks,
 
   # Plotting
   if (plot_tracks) {
-      p <- plot_tracking_data(m, ml, include_legend, plot_lines = make_lines)
+    p <- plot_tracking_data(m, ml,
+                            include_legend,
+                            plot_lines = make_lines)
     m <- list(m, ml, m_day, p)
   } else {
     m <- list(m, ml, m_day)

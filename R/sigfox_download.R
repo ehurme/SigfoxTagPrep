@@ -4,6 +4,7 @@
 #' It retries the download multiple times in case of connection failure.
 #'
 #' @param tag_ID Character; Biologger ID.
+#' @param tag_type Character; Tag version, e.g. tinyfox, nanofox, torpor
 #' @param ID Character; PIT-tag identifier.
 #' @param ring Character; Ring identifier.
 #' @param attachment_type Character; Type of attachment, e.g., 'glue' or 'collar'.
@@ -32,6 +33,7 @@
 #' @importFrom data.table data.table rbindlist
 #' @importFrom lubridate dmy_hms
 sigfox_download <- function(tag_ID = NA,
+                            tag_type = "tinyfox",
                             ID = NA,
                             ring = NA,
                             attachment_type = NA,
@@ -88,13 +90,23 @@ sigfox_download <- function(tag_ID = NA,
   capture_data <- capture_data[which(nchar(capture_data$tag_ID) > 1),]
 
   capture_data$tag_ID <- stringr::str_remove(capture_data$tag_ID, "^0+")
-  tags <- na.omit(unique(capture_data$tag_ID[nchar(capture_data$tag_ID) == 7]))
+  tags <- na.omit(unique(capture_data$tag_ID)) #[nchar(capture_data$tag_ID) == 7]))
+
+  if(tag_type == "nanofox"){
+    db_url = "https://mpiab.4lima.de/nanofox.php?id="
+  }
+  if(tag_type == "tinyfox"){
+    db_url = "https://mpiab.4lima.de/batt.php?id="
+  }
+  if(tag_type == "torpor"){
+    db_url = "https://mpiab.4lima.de/torpor.php?id="
+  }
 
   df <- data.table()
 
   for(i in seq_along(tags)) {
     message(paste0("tag ", tags[i], ": ", i, " out of ", length(tags)))
-    url <- paste0("https://mpiab.4lima.de/batt.php?id=", tags[i])
+    url <- paste0(db_url, tags[i])
 
     d <- retry_download(url, max_attempts = download_attempts)
 
@@ -109,8 +121,11 @@ sigfox_download <- function(tag_ID = NA,
   # return(df)
   df$`24h Min. Pressure (mbar)` <- as.numeric(df$`24h Min. Pressure (mbar)`)
 
-  processed_data <- process_data(df, capture_data)
-  # processed_data %>% group_by(Device) %>% reframe(first(timestamp), last(timestamp), n())
+  processed_data <- df
+  try({
+      processed_data <- process_data(processed_data, capture_data)
+  })
+
   return(processed_data)
 }
 

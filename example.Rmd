@@ -36,6 +36,7 @@ capture_sheet <- data.frame(tag_id = c("120CC52", "120AFC0", "120CCDB"),
 All Sigfox messages should be stored on a database associated with the tag. Here we can include all the fields from the capture sheet to add to our tracks.
 ```{r download_data, cache = TRUE}
 data <- sigfox_download(tag_ID = capture_sheet$tag_id, 
+                        tag_type = "tinyfox",
                         release_time = capture_sheet$time,
                         capture_longitude = capture_sheet$longtitude,
                         capture_latitude = capture_sheet$latitude,

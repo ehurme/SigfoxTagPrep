@@ -4,10 +4,10 @@
 \alias{plot_tracking_data}
 \title{Plot Tracking Data}
 \usage{
-plot_tracking_data(m2, ml, legend, plot_lines = TRUE)
+plot_tracking_data(m, ml, legend, plot_lines = TRUE)
 }
 \arguments{
-\item{m2}{move2 object with tracking data.}
+\item{m}{move2 object with tracking data.}
 
 \item{ml}{Lines representing movements of tags.}
 

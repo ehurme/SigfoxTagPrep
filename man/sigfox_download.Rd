@@ -6,6 +6,7 @@
 \usage{
 sigfox_download(
   tag_ID = NA,
+  tag_type = "tinyfox",
   ID = NA,
   ring = NA,
   attachment_type = NA,
@@ -29,6 +30,8 @@ sigfox_download(
 }
 \arguments{
 \item{tag_ID}{Character; Biologger ID.}
+
+\item{tag_type}{Character; Tag version, e.g. tinyfox, nanofox, torpor}
 
 \item{ID}{Character; PIT-tag identifier.}
 
