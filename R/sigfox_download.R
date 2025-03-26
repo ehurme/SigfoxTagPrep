@@ -125,7 +125,7 @@ sigfox_download <- function(tag_ID = NA,
   try({
       processed_data <- process_data(processed_data, capture_data)
   })
-
+  processed_data$tag_type <- tag_type
   return(processed_data)
 }
 

@@ -59,6 +59,8 @@ sigfox_to_move2 <- function(tracks,
   # Clean column names for consistency
   tracks <- tracks |> janitor::clean_names()
 
+  tag_type <- unique(tracks$tag_type)
+
   # Ensure timestamp column exists
   if (is.null(tracks$timestamp)) {
     tracks$timestamp <- tracks$datetime
@@ -166,10 +168,13 @@ sigfox_to_move2 <- function(tracks,
       main_location = NA #sf::st_point()
     )
 
-  track_data <- sf::st_as_sf(track_data, coords = c("capture_longitude","capture_latitude"),
+  track_data <- sf::st_as_sf(track_data,
+                             coords = c("capture_longitude","capture_latitude"),
                              na.fail = FALSE, remove = FALSE,
                              sf_column_name = "capture_location")
-  track_data <- sf::st_as_sf(as.data.frame(track_data), coords = c("deploy_on_longitude","deploy_on_latitude"),
+
+  track_data <- sf::st_as_sf(as.data.frame(track_data),
+                             coords = c("deploy_on_longitude","deploy_on_latitude"),
                              na.fail = FALSE, remove = FALSE,
                              sf_column_name = "deploy_on_location")
 
@@ -185,19 +190,34 @@ sigfox_to_move2 <- function(tracks,
     mt_set_track_id(value = "tag_id") %>%
     mt_set_time(value = "timestamp")
 
+  # add altitude from pressure
+  sea_level_pressure <- 1013.25
+  if(tag_type == "nanofox"){
+    m$altitude <- 44330 * (1 - (as.numeric(m$pressure_mbar / sea_level_pressure)^(1 / 5.255)))
+  }
+  if(tag_type == "tinyfox"){
+    m$altitude = 44330 * (1 - (as.numeric(m$tinyfox_pressure_min_last_24h / sea_level_pressure)^(1 / 5.255)))
+  }
+
+  # melt temperature and vedba
+  if(tag_type == "nanofox"){
+
+
+  }
+
   # Check for tags with more than one location
   ml <- {}
   if(make_lines){
     try({
       m_clean <- m[!sf::st_is_empty(m$geometry),]
-      ml <- m_clean %>%
-        st_drop_geometry() %>%
+      ml <-
+        m_clean %>%
         dplyr::group_by(tag_id) %>%
-        dplyr::filter(n() > 1) %>%  #, st_is_empty(geometry)) %>%
+        dplyr::filter(n() > 1) %>%  # Ensure at least 2 points per track
         mt_track_lines(
-          n = dplyr::n(),
-          start = min(timestamp),
-          end = max(timestamp)
+          n = dplyr::n(),           # Add count of points for each track
+          start = min(timestamp), # First timestamp in track
+          end = max(timestamp)  # Last timestamp in track
         )
     })
   }
