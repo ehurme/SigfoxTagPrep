@@ -174,16 +174,16 @@ sigfox_to_move2 <- function(tracks,
                              sf_column_name = "deploy_on_location")
 
   m <- mt_set_track_data(x = m, data = track_data)
+
   lat_lon <- sf::st_coordinates(m$geometry)
   m$latitude <- lat_lon[,2]
   m$longitude <- lat_lon[,1]
-  # if(!mt_has_no_empty_points(m)){
-  #   m <- dplyr::filter(m, !sf::st_is_empty(m))
-  # }
-  # any(sf::st_is_empty(m))
 
-  # mt_is_track_id_cleaved(m)
   m <- dplyr::arrange(m, mt_track_id(m))
+
+  m <- m %>%
+    mt_set_track_id(value = "tag_id") %>%
+    mt_set_time(value = "timestamp")
 
   # Check for tags with more than one location
   ml <- {}
@@ -194,11 +194,10 @@ sigfox_to_move2 <- function(tracks,
         st_drop_geometry() %>%
         dplyr::group_by(tag_id) %>%
         dplyr::filter(n() > 1) %>%  #, st_is_empty(geometry)) %>%
-        # move2::mt_track_lines(
         mt_track_lines(
           n = dplyr::n(),
-          minTime = min(timestamp),
-          maxTime = max(timestamp)
+          start = min(timestamp),
+          end = max(timestamp)
         )
     })
   }
