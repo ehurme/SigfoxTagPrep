@@ -190,14 +190,7 @@ sigfox_to_move2 <- function(tracks,
     mt_set_track_id(value = "tag_id") %>%
     mt_set_time(value = "timestamp")
 
-  # add altitude from pressure
-  sea_level_pressure <- 1013.25
-  if(tag_type == "nanofox"){
-    m$altitude <- 44330 * (1 - (as.numeric(m$pressure_mbar / sea_level_pressure)^(1 / 5.255)))
-  }
-  if(tag_type == "tinyfox"){
-    m$altitude = 44330 * (1 - (as.numeric(m$tinyfox_pressure_min_last_24h / sea_level_pressure)^(1 / 5.255)))
-  }
+
 
   # melt temperature and vedba
   if(tag_type == "nanofox"){

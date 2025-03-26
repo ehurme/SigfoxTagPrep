@@ -58,6 +58,13 @@ s
 
 # 3. View data on an interactive map
 We can take the move2 tracks and plot them on an interactive mapview map. If you click on a point you can then see all sensor and metadata associated with that location.
+
+```{r}
+mapView(s[[1]], zcol = "tag_id", layer.name = "Tracks")+
+mapView(s[[2]], zcol = "tag_id", layer.name = "Tracks")
+```
+
+If the points or lines do not appear on the map, you can try to clean and reconstruct these sf objects here
 ```{r plot_map}
 clean_points <- s[[1]] %>% 
   mt_set_track_id(value = "tag_id") %>%
@@ -73,13 +80,10 @@ clean_tracks <- clean_points %>%
           end = max(timestamp)  # Last timestamp in track
         )
 
-mapview(clean_points, zcol = "tag_id", layer.name = "Tag ID")+
+mapview(clean_points, zcol = "tag_id", layer.name = "Tracks")+
   mapView(clean_tracks, zcol = "tag_id", layer.name = "Tracks")
 ```
 
-```{r}
-mapView(s[[2]], zcol = "tag_id", layer.name = "Tracks")
-```
 
 ```{r}
 # ggplot(s[[1]], aes(timestamp, device, size = x24h_active_percent))+geom_point()

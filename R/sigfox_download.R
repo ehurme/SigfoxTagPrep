@@ -33,7 +33,6 @@
 #' @importFrom data.table data.table rbindlist
 #' @importFrom lubridate dmy_hms
 sigfox_download <- function(tag_ID = NA,
-                            tag_type = "tinyfox",
                             ID = NA,
                             ring = NA,
                             attachment_type = NA,
@@ -51,6 +50,7 @@ sigfox_download <- function(tag_ID = NA,
                             deploy_on_latitude = NA,
                             deploy_on_longitude = NA,
                             roost = NA,
+                            tag_type = "tinyfox",
                             firmware = NA,
                             download_attempts = 5) {
 
@@ -120,6 +120,15 @@ sigfox_download <- function(tag_ID = NA,
   }
   # return(df)
   df$`24h Min. Pressure (mbar)` <- as.numeric(df$`24h Min. Pressure (mbar)`)
+
+  # add altitude from pressure
+  sea_level_pressure <- 1013.25
+  if(tag_type == "nanofox"){
+    df$altitude <- 44330 * (1 - (as.numeric(df$`Pressure (mbar)` / sea_level_pressure)^(1 / 5.255)))
+  }
+  if(tag_type == "tinyfox"){
+    df$altitude = 44330 * (1 - (as.numeric(df$`24h Min. Pressure (mbar)` / sea_level_pressure)^(1 / 5.255)))
+  }
 
   processed_data <- df
   try({
