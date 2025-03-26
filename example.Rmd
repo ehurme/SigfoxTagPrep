@@ -64,8 +64,21 @@ clean_points <- s[[1]] %>%
     mt_set_time(value = "timestamp") %>% 
   filter(!st_is_empty(geometry))
 
+clean_tracks <- clean_points %>% 
+        dplyr::group_by(tag_id) %>%
+        dplyr::filter(n() > 1) %>%  # Ensure at least 2 points per track
+        mt_track_lines(
+          n = dplyr::n(),           # Add count of points for each track
+          start = min(timestamp), # First timestamp in track
+          end = max(timestamp)  # Last timestamp in track
+        )
+
 mapview(clean_points, zcol = "tag_id", layer.name = "Tag ID")+
-  mapView(s[[2]], zcol = "tag_id", layer.name = "Tracks")
+  mapView(clean_tracks, zcol = "tag_id", layer.name = "Tracks")
+```
+
+```{r}
+mapView(s[[2]], zcol = "tag_id", layer.name = "Tracks")
 ```
 
 ```{r}
