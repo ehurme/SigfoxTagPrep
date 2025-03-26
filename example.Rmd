@@ -59,8 +59,13 @@ s
 # 3. View data on an interactive map
 We can take the move2 tracks and plot them on an interactive mapview map. If you click on a point you can then see all sensor and metadata associated with that location.
 ```{r plot_map}
-mapview(s[[1]], zcol = "tag_id", layer.name = "Tag ID", color = heat.colors(8))+
-  mapView(s[[2]], zcol = "tag_id", layer.name = "Tracks", color = rainbow(10))
+clean_points <- s[[1]] %>% 
+  mt_set_track_id(value = "tag_id") %>%
+    mt_set_time(value = "timestamp") %>% 
+  filter(!st_is_empty(geometry))
+
+mapview(clean_points, zcol = "tag_id", layer.name = "Tag ID")+
+  mapView(s[[2]], zcol = "tag_id", layer.name = "Tracks")
 ```
 
 ```{r}
