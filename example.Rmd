@@ -60,8 +60,8 @@ s
 We can take the move2 tracks and plot them on an interactive mapview map. If you click on a point you can then see all sensor and metadata associated with that location.
 
 ```{r}
-mapView(s[[1]], zcol = "tag_id", layer.name = "Tracks")+
-mapView(s[[2]], zcol = "tag_id", layer.name = "Tracks")
+mapview(s[[1]], zcol = "tag_id", layer.name = "Tracks")+
+  mapview(s[[2]], zcol = "tag_id", layer.name = "Tracks")
 ```
 
 If the points or lines do not appear on the map, you can try to clean and reconstruct these sf objects here
@@ -81,13 +81,22 @@ clean_tracks <- clean_points %>%
         )
 
 mapview(clean_points, zcol = "tag_id", layer.name = "Tracks")+
-  mapView(clean_tracks, zcol = "tag_id", layer.name = "Tracks")
+  mapview(clean_tracks, zcol = "tag_id", layer.name = "Tracks")
 ```
 
-
+# plot attributes of the data
 ```{r}
 # ggplot(s[[1]], aes(timestamp, device, size = x24h_active_percent))+geom_point()
-ggplot(s[[1]], aes(timestamp, pressure_mbar, col = device))+geom_path()+geom_point()
+ggplot(s[[1]], aes(timestamp, altitude, col = device))+geom_path()+geom_point()
+ggplot(s[[1]], aes(timestamp, avg_temp, col = device))+geom_path()+geom_point()
+ggplot(s[[1]], aes(timestamp, vedba_sum, col = device))+geom_path()+geom_point()
+ggplot(s[[1]], aes(timestamp, distance, col = device))+geom_path()+geom_point()
 
+```
+
+# save the data
+While tag data will be saved to Movebank, this allows you to keep a local copy to view and analyze
+```{r}
+# save(s, capture_sheet, data, file = "nanofox_tag_data.robj")
 ```
 

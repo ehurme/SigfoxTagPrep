@@ -118,8 +118,17 @@ sigfox_download <- function(tag_ID = NA,
       message(paste("Failed to retrieve data for bat", tags[i], "after", download_attempts, "attempts."))
     }
   }
+  df <- unique(df)
   # return(df)
   df$`24h Min. Pressure (mbar)` <- as.numeric(df$`24h Min. Pressure (mbar)`)
+
+  # combine Vedba and temperature values
+  if(tag_type == "nanofox"){
+    df <- df %>%
+      rowwise() %>%
+      mutate(vedba_sum = sum(c_across(starts_with("VeDBA ")), na.rm = TRUE),
+             avg_temp = mean(c_across(starts_with("Avg. Temp")), na.rm = TRUE))
+  }
 
   # add altitude from pressure
   sea_level_pressure <- 1013.25

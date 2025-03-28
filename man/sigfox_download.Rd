@@ -6,7 +6,6 @@
 \usage{
 sigfox_download(
   tag_ID = NA,
-  tag_type = "tinyfox",
   ID = NA,
   ring = NA,
   attachment_type = NA,
@@ -24,14 +23,13 @@ sigfox_download(
   deploy_on_latitude = NA,
   deploy_on_longitude = NA,
   roost = NA,
+  tag_type = "tinyfox",
   firmware = NA,
   download_attempts = 5
 )
 }
 \arguments{
 \item{tag_ID}{Character; Biologger ID.}
-
-\item{tag_type}{Character; Tag version, e.g. tinyfox, nanofox, torpor}
 
 \item{ID}{Character; PIT-tag identifier.}
 
@@ -62,6 +60,8 @@ sigfox_download(
 \item{capture_longitude}{Numeric; Longitude of capture location.}
 
 \item{roost}{Character; Roost identifier.}
+
+\item{tag_type}{Character; Tag version, e.g. tinyfox, nanofox, torpor}
 
 \item{firmware}{Character; Firmware version of the tag}
 
