@@ -194,8 +194,25 @@ sigfox_to_move2 <- function(tracks,
 
   # melt temperature and vedba
   if(tag_type == "nanofox"){
-
-
+    df_long <- m %>%
+      pivot_longer(
+        cols = matches("^(ve_dba|avg_temp)_\\d+_"),
+        names_to = c("metric", "time_window"),  # Removed 'descriptor'
+        names_pattern = "(ve_dba|avg_temp)_(\\d+)_.*",  # Adjusted regex to ignore descriptor
+        values_to = "value",
+        values_drop_na = TRUE
+      ) %>%
+      mutate(
+        time_window = as.numeric(time_window),
+        measurement_time = timestamp - lubridate::minutes(36 * time_window),
+        metric = recode(metric,
+                        "ve_dba" = "vedba",
+                        "avg_temp" = "temperature")
+      ) %>%
+      pivot_wider(
+        names_from = metric,
+        values_from = value
+      )
   }
 
   # Check for tags with more than one location
@@ -218,17 +235,19 @@ sigfox_to_move2 <- function(tracks,
   # Regularize to daily locations
   suppressWarnings(m_day <- regularize_to_daily(tracks))
 
-  # Plotting
-  if (plot_tracks) {
-    p <- plot_tracking_data(m, ml,
-                            include_legend,
-                            plot_lines = make_lines)
-    m <- list(m, ml, m_day, p)
-  } else {
-    m <- list(m, ml, m_day)
+  results <- list()
+  results[[1]] <- m
+  if(make_lines){
+    results[[2]] <- ml
   }
-
-  return(m)
+  results[[3]] <- m_day
+  if(plot_tracks){
+    results[[4]] <- p
+  }
+  if(tag_type == "nanofox"){
+    results[[5]] <- df_long
+  }
+  return(results)
 }
 
 #' Preprocess move2 Data
