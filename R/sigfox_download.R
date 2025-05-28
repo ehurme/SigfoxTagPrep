@@ -50,6 +50,7 @@ sigfox_download <- function(tag_ID = NA,
                             deploy_on_latitude = NA,
                             deploy_on_longitude = NA,
                             roost = NA,
+                            researcher = NA,
                             tag_type = "tinyfox",
                             firmware = NA,
                             download_attempts = 5) {
@@ -73,6 +74,7 @@ sigfox_download <- function(tag_ID = NA,
   sex <- if(length(sex) == 0) rep(NA, num_rows) else sex
   age <- if(length(age) == 0) rep(NA, num_rows) else age
   repro_status <- if(length(repro_status) == 0) rep(NA, num_rows) else repro_status
+  researcher <- if(length(researcher) == 0) rep(NA, num_rows) else researcher
   species <- if(length(species) == 0) rep(NA, num_rows) else species
   release_time <- if(length(release_time) == 0) rep(NA, num_rows) else release_time
   capture_latitude <- if(length(capture_latitude) == 0) rep(NA, num_rows) else capture_latitude
@@ -86,7 +88,7 @@ sigfox_download <- function(tag_ID = NA,
                              repro_status, species, release_time,
                              capture_latitude, capture_longitude,
                              deploy_on_latitude, deploy_on_longitude,
-                             roost, firmware, stringsAsFactors = FALSE)
+                             roost, researcher, firmware, stringsAsFactors = FALSE)
   capture_data <- capture_data[which(nchar(capture_data$tag_ID) > 1),]
 
   capture_data$tag_ID <- stringr::str_remove(capture_data$tag_ID, "^0+")
@@ -219,7 +221,7 @@ process_data <- function(df, capture_data) {
       repro_status, species, release_time,
       capture_latitude, capture_longitude,
       deploy_on_latitude, deploy_on_longitude,
-      roost, firmware)
+      roost, researcher, firmware)
 
   # Combine initial rows with the main data frame
   joined_df <- bind_rows(initial_rows, df) %>%
