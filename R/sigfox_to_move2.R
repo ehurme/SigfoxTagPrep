@@ -74,6 +74,7 @@ sigfox_to_move2 <- function(tracks,
   # Additional tracks processing steps
   tracks <- determine_day_night(tracks)
   tracks$time_to_noon <- difftime(tracks$timestamp, tracks$noon, units = "hours")
+  tracks <- diff_time(tracks)
 
   if(tag_type == "tinyfox"){
     tracks <- determine_bursts(tracks)
@@ -219,6 +220,8 @@ sigfox_to_move2 <- function(tracks,
       )
   }
 
+
+
   # Check for tags with more than one location
   ml <- {}
   if(make_lines){
@@ -237,7 +240,14 @@ sigfox_to_move2 <- function(tracks,
   }
 
   # Regularize to daily locations
-  suppressWarnings(m_day <- regularize_to_daily(tracks))
+
+  if(tag_type != "nanofox"){
+    suppressWarnings(m_day <- regularize_to_daily(tracks))
+  }
+
+  if(tag_type == "nanofox"){
+    suppressWarnings(m_day <- regularize_to_daily(df_long))
+  }
 
   results <- list()
   results[[1]] <- m

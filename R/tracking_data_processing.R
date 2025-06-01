@@ -225,8 +225,44 @@ diff_dist <- function(data) {
   return(data)
 }
 
-
 #' Calculate Differential VeDBA and Time Between Sequential Points
+#'
+#' This function iterates through tracking data for each unique tag ID, calculating the difference
+#' in VeDBA (vectorial dynamic body acceleration) between sequential records and the time difference
+#' between these records.
+#'
+#' @param data A data frame with tracking data that must include `tag_id`, `timestamp`, and `total_vedba` columns.
+#' @return The input data frame with additional columns `diff_vedba` for the VeDBA difference and
+#'         `diff_time` for the time difference in minutes between each record and its successor.
+diff_time <- function(data) {
+  # Ensure data is sorted by tag_id and timestamp
+  data <- data[order(data$tag_id, data$timestamp),]
+
+  # Initialize the diff_time column with NAs
+  data$diff_time <- NA_real_
+
+  # Get unique tag IDs
+  unique_tags <- unique(data$tag_id)
+
+  for (tag in unique_tags) {
+    # Subset data for the current tag
+    tag_data <- data[data$tag_id == tag,]
+
+    if (nrow(tag_data) > 1) {
+      for (i in 1:(nrow(tag_data) - 1)) {
+        # Calculate time difference in minutes
+        tag_data$diff_time[i] <- as.numeric(difftime(tag_data$timestamp[i + 1], tag_data$timestamp[i], units = "mins"))
+      }
+    }
+
+    # Update the original data with VeDBA and time differences for the current tag
+    data[data$tag_id == tag,] <- tag_data
+  }
+
+  return(data)
+}
+
+#' Calculate Differential VeDBA Between Sequential Points
 #'
 #' This function iterates through tracking data for each unique tag ID, calculating the difference
 #' in VeDBA (vectorial dynamic body acceleration) between sequential records and the time difference
@@ -241,7 +277,6 @@ diff_vedba <- function(data) {
 
   # Initialize the diff_vedba and diff_time columns with NAs
   data$diff_vedba <- NA_real_
-  data$diff_time <- NA_real_
 
   # Get unique tag IDs
   unique_tags <- unique(data$tag_id)
@@ -255,8 +290,6 @@ diff_vedba <- function(data) {
         # Calculate difference in VeDBA
         tag_data$diff_vedba[i] <- tag_data$total_vedba[i + 1] - tag_data$total_vedba[i]
 
-        # Calculate time difference in minutes
-        tag_data$diff_time[i] <- as.numeric(difftime(tag_data$timestamp[i + 1], tag_data$timestamp[i], units = "mins"))
       }
     }
 
@@ -333,47 +366,117 @@ regularize_to_daily <- function(data) {
     stop("Package 'lubridate' is required but not installed.")
   }
 
+
+
   # Calculate additional metrics if necessary, e.g., distance, bearing, before summarizing
+  #if(any(!is.na(data$position)){
+    data <- data %>%
+      arrange(tag_id, timestamp) %>%
+      mutate(
+        ID = tag_id,
+        date = as.Date(timestamp)
+        # location_lat = sapply(strsplit(position, ","), "[", 1) %>% as.numeric(),
+        # location_lon = sapply(strsplit(position, ","), "[", 2) %>% as.numeric(),
+        # Assuming calculate_bearing_for_sequential_points and diff_dist are already applied to the data
+        # distance_moved = distance, # Uncomment or modify according to your dataset
+        # bearing_change = bearing # Uncomment or modify according to your dataset
+      )
+  # }
   data <- data %>%
-    arrange(tag_id, timestamp) %>%
     mutate(
-      ID = tag_id,
-      date = as.Date(timestamp),
-      location_lat = sapply(strsplit(position, ","), "[", 1) %>% as.numeric(),
-      location_lon = sapply(strsplit(position, ","), "[", 2) %>% as.numeric(),
-      # Assuming calculate_bearing_for_sequential_points and diff_dist are already applied to the data
-      # distance_moved = distance, # Uncomment or modify according to your dataset
-      # bearing_change = bearing # Uncomment or modify according to your dataset
+      location_lat = latitude,
+      location_lon = longitude
     )
 
+
   # Daily summaries
-  data %>%
-    group_by(ID, burst_id) %>%
-    reframe(
-      species = species[1],
-      sex = sex[1],
-      lat = location_lat[which.min(abs(time_to_noon))],
-      lon = location_lon[which.min(abs(time_to_noon))],
-      diff_noon = time_to_noon[which.min(abs(time_to_noon))],
-      time = timestamp[which.min(abs(time_to_noon))],
-      daily_distance = sum(distance, na.rm = TRUE),
-      vedba_min = min(total_vedba, na.rm = TRUE),
-      vedba_max = max(total_vedba, na.rm = TRUE),
-      vedba_noon = total_vedba[which.min(abs(time_to_noon))],
-      activity = x24h_active_percent[which.min(abs(time_to_noon))],
-      radius = max(radius)/1000,
-      accuracy = link_quality[which.min(abs(time_to_noon))],
-      min_temp = min(x24h_min_temperature_c, na.rm = TRUE),
-      max_temp = max(x24h_max_temperature_c, na.rm = TRUE),
-      capture_mass = first(capture_weight),
-      fa = first(fa_length),
-      tag_mass = first(tag_weight),
-      #is_capture_location = is.na(raw_data),
-      day_night = first(day_night)
-      #.groups = 'drop'
-    ) -> m_day
-  m_day$vedba_min[which(is.infinite(m_day$vedba_min))] <- NA
-  m_day$vedba_max[which(is.infinite(m_day$vedba_max))] <- NA
+  if(any(data$tag_type == "tinyfox")){
+    data %>%
+      group_by(ID, burst_id) %>%
+      reframe(
+        species = species[1],
+        sex = sex[1],
+        lat = location_lat[which.min(abs(time_to_noon))],
+        lon = location_lon[which.min(abs(time_to_noon))],
+        diff_noon = time_to_noon[which.min(abs(time_to_noon))],
+        time = timestamp[which.min(abs(time_to_noon))],
+        daily_distance = sum(distance, na.rm = TRUE),
+        vedba_min = min(total_vedba, na.rm = TRUE),
+        vedba_max = max(total_vedba, na.rm = TRUE),
+        vedba_noon = total_vedba[which.min(abs(time_to_noon))],
+        activity = x24h_active_percent[which.min(abs(time_to_noon))],
+        radius = max(radius)/1000,
+        accuracy = link_quality[which.min(abs(time_to_noon))],
+        min_temp = min(x24h_min_temperature_c, na.rm = TRUE),
+        max_temp = max(x24h_max_temperature_c, na.rm = TRUE),
+        capture_mass = first(capture_weight),
+        fa = first(fa_length),
+        tag_mass = first(tag_weight),
+        #is_capture_location = is.na(raw_data),
+        day_night = first(day_night)
+        #.groups = 'drop'
+      ) -> m_day
+
+    m_day$vedba_min[which(is.infinite(m_day$vedba_min))] <- NA
+    m_day$vedba_max[which(is.infinite(m_day$vedba_max))] <- NA
+  }
+
+  if(any(data$tag_type == "nanofox")){
+    data %>%
+      group_by(ID, date) %>%
+      reframe(
+        species = species[1],
+        sex = sex[1],
+        lat = location_lat[which.min(abs(time_to_noon))],
+        lon = location_lon[which.min(abs(time_to_noon))],
+        diff_noon = time_to_noon[which.min(abs(time_to_noon))],
+        time = timestamp[which.min(abs(time_to_noon))],
+        daily_distance = sum(distance, na.rm = TRUE),
+        #vedba_min = min(total_vedba, na.rm = TRUE),
+        vedba_sum = sum(vedba, na.rm = TRUE),
+        vedba_n = n(),
+        #vedba_noon = total_vedba[which.min(abs(time_to_noon))],
+        #activity = x24h_active_percent[which.min(abs(time_to_noon))],
+        radius = max(radius)/1000,
+        accuracy = link_quality[which.min(abs(time_to_noon))],
+        min_temp = min(temperature, na.rm = TRUE),
+        max_temp = max(temperature, na.rm = TRUE),
+        capture_mass = first(capture_weight),
+        fa = first(fa_length),
+        tag_mass = first(tag_weight),
+        #is_capture_location = is.na(raw_data),
+        day_night = first(day_night)
+        #.groups = 'drop'
+      ) -> m_day
+  }
+  if(any(data$tag_type == "uWasp")){
+    data %>%
+      group_by(ID, date) %>%
+      reframe(
+        species = species[1],
+        sex = sex[1],
+        lat = location_lat[which.min(abs(time_to_noon))],
+        lon = location_lon[which.min(abs(time_to_noon))],
+        diff_noon = time_to_noon[which.min(abs(time_to_noon))],
+        time = timestamp[which.min(abs(time_to_noon))],
+        daily_distance = sum(distance, na.rm = TRUE),
+        #vedba_min = min(total_vedba, na.rm = TRUE),
+        #vedba_sum = sum(total_vedba, na.rm = TRUE),
+        #vedba_noon = total_vedba[which.min(abs(time_to_noon))],
+        #activity = x24h_active_percent[which.min(abs(time_to_noon))],
+        radius = max(radius)/1000,
+        accuracy = link_quality[which.min(abs(time_to_noon))],
+        min_temp = min(temperature, na.rm = TRUE),
+        max_temp = max(temperature, na.rm = TRUE),
+        capture_mass = first(capture_weight),
+        fa = first(fa_length),
+        tag_mass = first(tag_weight),
+        #is_capture_location = is.na(raw_data),
+        day_night = first(day_night)
+        #.groups = 'drop'
+      ) -> m_day
+  }
+
   m_day$min_temp[which(is.infinite(m_day$min_temp))] <- NA
   m_day$max_temp[which(is.infinite(m_day$max_temp))] <- NA
 
