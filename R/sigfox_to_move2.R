@@ -74,11 +74,14 @@ sigfox_to_move2 <- function(tracks,
   # Additional tracks processing steps
   tracks <- determine_day_night(tracks)
   tracks$time_to_noon <- difftime(tracks$timestamp, tracks$noon, units = "hours")
-  tracks <- determine_bursts(tracks)
-  tracks$total_vedba <- tracks$total_ve_dba * 3.9 / 1000  # Conversion factor
 
-  tracks <- diff_vedba(tracks)
-  tracks$vpm <- tracks$diff_vedba / tracks$diff_time
+  if(tag_type == "tinyfox"){
+    tracks <- determine_bursts(tracks)
+    tracks$total_vedba <- tracks$total_ve_dba * 3.9 / 1000  # Conversion factor
+
+    tracks <- diff_vedba(tracks)
+    tracks$vpm <- tracks$diff_vedba / tracks$diff_time
+  }
 
   tracks <- diff_dist(tracks)
   tracks$ground_sp <- tracks$distance / (tracks$diff_time * 60)
@@ -87,12 +90,15 @@ sigfox_to_move2 <- function(tracks,
   tracks$doy <- lubridate::yday(tracks$timestamp)
 
   # Check for motionless tags and determine if a tag fell off
-  motionless_tag <- 280800 / (60 * 24) * 3.9 / 1000
-  tracks <- tag_fell_off(tracks, vedba_threshold = motionless_tag * 2)
+  if(tag_type == "tinyfox"){
+    motionless_tag <- 280800 / (60 * 24) * 3.9 / 1000
+    tracks <- tag_fell_off(tracks, vedba_threshold = motionless_tag * 2)
 
-  if(motionless){
-    tracks <- tracks[tracks$tag_fell_off == FALSE,]
+    if(motionless){
+      tracks <- tracks[tracks$tag_fell_off == FALSE,]
+    }
   }
+
   # Convert to move2 object
   m <- move2::mt_as_move2(
     x = tracks,
@@ -126,7 +132,7 @@ sigfox_to_move2 <- function(tracks,
       tag_firmware = if (all(is.na(firmware))) NA else factor(first(na.omit(firmware))),
       tag_mass_total = first(tag_weight),
       tag_readout_method = factor("LPWAN"),
-      tag_settings = NA, # factor("tinyfox"),
+      tag_settings = first(tag_type), # factor("tinyfox"),
       sensor_type_ids = factor("sigfox-geolocation"),
       # capture_location = if (all(is.na(capture_latitude))) st_point(x = c(NA_real_, NA_real_)) else factor(first(na.omit(st_point(x = c(capture_longitude,
       capture_latitude = if (all(is.na(capture_latitude))) NA else as.numeric(first(na.omit(capture_latitude))),
@@ -189,8 +195,6 @@ sigfox_to_move2 <- function(tracks,
   m <- m %>%
     mt_set_track_id(value = "tag_id") %>%
     mt_set_time(value = "timestamp")
-
-
 
   # melt temperature and vedba
   if(tag_type == "nanofox"){
