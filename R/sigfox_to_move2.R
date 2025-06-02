@@ -253,7 +253,9 @@ sigfox_to_move2 <- function(tracks,
   }
   results[[3]] <- m_day
   if(plot_tracks){
-    results[[4]] <- plot_tracking_data(m = m, ml = ml, plot_lines = TRUE)
+    results[[4]] <- plot_tracking_data(m = m, ml = ml,
+                                       legend = include_legend,
+                                       plot_lines = TRUE)
   }
   if(tag_type == "nanofox"){
     results[[5]] <- df_long
