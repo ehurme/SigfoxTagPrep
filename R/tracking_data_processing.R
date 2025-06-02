@@ -502,8 +502,11 @@ regularize_to_daily <- function(data) {
                                                      m_day$time[idx[k]],
                                                      units = "days"))
       try(m_day$time_running[idx[k]] <- difftime(m_day$time[idx[k]], m_day$time[idx[1]], units = "days"))
-      m_day$diff_vedba[idx[k]] <-  (as.numeric(m_day$vedba_noon[idx[k+1]] - m_day$vedba_noon[idx[k]]))
-      m_day$daily_vedba[idx[k]] <-  m_day$diff_vedba[idx[k]]/(m_day$diff_time[idx[k]])
+      if(tag_type == "tinyfox"){
+        m_day$diff_vedba[idx[k]] <-  (as.numeric(m_day$vedba_noon[idx[k+1]] - m_day$vedba_noon[idx[k]]))
+        m_day$daily_vedba[idx[k]] <-  m_day$diff_vedba[idx[k]]/(m_day$diff_time[idx[k]])
+      }
+
       try({m_day$bearing[idx[k]] <- calculate_bearing(lon1 = m_day$lon[idx[k]],
                                                       lat1 = m_day$lat[idx[k]],
                                                       lon2 = m_day$lon[idx[k+1]],

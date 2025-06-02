@@ -220,8 +220,6 @@ sigfox_to_move2 <- function(tracks,
       )
   }
 
-
-
   # Check for tags with more than one location
   ml <- {}
   if(make_lines){
@@ -240,7 +238,6 @@ sigfox_to_move2 <- function(tracks,
   }
 
   # Regularize to daily locations
-
   if(tag_type != "nanofox"){
     suppressWarnings(m_day <- regularize_to_daily(tracks))
   }
