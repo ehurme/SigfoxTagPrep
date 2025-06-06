@@ -84,6 +84,10 @@ sigfox_to_move2 <- function(tracks,
     tracks$vpm <- tracks$diff_vedba / tracks$diff_time
   }
 
+  if(tag_type == "nanofox"){
+    tracks$vpm <- tracks$vedba_sum * (2.6*3.9/(18*5))
+  }
+
   tracks <- diff_dist(tracks)
   tracks$ground_sp <- tracks$distance / (tracks$diff_time * 60)
 
@@ -218,6 +222,8 @@ sigfox_to_move2 <- function(tracks,
         names_from = metric,
         values_from = value
       )
+    df_long$vpm <- df_long$vedba * (2.6*3.9/18)
+    df_long <- tag_fell_off(data = df_long, vedba_threshold = 2)
   }
 
   # Check for tags with more than one location
