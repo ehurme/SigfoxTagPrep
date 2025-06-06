@@ -222,6 +222,8 @@ sigfox_to_move2 <- function(tracks,
         names_from = metric,
         values_from = value
       )
+
+    df_long <- determine_day_night(df_long)
     df_long$vpm <- df_long$vedba * (2.6*3.9/18)
     df_long <- tag_fell_off(data = df_long, vedba_threshold = 2)
   }
