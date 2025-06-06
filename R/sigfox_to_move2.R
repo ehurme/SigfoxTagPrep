@@ -213,7 +213,7 @@ sigfox_to_move2 <- function(tracks,
       ) %>%
       mutate(
         time_window = as.numeric(time_window),
-        measurement_time = timestamp - lubridate::minutes(36 * time_window),
+        timestamp = timestamp - lubridate::minutes(36 * time_window),
         metric = recode(metric,
                         "ve_dba" = "vedba",
                         "avg_temp" = "temperature")
@@ -224,6 +224,7 @@ sigfox_to_move2 <- function(tracks,
       )
 
     df_long <- determine_day_night(df_long)
+    df_long <- diff_time(df_long)
     df_long$vpm <- df_long$vedba * (2.6*3.9/18)
     df_long <- tag_fell_off(data = df_long, vedba_threshold = 2)
   }
