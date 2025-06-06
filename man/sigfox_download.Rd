@@ -23,6 +23,7 @@ sigfox_download(
   deploy_on_latitude = NA,
   deploy_on_longitude = NA,
   roost = NA,
+  researcher = NA,
   tag_type = "tinyfox",
   firmware = NA,
   download_attempts = 5
