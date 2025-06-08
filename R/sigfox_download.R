@@ -133,9 +133,10 @@ sigfox_download <- function(tag_ID = NA,
       df %>% mutate(
         tag_ID = tag_local_identifier,
         Device = tag_local_identifier,
+        timestamp = ymd_hms(timestamp),
         longitude = location_long,
         latitude = location_lat,
-        `Time (Paris)` = NA_character_,
+        `Time (Paris)` = as.character(timestamp),
         `Raw Data` = sigfox_sensor_data_raw,
         Position = NA_character_,
         `Radius (m) (Source/Status)` = as.character(sigfox_computed_location_radius),
@@ -150,7 +151,7 @@ sigfox_download <- function(tag_ID = NA,
         Operator = sigfox_operator,
         `Country Code` = sigfox_country,
         `Base Stations (ID, RSSI, Reps)` = NA_character_) %>%
-        dplyr::select(tag_ID, Device, longitude, latitude, `Time (Paris)`,
+        dplyr::select(tag_ID, Device, timestamp, longitude, latitude, `Time (Paris)`,
                `Raw Data`, Position,
                `Radius (m) (Source/Status)`, `Total VeDBA`,
                `24h Min. Temperature (??C)`,
@@ -190,7 +191,7 @@ sigfox_download <- function(tag_ID = NA,
 
   processed_data <- df
   try({
-      processed_data <- process_data(processed_data, capture_data)
+      processed_data <- process_data(df = processed_data, capture_data = capture_data)
   })
   processed_data$tag_type <- tag_type
   return(processed_data)
@@ -234,9 +235,13 @@ retry_download <- function(url, max_attempts = 5) {
 process_data <- function(df, capture_data) {
   # Example processing steps
   # This should be replaced with actual data processing logic
-  df$timestamp <- lubridate::dmy_hms(df$`Time (Paris)`, tz = "Europe/Berlin")
-  df$latitude <- sapply(strsplit(as.character(df$Position), ","), `[`, 1) %>% as.numeric
-  df$longitude <- sapply(strsplit(as.character(df$Position), ","), `[`, 2) %>% as.numeric
+  if(is.null(df$timestamp)){
+    df$timestamp <- lubridate::dmy_hms(df$`Time (Paris)`, tz = "Europe/Berlin")
+  }
+  if(is.null(df$latitude)){
+    df$latitude <- sapply(strsplit(as.character(df$Position), ","), `[`, 1) %>% as.numeric
+    df$longitude <- sapply(strsplit(as.character(df$Position), ","), `[`, 2) %>% as.numeric
+  }
 
   df <- df %>%
     left_join(capture_data, by = "tag_ID")
