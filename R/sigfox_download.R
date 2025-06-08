@@ -129,8 +129,7 @@ sigfox_download <- function(tag_ID = NA,
   if(!is.null(data)){
     df <- data
     if(movebank){
-      #TODO rename movebank names to match what we have been using
-      names(df)
+      # rename movebank names to match what we have been using
       df %>% mutate(
         tag_ID = tag_local_identifier,
         Device = tag_local_identifier,
@@ -165,8 +164,6 @@ sigfox_download <- function(tag_ID = NA,
     }
   }
 
-  try({df$`24h Min. Pressure (mbar)` <- as.numeric(df$`24h Min. Pressure (mbar)`)})
-
   # combine Vedba and temperature values
   if(tag_type == "nanofox"){
     df <- df %>%
@@ -176,15 +173,18 @@ sigfox_download <- function(tag_ID = NA,
   }
 
   # add altitude from pressure
-  sea_level_pressure <- 1013.25
-  if(tag_type == "nanofox"){
-    df$altitude <- 44330 * (1 - (as.numeric(df$`Pressure (mbar)` /
-                                              sea_level_pressure)^(1 / 5.255)))
-  }
-  if(tag_type == "tinyfox"){
-    if(grepl(pattern = "P", firmware)){
-      try({df$altitude = 44330 * (1 - (as.numeric(df$`24h Min. Pressure (mbar)` /
-                                               sea_level_pressure)^(1 / 5.255)))})
+  if(any(!is.na(df$`24h Min. Pressure (mbar)`))){
+    df$`24h Min. Pressure (mbar)` <- as.numeric(df$`24h Min. Pressure (mbar)`)
+    sea_level_pressure <- 1013.25
+    if(tag_type == "nanofox"){
+      df$altitude <- 44330 * (1 - (as.numeric(df$`Pressure (mbar)` /
+                                                sea_level_pressure)^(1 / 5.255)))
+    }
+    if(tag_type == "tinyfox"){
+      if(grepl(pattern = "P", firmware)){
+        df$altitude = 44330 * (1 - (as.numeric(df$`24h Min. Pressure (mbar)` /
+                                                      sea_level_pressure)^(1 / 5.255)))
+      }
     }
   }
 
