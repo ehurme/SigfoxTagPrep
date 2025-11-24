@@ -26,6 +26,9 @@ sigfox_download(
   researcher = NA,
   tag_type = "tinyfox",
   firmware = NA,
+  download = TRUE,
+  data = NULL,
+  movebank = FALSE,
   download_attempts = 5
 )
 }

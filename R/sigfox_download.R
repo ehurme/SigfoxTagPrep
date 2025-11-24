@@ -53,6 +53,9 @@ sigfox_download <- function(tag_ID = NA,
                             researcher = NA,
                             tag_type = "tinyfox",
                             firmware = NA,
+                            download = TRUE,
+                            data = NULL,
+                            movebank = FALSE,
                             download_attempts = 5) {
 
   # Ensure required packages are installed and loaded
@@ -104,25 +107,63 @@ sigfox_download <- function(tag_ID = NA,
     db_url = "https://mpiab.4lima.de/torpor.php?id="
   }
 
-  df <- data.table()
+  if(download){
+    df <- data.table()
 
-  for(i in seq_along(tags)) {
-    message(paste0("tag ", tags[i], ": ", i, " out of ", length(tags)))
-    url <- paste0(db_url, tags[i])
+    for(i in seq_along(tags)) {
+      message(paste0("tag ", tags[i], ": ", i, " out of ", length(tags)))
+      url <- paste0(db_url, tags[i])
 
-    d <- retry_download(url, max_attempts = download_attempts)
+      d <- retry_download(url, max_attempts = download_attempts)
 
-    if (!is.null(d) && length(d) >= 2) {
-      d[[2]]$tag_ID <- tags[i]
-      df <- rbind(df, d[[2]])
-      #TODO extract activation messages
-    } else {
-      message(paste("Failed to retrieve data for bat", tags[i], "after", download_attempts, "attempts."))
+      if (!is.null(d) && length(d) >= 2) {
+        d[[2]]$tag_ID <- tags[i]
+        df <- rbind(df, d[[2]])
+        #TODO extract activation messages
+      } else {
+        message(paste("Failed to retrieve data for bat", tags[i], "after", download_attempts, "attempts."))
+      }
+    }
+    df <- unique(df)
+  }
+  if(!is.null(data)){
+    df <- data
+    if(movebank){
+      # rename movebank names to match what we have been using
+      df %>% mutate(
+        tag_ID = tag_local_identifier,
+        Device = tag_local_identifier,
+        timestamp = ymd_hms(timestamp),
+        longitude = location_long,
+        latitude = location_lat,
+        `Time (Paris)` = as.character(timestamp),
+        `Raw Data` = sigfox_sensor_data_raw,
+        Position = NA_character_,
+        `Radius (m) (Source/Status)` = as.character(sigfox_computed_location_radius),
+        `Total VeDBA` = tinyfox_total_vedba,
+        `24h Min. Temperature (??C)` = tinyfox_temperature_min_last_24h,
+        `24h Max. Temperature (??C)` = tinyfox_temperature_min_last_24h,
+        `24h Active (%)` = tinyfox_activity_percent_last_24h,
+        `24h Min. Pressure (mbar)` = NA_real_,
+        `Seq. Number` = sequence_number,
+        LQI = sigfox_lqi,
+        `Link Quality` = sigfox_link_quality,
+        Operator = sigfox_operator,
+        `Country Code` = sigfox_country,
+        `Base Stations (ID, RSSI, Reps)` = NA_character_) %>%
+        dplyr::select(tag_ID, Device, timestamp, longitude, latitude, `Time (Paris)`,
+               `Raw Data`, Position,
+               `Radius (m) (Source/Status)`, `Total VeDBA`,
+               `24h Min. Temperature (??C)`,
+               `24h Max. Temperature (??C)`,
+               `24h Active (%)`,
+               `24h Min. Pressure (mbar)`,
+               `Seq. Number`, LQI, `Link Quality`,
+               Operator, `Country Code`,
+               `Base Stations (ID, RSSI, Reps)`) -> df
+
     }
   }
-  df <- unique(df)
-  # return(df)
-  df$`24h Min. Pressure (mbar)` <- as.numeric(df$`24h Min. Pressure (mbar)`)
 
   # combine Vedba and temperature values
   if(tag_type == "nanofox"){
@@ -133,17 +174,24 @@ sigfox_download <- function(tag_ID = NA,
   }
 
   # add altitude from pressure
-  sea_level_pressure <- 1013.25
-  if(tag_type == "nanofox"){
-    df$altitude <- 44330 * (1 - (as.numeric(df$`Pressure (mbar)` / sea_level_pressure)^(1 / 5.255)))
-  }
-  if(tag_type == "tinyfox"){
-    df$altitude = 44330 * (1 - (as.numeric(df$`24h Min. Pressure (mbar)` / sea_level_pressure)^(1 / 5.255)))
+  if(any(!is.na(df$`24h Min. Pressure (mbar)`))){
+    df$`24h Min. Pressure (mbar)` <- as.numeric(df$`24h Min. Pressure (mbar)`)
+    sea_level_pressure <- 1013.25
+    if(tag_type == "nanofox"){
+      df$altitude <- 44330 * (1 - (as.numeric(df$`Pressure (mbar)` /
+                                                sea_level_pressure)^(1 / 5.255)))
+    }
+    if(tag_type == "tinyfox"){
+      if(grepl(pattern = "P", firmware)){
+        df$altitude = 44330 * (1 - (as.numeric(df$`24h Min. Pressure (mbar)` /
+                                                      sea_level_pressure)^(1 / 5.255)))
+      }
+    }
   }
 
   processed_data <- df
   try({
-      processed_data <- process_data(processed_data, capture_data)
+      processed_data <- process_data(df = processed_data, capture_data = capture_data)
   })
   processed_data$tag_type <- tag_type
   return(processed_data)
@@ -187,9 +235,13 @@ retry_download <- function(url, max_attempts = 5) {
 process_data <- function(df, capture_data) {
   # Example processing steps
   # This should be replaced with actual data processing logic
-  df$timestamp <- lubridate::dmy_hms(df$`Time (Paris)`, tz = "Europe/Berlin")
-  df$latitude <- sapply(strsplit(as.character(df$Position), ","), `[`, 1) %>% as.numeric
-  df$longitude <- sapply(strsplit(as.character(df$Position), ","), `[`, 2) %>% as.numeric
+  if(is.null(df$timestamp)){
+    df$timestamp <- lubridate::dmy_hms(df$`Time (Paris)`, tz = "Europe/Berlin")
+  }
+  if(is.null(df$latitude)){
+    df$latitude <- sapply(strsplit(as.character(df$Position), ","), `[`, 1) %>% as.numeric
+    df$longitude <- sapply(strsplit(as.character(df$Position), ","), `[`, 2) %>% as.numeric
+  }
 
   df <- df %>%
     left_join(capture_data, by = "tag_ID")

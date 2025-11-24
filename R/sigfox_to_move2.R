@@ -77,11 +77,16 @@ sigfox_to_move2 <- function(tracks,
   tracks <- diff_time(tracks)
 
   if(tag_type == "tinyfox"){
-    tracks <- determine_bursts(tracks)
-    tracks$total_vedba <- tracks$total_ve_dba * 3.9 / 1000  # Conversion factor
+    if(all(grepl(pattern = "V1", x = tracks$tag_firmware))){
+      tracks <- determine_bursts(tracks)
+      tracks$total_vedba <- tracks$total_ve_dba * 3.9 / 1000  # Conversion factor
 
-    tracks <- diff_vedba(tracks)
-    tracks$vpm <- tracks$diff_vedba / tracks$diff_time
+      tracks <- diff_vedba(tracks)
+      tracks$vpm <- tracks$diff_vedba / tracks$diff_time
+    }
+    if(all(grepl(pattern = "BB", x = tracks$tag_firmware))){
+
+    }
   }
 
   if(tag_type == "nanofox"){
