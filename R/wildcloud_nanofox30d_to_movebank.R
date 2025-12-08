@@ -1,11 +1,11 @@
-# prep nanofox data for movebank
 wc_plut_INF_30Days_v1_2 <- function() {
   list(
     key_prop = list(
       time = list(
         # Original WildCloud time column and a new internal name
         timestamp_id  = "Time (UTC)",
-        timestamp_new = "timestamp_sf"
+        # THIS will be the final timestamp column name in movebank_df
+        timestamp_new = "timestamp SF transmission"
       ),
       split_cols = list(
         # Split Position -> latitude/longitude
@@ -17,40 +17,50 @@ wc_plut_INF_30Days_v1_2 <- function() {
         )
       )
     ),
-    # Sensor parameters ---------------------------------------------
+
+    # -------- Sensor parameters (as they appear in the CSV) --------
+
+    # VeDBA 5 (raw); VeDBA 4 (raw); ...; VeDBA 1 (raw)
     VeDBA = list(
-      time_offset  = 36,         # minutes between VeDBA samples
-      col_name_id  = "VeDBA ",   # matches "VeDBA 5", "VeDBA 4", ...
-      col_name_ext = "",
-      raw_dim      = "",         # IMPORTANT: no " [LSB]" – matches headers
-      physical_dim = " [m/s2]",
+      time_offset  = 36,          # minutes between VeDBA samples
+      col_name_id  = "VeDBA ",    # prefix (matches "VeDBA 5 (raw)")
+      col_name_ext = "(raw)",     # suffix, not heavily used
+      raw_dim      = " [LSB]",    # raw col name: "VeDBA [LSB]"
+      physical_dim = " [m/s²]",   # physical col: "VeDBA [m/s²]"
       raw2physical = "acc"
     ),
+
+    # Avg. Temp 5 (°C); ...; Avg. Temp 1 (°C)
     temperature = list(
-      time_offset  = 0,
-      col_name_id  = "Avg. Temp ",
-      col_name_ext = " (°C)",
-      raw_dim      = " [°C]",
+      time_offset  = 36,
+      col_name_id  = "Avg. Temp ",  # prefix
+      col_name_ext = "(°C)",        # header is "Avg. Temp 5 (°C)" etc.
+      raw_dim      = " [°C]",       # "temperature [°C]"
       physical_dim = " [°C]",
       raw2physical = FALSE
     ),
+
+    # Min. Temp(°C) – categorical string, not numeric
     min_temp = list(
-      time_offset  = 0,
-      col_name_id  = "Min. Temp",
-      col_name_ext = " (°C)",
-      raw_dim      = " [°C]",
+      time_offset  = 180,
+      col_name_id  = "Min. Temp",   # matches "Min. Temp(°C)"
+      col_name_ext = "(°C)",        # no space in header
+      raw_dim      = " [°C]",       # "min_temp [°C]" (character)
       physical_dim = " [°C]",
       raw2physical = FALSE
     ),
+
+    # Pressure (mbar)
     pressure = list(
       time_offset  = 180,
-      col_name_id  = "Pressure",
-      col_name_ext = " (mbar)",
-      raw_dim      = " [mbar]",
+      col_name_id  = "Pressure ",   # matches "Pressure (mbar)"
+      col_name_ext = "(mbar)",
+      raw_dim      = " [mbar]",     # "pressure [mbar]"
       physical_dim = " [mbar]",
       raw2physical = FALSE
     ),
-    # “location” acts like a parameter whose value is the Position column
+
+    # Location "parameter" (Position string)
     location = list(
       time_offset  = 0,
       col_name_id  = "Position",
@@ -104,22 +114,33 @@ wc_lsb2acc <- function(x,
   x <- as.numeric(x)
   norm_f <- if (isTRUE(normation)) n_bursts * n_samples else 1
 
+  # returns acceleration in m/s² scaled as in the original Python
   (g_range * x / (2^bit_width) - offset_f * g_range) * 9.81 * scaling_f / norm_f
 }
 
 wc_df_to_dpl <- function(raw_df,
-                         plut             = wc_plut_INF_30Days_v1_2(),
-                         product          = "INF",
-                         firmware         = "30Days",
-                         raw2physical     = FALSE,
+                         plut              = wc_plut_INF_30Days_v1_2(),
+                         product           = "INF",
+                         firmware          = "30Days",
+                         raw2physical      = FALSE,
                          norm_multisamples = TRUE,
-                         tz               = "UTC") {
+                         tz                = "UTC") {
 
   stopifnot(is.data.frame(raw_df))
 
-  # --- 1) Time parsing -------------------------------------------
+  # --- 0) Remove exact duplicates at Sigfox level ------------------
+  raw_df <- raw_df |>
+    dplyr::distinct(
+      Device,
+      `Time (UTC)`,
+      `Raw Data`,
+      `Position`,
+      .keep_all = TRUE
+    )
+
+  # --- 1) Time parsing ---------------------------------------------
   time_colname <- plut$key_prop$time$timestamp_id
-  col_SF_time  <- plut$key_prop$time$timestamp_new
+  col_SF_time  <- plut$key_prop$time$timestamp_new   # "timestamp SF transmission"
 
   if (!time_colname %in% names(raw_df)) {
     stop("Time column '", time_colname, "' not found in raw_df.")
@@ -131,7 +152,7 @@ wc_df_to_dpl <- function(raw_df,
     gsub(",", "", x = _) |>
     lubridate::dmy_hms(tz = tz)
 
-  # --- 2) Determine parameter vs non-parameter columns -----------
+  # --- 2) Determine parameter vs non-parameter columns -------------
   param_keys <- setdiff(names(plut), "key_prop")
 
   param_ids <- vapply(param_keys, function(k) plut[[k]]$col_name_id, character(1))
@@ -143,38 +164,53 @@ wc_df_to_dpl <- function(raw_df,
   # Template Sigfox-level df (one row per transmission)
   SF_df <- raw_df[, non_param_cols, drop = FALSE]
 
-  # Ensure Sigfox timestamp uses the new name
+  # Ensure Sigfox timestamp uses the new name (timestamp SF transmission)
   names(SF_df)[names(SF_df) == time_colname] <- col_SF_time
 
   # Start with empty data-point-level df with same non-parameter columns
   proc_df <- SF_df[0, , drop = FALSE]
 
-  # --- 3) Expand each parameter to data-point rows ----------------
+  # --- 3) Expand each parameter to data-point rows -----------------
   for (param_name in param_keys) {
 
     pinfo        <- plut[[param_name]]
     col_id       <- pinfo$col_name_id
-    col_ext      <- pinfo$col_name_ext
     time_offset  <- pinfo$time_offset
     raw_dim      <- pinfo$raw_dim
     physical_dim <- pinfo$physical_dim
 
-    # All columns belonging to this parameter
+    # All columns belonging to this parameter (any header style)
     cols_for_param <- grep(paste0("^", col_id), names(raw_df), value = TRUE)
-    param_count    <- length(cols_for_param)
 
-    if (param_count == 0L) {
+    if (length(cols_for_param) == 0L) {
       next  # nothing to do for this parameter
     }
 
-    # For j = 1..param_count, create data-point rows
+    # Extract index numbers for multi-dimensional parameters
+    idx <- stringr::str_extract(cols_for_param, "\\d+")
+    idx <- unique(idx[!is.na(idx)])
+
+    if (length(idx) > 0L) {
+      # e.g. VeDBA 5 (raw) .. VeDBA 1 (raw); Avg. Temp 5..1
+      dims <- idx
+    } else {
+      # Single-column parameters (Min. Temp(°C), Pressure (mbar), Position)
+      dims <- ""
+    }
+
+    param_count <- length(dims)
+
+    # Decide which parameters are numeric
+    numeric_params <- c("Vedba", "VeDBA", "temperature", "pressure")
+    is_numeric_param <- !identical(pinfo$raw2physical, FALSE) ||
+      tolower(param_name) %in% tolower(numeric_params)
+
+    # Loop over each dimension j
     for (j in seq_len(param_count)) {
 
       tmp <- SF_df
 
-      # Time start/end, matching Python logic:
-      # start = SF_time - offset*(param_count - j + 1)
-      # end   = SF_time - offset*(param_count - j)
+      # Time start/end
       if (time_offset != 0) {
         offset_minutes_start <- time_offset * (param_count - j + 1)
         offset_minutes_end   <- time_offset * (param_count - j)
@@ -188,25 +224,29 @@ wc_df_to_dpl <- function(raw_df,
         tmp[["Time end"]]   <- tmp[[col_SF_time]]
       }
 
-      # Determine source column name (same logic as Python try/except)
-      cand1 <- paste0(col_id, j, col_ext)
-      cand2 <- paste0(col_id, col_ext)
-      cand3 <- col_id
+      # Choose the source column for this dimension
+      dim_tag <- dims[j]
 
-      candidates <- c(cand1, cand2, cand3)
-      src_col    <- candidates[candidates %in% names(raw_df)][1]
+      if (dim_tag != "") {
+        # e.g. pick "Avg. Temp 5 (°C)" for dim_tag == "5"
+        src_candidates <- cols_for_param[
+          stringr::str_detect(cols_for_param, paste0("\\b", dim_tag, "\\b"))
+        ]
+        if (length(src_candidates) == 0L) {
+          src_candidates <- cols_for_param  # fallback if header is odd
+        }
+      } else {
+        # no index: just use the first column we found
+        src_candidates <- cols_for_param
+      }
 
-      raw_col_name <- paste0(param_name, raw_dim)
+      src_col <- src_candidates[1]
 
-      # Decide if this parameter should be numeric.
-      # VeDBA, temperatures, and pressure should all be numeric.
-      is_numeric_param <- !identical(pinfo$raw2physical, FALSE) ||
-        grepl("temp|pressure|vedba", param_name, ignore.case = TRUE)
+      raw_col_name <- paste0(param_name, raw_dim)  # e.g. "VeDBA [LSB]"
 
-      if (!is.na(src_col)) {
+      if (!is.na(src_col) && nzchar(src_col)) {
         values <- raw_df[[src_col]]
         if (is_numeric_param) {
-          # force numeric for consistency; non-numeric become NA
           values <- suppressWarnings(as.numeric(values))
         }
         tmp[[raw_col_name]] <- values
@@ -214,11 +254,10 @@ wc_df_to_dpl <- function(raw_df,
         tmp[[raw_col_name]] <- if (is_numeric_param) NA_real_ else NA
       }
 
-
-      # Optional: convert to physical units (VeDBA -> m/s²)
+      # Optional: VeDBA raw -> VeDBA [m/s²]
       if (!identical(pinfo$raw2physical, FALSE) && isTRUE(raw2physical)) {
         if (identical(pinfo$raw2physical, "acc")) {
-          phys_col_name <- paste0(param_name, physical_dim)
+          phys_col_name <- paste0(param_name, physical_dim)  # "VeDBA [m/s²]"
           tmp[[phys_col_name]] <-
             wc_lsb2acc(tmp[[raw_col_name]],
                        mode      = "auto",
@@ -232,7 +271,7 @@ wc_df_to_dpl <- function(raw_df,
     }
   }
 
-  # --- 4) Split composite columns (Position -> lat/long) ---------
+  # --- 4) Split composite columns (Position -> lat/long) ----------
   param_split <- plut$key_prop$split_cols
 
   for (split_name in names(param_split)) {
@@ -256,16 +295,17 @@ wc_df_to_dpl <- function(raw_df,
     proc_df[[split_name]] <- NULL
   }
 
-  # --- 5) Remove duplicate rows ---------------------------------------
-  proc_df <- proc_df |>
-    dplyr::distinct(
-      Device,
-      `Time start`,
-      `Time end`,
-      `latitude [°]`,
-      `longitude [°]`,
-      .keep_all = TRUE
-    )
+  # NOTE: we leave duplicate removal commented out here – you can
+  # control that upstream or in the wrapper if needed.
+  # proc_df <- proc_df |>
+  #   dplyr::distinct(
+  #     Device,
+  #     `Time start`,
+  #     `Time end`,
+  #     `latitude [°]`,
+  #     `longitude [°]`,
+  #     .keep_all = TRUE
+  #   )
 
   proc_df
 }
@@ -300,80 +340,20 @@ wc_multicsv_to_dpl <- function(path,
   plut <- wc_plut_INF_30Days_v1_2()
 
   wc_df_to_dpl(
-    raw_df           = raw_df,
-    plut             = plut,
-    product          = product,
-    firmware         = firmware,
-    raw2physical     = raw2physical,
+    raw_df            = raw_df,
+    plut              = plut,
+    product           = product,
+    firmware          = firmware,
+    raw2physical      = raw2physical,
     norm_multisamples = norm_multisamples,
-    tz               = tz
+    tz                = tz
   )
 }
 
-library(tidyverse)
-library(lubridate)
-library(stringr)
-library(purrr)
-
-source("wc2movebank.R")  # file containing the functions above
-
-path <- "C:/Users/Edward/Dropbox/MPI/Moths/Data/wildcloud"
-
-movebank_df <- wc_multicsv_to_dpl(path,
-                                  raw2physical      = TRUE,
-                                  norm_multisamples = TRUE)
-
-movebank_df <- wc_multicsv_to_dpl(
-  path,
-  raw2physical      = TRUE,
-  norm_multisamples = TRUE
-) |>
-  dplyr::mutate(
-    Device           = as.character(Device),
-    timestamp_sf     = lubridate::as_datetime(timestamp_sf),
-    `Raw Data`       = as.character(`Raw Data`),
-    `Radius (m) (Source/Status)` = as.character(`Radius (m) (Source/Status)`),
-    `Sequence Number` = as.numeric(`Sequence Number`),
-    LQI              = as.character(LQI),
-    `Link Quality`   = as.numeric(`Link Quality`),
-    `Operator Name`  = as.character(`Operator Name`),
-    `Country Code`   = as.numeric(`Country Code`),
-    `Base Stations (ID, RSSI, Reps)` =
-      as.character(`Base Stations (ID, RSSI, Reps)`),
-    Compression      = as.character(Compression),
-    `Time start`     = lubridate::as_datetime(`Time start`),
-    `Time end`       = lubridate::as_datetime(`Time end`),
-    VeDBA            = as.numeric(VeDBA),
-    `VeDBA [m/s2]`   = as.numeric(`VeDBA [m/s2]`),
-    `temperature [°C]` = as.numeric(`temperature [°C]`),
-    `min_temp [°C]`    = as.numeric(`min_temp [°C]`),
-    `pressure [mbar]`  = as.numeric(`pressure [mbar]`),
-    `latitude [°]`     = as.numeric(`latitude [°]`),
-    `longitude [°]`    = as.numeric(`longitude [°]`)
-  )
-
-
-dplyr::glimpse(movebank_df)
-plot(movebank_df$`longitude [°]`, movebank_df$`latitude [°]`, col = factor(movebank_df$Device))
-movebank_df$Device %>% table()
-
-tmp <- movebank_df[which(movebank_df$`latitude [°]` < 0),]
-plot(tmp$`longitude [°]`, tmp$`latitude [°]`)
-glimpse(tmp)
-tmp$Device %>% unique() %>% paste
-
-# remove tags not in the study
-not_my_tags <- tmp$Device %>% unique
-
-movebank_clean <- movebank_df[-which(movebank_df$Device %in% not_my_tags),]
-plot(movebank_clean$`longitude [°]`, movebank_clean$`latitude [°]`, col = factor(movebank_clean$Device))
-ggplot()+
-  geom_sf(data = rnaturalearth::countries110)+
-  geom_path(data = movebank_clean,
-            aes(`longitude [°]`, `latitude [°]`, col = Device))+
-  ylim(c(30,60))+
-  xlim(c(0,30))+
-  theme(legend.position ="none")
-
-write.csv(movebank_clean, file = "../../../Dropbox/MPI/Moths/Data/movebank/movebank_fall_2025.csv")
-
+# movebank_df <- wc_multicsv_to_dpl(
+#   path,
+#   raw2physical      = TRUE,
+#   norm_multisamples = TRUE
+# )
+#
+# head(movebank_df)
