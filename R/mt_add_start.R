@@ -1,4 +1,4 @@
-# add start location to
+# add start location to move2 tracks
 
 mt_add_start <- function(m2){
   require(move2)
