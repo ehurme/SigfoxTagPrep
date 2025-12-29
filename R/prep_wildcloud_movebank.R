@@ -1,23 +1,25 @@
 prep_sigfox_movebank <- function(
     wc_path              = NULL,  # directory with WildCloud CSVs
-    movebank_csv_path    = NULL,  # alternative: existing movebank-style CSV
+    movebank_csv_path    = NULL,  # alternative: existing movebank-style CSV OR raw wildcloud export CSV
     animals_path,
     output_dir,
     movebank_project_name,
-    species              = "Acherontia atropos",
-    life_stage           = "Adult",
+    species              = NULL,
+    life_stage           = NULL,
     clean_lat_range      = NULL,  # e.g. c(30, 60) or NULL to skip
     clean_lon_range      = NULL   # e.g. c(0, 30) or NULL to skip
 ) {
-  # --- Libraries ----
-  library(dplyr)
-  library(tidyr)
-  library(stringr)
-  library(lubridate)
-  library(readr)
-  library(fs)
-  library(data.table)
-  source("./R/wildcloud_nanofox30d_to_movebank.R")
+  suppressPackageStartupMessages({
+    library(dplyr)
+    library(tidyr)
+    library(stringr)
+    library(lubridate)
+    library(readr)
+    library(fs)
+    library(data.table)
+    library(purrr)
+  })
+
   # ------------------------------------------------------------------
   # 0. Sanity checks on inputs
   # ------------------------------------------------------------------
@@ -36,24 +38,150 @@ prep_sigfox_movebank <- function(
   if (!dir_exists(output_dir)) dir_create(output_dir)
 
   # ------------------------------------------------------------------
+  # helpers
+  # ------------------------------------------------------------------
+  parse_wc_time_utc <- function(x) {
+    # handles "14.06.2025, 17:56:24"
+    x <- as.character(x)
+    x <- gsub(",", "", x)
+    lubridate::dmy_hms(x, tz = "UTC")
+  }
+
+  split_position <- function(df) {
+    if (!"Position" %in% names(df)) return(df)
+    parts <- stringr::str_split_fixed(df$Position, ",\\s*", 2)
+    df$`latitude [°]`  <- suppressWarnings(as.numeric(parts[, 1]))
+    df$`longitude [°]` <- suppressWarnings(as.numeric(parts[, 2]))
+    df
+  }
+
+  # Expand NEW wide schema into long Movebank-style dpl
+  expand_new_wide_schema <- function(df) {
+    # Requires "Time (UTC)" and at least one of the new VeDBA columns
+    if (!("Time (UTC)" %in% names(df))) return(df)
+
+    vedba_cols <- names(df)[str_detect(names(df), "^VeDBA sum\\s+\\d+\\s+min ago")]
+    temp_cols  <- names(df)[str_detect(names(df), "^Average temperature\\s+\\d+\\s+min ago")]
+
+    has_new <- length(vedba_cols) > 0 || length(temp_cols) > 0 ||
+      ("Min pressure of last 3 hrs (mbar)" %in% names(df)) ||
+      ("Min temperature of last 3 hrs (temperature range °C)" %in% names(df))
+
+    if (!has_new) return(df)
+
+    # Core time
+    df <- df %>%
+      mutate(
+        `timestamp SF transmission` = parse_wc_time_utc(`Time (UTC)`),
+        `Sequence Number` = suppressWarnings(as.numeric(`Sequence Number`)),
+        `Link Quality`    = suppressWarnings(as.numeric(`Link Quality`)),
+        `Country Code`    = suppressWarnings(as.numeric(`Country Code`))
+      )
+
+    df <- split_position(df)
+
+    # Build “base” (metadata) columns to repeat
+    base_cols <- intersect(
+      c("Device","Time (UTC)","Raw Data","Position","Radius (m) (Source/Status)","Sequence Number",
+        "LQI","Link Quality","Operator Name","Country Code","Base Stations (ID, RSSI, Reps)","Compression",
+        "timestamp SF transmission","latitude [°]","longitude [°]"),
+      names(df)
+    )
+
+    base <- df[, base_cols, drop = FALSE]
+
+    # ---- 5-sample streams (36 min bins): VeDBA + Avg Temp ----
+    # We interpret “X min ago” as the END of a 36-min window.
+    build_36min_long <- function(value_cols, value_name) {
+      if (length(value_cols) == 0) return(NULL)
+
+      long <- base %>%
+        select(all_of(base_cols)) %>%
+        mutate(.row_id = row_number()) %>%
+        left_join(
+          df %>%
+            mutate(.row_id = row_number()) %>%
+            select(.row_id, all_of(value_cols)),
+          by = ".row_id"
+        ) %>%
+        pivot_longer(
+          cols = all_of(value_cols),
+          names_to = "metric",
+          values_to = value_name
+        ) %>%
+        mutate(
+          minutes_ago = suppressWarnings(as.numeric(str_extract(metric, "\\d+"))),
+          .end = `timestamp SF transmission` - as.difftime(minutes_ago, units = "mins"),
+          `Time end`   = .end,
+          `Time start` = .end - as.difftime(36, units = "mins")
+        ) %>%
+        select(-metric, -minutes_ago, -.end, -.row_id)
+
+      long
+    }
+
+    vedba_long <- build_36min_long(vedba_cols, "VeDBA [m/s²]")
+    temp_long  <- build_36min_long(temp_cols,  "temperature [°C]")
+
+    # Coerce numerics
+    if (!is.null(vedba_long)) vedba_long$`VeDBA [m/s²]` <- suppressWarnings(as.numeric(vedba_long$`VeDBA [m/s²]`))
+    if (!is.null(temp_long))  temp_long$`temperature [°C]` <- suppressWarnings(as.numeric(temp_long$`temperature [°C]`))
+
+    # ---- 3-hour summaries: min temp (categorical) and min pressure (numeric) ----
+    three_hr <- base %>%
+      mutate(
+        `Time start` = `timestamp SF transmission` - as.difftime(180, units = "mins"),
+        `Time end`   = `timestamp SF transmission`
+      )
+
+    min_temp_col <- "Min temperature of last 3 hrs (temperature range °C)"
+    min_pres_col <- "Min pressure of last 3 hrs (mbar)"
+
+    min_temp_long <- NULL
+    if (min_temp_col %in% names(df)) {
+      min_temp_long <- three_hr %>%
+        mutate(`min_temp [°C]` = as.character(df[[min_temp_col]])) %>%
+        select(all_of(base_cols), `timestamp SF transmission`, `Time start`, `Time end`, `min_temp [°C]`)
+    }
+
+    pres_long <- NULL
+    if (min_pres_col %in% names(df)) {
+      pres_long <- three_hr %>%
+        mutate(`pressure [mbar]` = suppressWarnings(as.numeric(df[[min_pres_col]]))) %>%
+        select(all_of(base_cols), `timestamp SF transmission`, `Time start`, `Time end`, `pressure [mbar]`)
+    }
+
+    # Combine into one dpl-like data frame:
+    # We keep columns that exist and allow NAs for the rest (like your wc pipeline output)
+    out <- bind_rows(
+      vedba_long,
+      temp_long,
+      min_temp_long,
+      pres_long,
+      # also keep “location rows” (Time start=end=transmission)
+      base %>%
+        mutate(`Time start` = `timestamp SF transmission`,
+               `Time end`   = `timestamp SF transmission`) %>%
+        select(all_of(base_cols), `timestamp SF transmission`, `Time start`, `Time end`)
+    ) %>%
+      distinct(Device, `timestamp SF transmission`, `Time start`, `Time end`,
+               `latitude [°]`, `longitude [°]`, .keep_all = TRUE)
+
+    out
+  }
+
+  # ------------------------------------------------------------------
   # 1. Read capture sheet and prepare animals table
   # ------------------------------------------------------------------
-  animals <- read.csv(animals_path,
-                      header = TRUE, sep = ",", stringsAsFactors = FALSE)
+  animals <- read.csv(animals_path, header = TRUE, sep = ",", stringsAsFactors = FALSE)
+  # animals$species <- species
+  # animals$animal.life.stage <- life_stage
 
-  animals$species <- species
-  animals$animal.life.stage <- life_stage
-
-  # Helper: parse tagging / release times to Berlin time
   parse_tagging_time <- function(x) {
-    x <- ifelse(str_detect(x, "^\\d{4}-\\d{2}-\\d{2}$"),
-                paste0(x, " 12:00"),
-                x)
+    x <- ifelse(str_detect(x, "^\\d{4}-\\d{2}-\\d{2}$"), paste0(x, " 12:00"), x)
     dt <- parse_date_time(
       x,
-      orders = c("d/m/Y H:M", "d/m/Y H:M:S",
-                 "d-m-Y H:M", "d-m-Y H:M:S",
-                 "Y-m-d H:M", "Y-m-d"),
+      orders = c("d/m/Y H:M", "d/m/Y H:M:S", "d-m-Y H:M", "d-m-Y H:M:S", "Y-m-d H:M", "Y-m-d"),
       tz = "Europe/Berlin"
     )
     format(dt, "%Y-%m-%d %H:%M:%OS3")
@@ -61,108 +189,63 @@ prep_sigfox_movebank <- function(
 
   animals_mb <- animals %>%
     mutate(
-      Tag.ID   = tag_id,
-      Animal.ID = animal_id,
+      Tag.ID   = tag.id,
+      Animal.ID = animal.id,
       Species  = species,
       `animal.life.stage` = animal.life.stage,
-      `Weight..g.`        = mass_w_tag_g,      # or mass_g if you prefer
-      `Deploy.On.Latitude`  = release_latitude,
-      `Deploy.On.Longitude` = release_longitude,
-      `Timestamp.release`   = parse_tagging_time(date_released),
+      `Weight..g.`        = animal.mass,
+      `Deploy.On.Latitude`  = capture.latitude,
+      `Deploy.On.Longitude` = capture.longitude,
+      `Timestamp.release`   = deploy.on.date,
       Movebank.Project      = movebank_project_name
     )
 
   # ------------------------------------------------------------------
-  # 2. Get movebank_df: either from WC pipeline or existing CSV
+  # 2. Get movebank_df
   # ------------------------------------------------------------------
   if (!is.null(movebank_csv_path)) {
-    message("Reading existing movebank-style CSV: ", movebank_csv_path)
-    movebank_df <- data.table::fread(movebank_csv_path) %>%
-      as_tibble()
+    message("Reading CSV: ", movebank_csv_path)
+    movebank_df <- data.table::fread(movebank_csv_path) %>% as_tibble()
+    # If it's raw wildcloud wide schema, expand it
+    movebank_df <- expand_new_wide_schema(movebank_df)
   } else {
-    if (!exists("wc_multicsv_to_dpl")) {
-      stop("Function 'wc_multicsv_to_dpl' not found. Source your wildcloud_nanofox30d_to_movebank.R first.")
-    }
     message("Running wc_multicsv_to_dpl() on: ", wc_path)
+    source("./R/wildcloud_nanofox30d_to_movebank.R")  # must provide wc_multicsv_to_dpl
     movebank_df <- wc_multicsv_to_dpl(
       wc_path,
-      raw2physical      = TRUE,
+      raw2physical      = FALSE,
       norm_multisamples = TRUE
-    ) %>%
-      as_tibble()
+    ) %>% as_tibble()
   }
 
   # ------------------------------------------------------------------
-  # 3. Ensure key columns have correct types, using your actual names
+  # 3. Ensure expected columns / types (supports both schemas)
   # ------------------------------------------------------------------
-  # We don't change ANY names; we just coerce where present.
-  if ("Device" %in% names(movebank_df)) {
-    movebank_df$Device <- as.character(movebank_df$Device)
+  # Prefer consistent naming downstream:
+  if ("timestamp_sf" %in% names(movebank_df) && !"timestamp SF transmission" %in% names(movebank_df)) {
+    movebank_df <- movebank_df %>% mutate(`timestamp SF transmission` = lubridate::as_datetime(timestamp_sf))
   }
-  if ("timestamp SF transmission" %in% names(movebank_df)) {
-    movebank_df$`timestamp SF transmission` <-
-      lubridate::as_datetime(movebank_df$`timestamp SF transmission`)
+  if ("Time (UTC)" %in% names(movebank_df) && !"timestamp SF transmission" %in% names(movebank_df)) {
+    movebank_df <- movebank_df %>% mutate(`timestamp SF transmission` = parse_wc_time_utc(`Time (UTC)`))
   }
-  if ("Raw Data" %in% names(movebank_df)) {
-    movebank_df$`Raw Data` <- as.character(movebank_df$`Raw Data`)
-  }
-  if ("Radius (m) (Source/Status)" %in% names(movebank_df)) {
-    movebank_df$`Radius (m) (Source/Status)` <-
-      as.character(movebank_df$`Radius (m) (Source/Status)`)
-  }
-  if ("Sequence Number" %in% names(movebank_df)) {
-    movebank_df$`Sequence Number` <- as.numeric(movebank_df$`Sequence Number`)
-  }
-  if ("LQI" %in% names(movebank_df)) {
-    movebank_df$LQI <- as.character(movebank_df$LQI)
-  }
-  if ("Link Quality" %in% names(movebank_df)) {
-    movebank_df$`Link Quality` <- as.numeric(movebank_df$`Link Quality`)
-  }
-  if ("Operator Name" %in% names(movebank_df)) {
-    movebank_df$`Operator Name` <- as.character(movebank_df$`Operator Name`)
-  }
-  if ("Country Code" %in% names(movebank_df)) {
-    movebank_df$`Country Code` <- as.numeric(movebank_df$`Country Code`)
-  }
-  if ("Base Stations (ID, RSSI, Reps)" %in% names(movebank_df)) {
-    movebank_df$`Base Stations (ID, RSSI, Reps)` <-
-      as.character(movebank_df$`Base Stations (ID, RSSI, Reps)`)
-  }
-  if ("Compression" %in% names(movebank_df)) {
-    movebank_df$Compression <- as.character(movebank_df$Compression)
-  }
-  if ("Time start" %in% names(movebank_df)) {
-    movebank_df$`Time start` <- lubridate::as_datetime(movebank_df$`Time start`)
-  }
-  if ("Time end" %in% names(movebank_df)) {
-    movebank_df$`Time end` <- lubridate::as_datetime(movebank_df$`Time end`)
-  }
-  if ("VeDBA [LSB]" %in% names(movebank_df)) {
-    movebank_df$`VeDBA [LSB]` <- as.numeric(movebank_df$`VeDBA [LSB]`)
-  }
-  if ("VeDBA [m/s²]" %in% names(movebank_df)) {
-    movebank_df$`VeDBA [m/s²]` <- as.numeric(movebank_df$`VeDBA [m/s²]`)
-  }
-  if ("temperature [°C]" %in% names(movebank_df)) {
-    movebank_df$`temperature [°C]` <- as.numeric(movebank_df$`temperature [°C]`)
-  }
-  if ("min_temp [°C]" %in% names(movebank_df)) {
-    # categorical, keep as character
-    movebank_df$`min_temp [°C]` <- as.character(movebank_df$`min_temp [°C]`)
-  }
-  if ("Min. Temp(°C)" %in% names(movebank_df) && !"min_temp [°C]" %in% names(movebank_df)) {
-    # If only original categorical field is present, copy it into min_temp [°C]
-    movebank_df$`min_temp [°C]` <- as.character(movebank_df$`Min. Temp(°C)`)
-  }
-  if ("pressure [mbar]" %in% names(movebank_df)) {
-    movebank_df$`pressure [mbar]` <- as.numeric(movebank_df$`pressure [mbar]`)
-  }
-  if ("latitude [°]" %in% names(movebank_df)) {
-    movebank_df$`latitude [°]` <- as.numeric(movebank_df$`latitude [°]`)
-  }
-  if ("longitude [°]" %in% names(movebank_df)) {
-    movebank_df$`longitude [°]` <- as.numeric(movebank_df$`longitude [°]`)
+
+  # Coerce common columns if present
+  if ("Device" %in% names(movebank_df)) movebank_df$Device <- as.character(movebank_df$Device)
+  if ("Sequence Number" %in% names(movebank_df)) movebank_df$`Sequence Number` <- suppressWarnings(as.numeric(movebank_df$`Sequence Number`))
+  if ("Link Quality" %in% names(movebank_df)) movebank_df$`Link Quality` <- suppressWarnings(as.numeric(movebank_df$`Link Quality`))
+  if ("Country Code" %in% names(movebank_df)) movebank_df$`Country Code` <- suppressWarnings(as.numeric(movebank_df$`Country Code`))
+  if ("Time start" %in% names(movebank_df)) movebank_df$`Time start` <- lubridate::as_datetime(movebank_df$`Time start`)
+  if ("Time end" %in% names(movebank_df)) movebank_df$`Time end` <- lubridate::as_datetime(movebank_df$`Time end`)
+  if ("VeDBA [m/s²]" %in% names(movebank_df)) movebank_df$`VeDBA [m/s²]` <- suppressWarnings(as.numeric(movebank_df$`VeDBA [m/s²]`))
+  if ("temperature [°C]" %in% names(movebank_df)) movebank_df$`temperature [°C]` <- suppressWarnings(as.numeric(movebank_df$`temperature [°C]`))
+  if ("Min pressure of last 3 hrs (mbar)" %in% names(movebank_df)) movebank_df$`Min pressure of last 3 hrs (mbar)` <-
+    suppressWarnings(as.numeric(movebank_df$`Min pressure of last 3 hrs (mbar)`))
+  if ("Min temperature of last 3 hrs (temperature range °C)" %in% names(movebank_df)) movebank_df$`Min temperature of last 3 hrs (temperature range °C)` <-
+    as.character(movebank_df$`Min temperature of last 3 hrs (temperature range °C)`)
+
+  # If Position exists but lat/long do not, split
+  if ("Position" %in% names(movebank_df) && !("latitude [°]" %in% names(movebank_df))) {
+    movebank_df <- split_position(movebank_df)
   }
 
   # ------------------------------------------------------------------
@@ -171,20 +254,10 @@ prep_sigfox_movebank <- function(
   if (!is.null(clean_lat_range) || !is.null(clean_lon_range)) {
     message("Cleaning data by latitude/longitude thresholds...")
 
-    if (!is.null(clean_lat_range)) {
-      lat_min <- min(clean_lat_range, na.rm = TRUE)
-      lat_max <- max(clean_lat_range, na.rm = TRUE)
-    } else {
-      lat_min <- -Inf
-      lat_max <-  Inf
-    }
-    if (!is.null(clean_lon_range)) {
-      lon_min <- min(clean_lon_range, na.rm = TRUE)
-      lon_max <- max(clean_lon_range, na.rm = TRUE)
-    } else {
-      lon_min <- -Inf
-      lon_max <-  Inf
-    }
+    lat_min <- if (!is.null(clean_lat_range)) min(clean_lat_range, na.rm = TRUE) else -Inf
+    lat_max <- if (!is.null(clean_lat_range)) max(clean_lat_range, na.rm = TRUE) else  Inf
+    lon_min <- if (!is.null(clean_lon_range)) min(clean_lon_range, na.rm = TRUE) else -Inf
+    lon_max <- if (!is.null(clean_lon_range)) max(clean_lon_range, na.rm = TRUE) else  Inf
 
     movebank_df <- movebank_df %>%
       mutate(
@@ -192,7 +265,7 @@ prep_sigfox_movebank <- function(
           !is.na(`latitude [°]`) & !is.na(`longitude [°]`),
           `latitude [°]` >= lat_min & `latitude [°]` <= lat_max &
             `longitude [°]` >= lon_min & `longitude [°]` <= lon_max,
-          TRUE  # keep rows without coordinates (e.g. some sensor-only rows)
+          TRUE
         )
       ) %>%
       filter(keep_row) %>%
@@ -200,7 +273,7 @@ prep_sigfox_movebank <- function(
   }
 
   # ------------------------------------------------------------------
-  # 5. Base fields from movebank_df (uses your exact column names)
+  # 5. Base fields
   # ------------------------------------------------------------------
   movebank_base <- movebank_df %>%
     mutate(
@@ -215,12 +288,12 @@ prep_sigfox_movebank <- function(
       `Sigfox link quality` = `Link Quality`,
       `Sigfox country`      = `Country Code`,
       timestamp_str         = format(`timestamp SF transmission`, "%Y-%m-%d %H:%M:%OS3"),
-      time_start_str        = format(`Time start`, "%Y-%m-%d %H:%M:%OS3"),
-      time_end_str          = format(`Time end`,   "%Y-%m-%d %H:%M:%OS3")
+      time_start_str        = if ("Time start" %in% names(.)) format(`Time start`, "%Y-%m-%d %H:%M:%OS3") else NA_character_,
+      time_end_str          = if ("Time end" %in% names(.))   format(`Time end`,   "%Y-%m-%d %H:%M:%OS3") else NA_character_
     )
 
   # ------------------------------------------------------------------
-  # 6. Locations (sigfox-geolocation)
+  # 6. Locations
   # ------------------------------------------------------------------
   loc_data <- movebank_base %>%
     filter(!is.na(`latitude [°]`), !is.na(`longitude [°]`)) %>%
@@ -244,7 +317,7 @@ prep_sigfox_movebank <- function(
     )
 
   # ------------------------------------------------------------------
-  # 7. VeDBA (acceleration) – uses VeDBA [m/s²]
+  # 7. VeDBA
   # ------------------------------------------------------------------
   vedba_data <- movebank_base %>%
     filter(!is.na(`VeDBA [m/s²]`)) %>%
@@ -269,13 +342,13 @@ prep_sigfox_movebank <- function(
     )
 
   # ------------------------------------------------------------------
-  # 8. Barometric pressure
+  # 8. Pressure (min of last 3 hrs)
   # ------------------------------------------------------------------
   bar_data <- movebank_base %>%
-    filter(!is.na(`pressure [mbar]`)) %>%
+    filter(!is.na(`Min pressure of last 3 hrs (mbar)`)) %>%
     transmute(
       `tag ID`,
-      `barometric pressure` = `pressure [mbar]`,
+      `barometric pressure` = `Min pressure of last 3 hrs (mbar)`,
       timestamp             = timestamp_str,
       `start timestamp`     = time_start_str,
       `end timestamp`       = time_end_str,
@@ -294,7 +367,7 @@ prep_sigfox_movebank <- function(
     )
 
   # ------------------------------------------------------------------
-  # 9. Temperature (Avg. Temp)
+  # 9. Temperature (5 samples)
   # ------------------------------------------------------------------
   temp_data <- movebank_base %>%
     filter(!is.na(`temperature [°C]`)) %>%
@@ -319,7 +392,7 @@ prep_sigfox_movebank <- function(
     )
 
   # ------------------------------------------------------------------
-  # 10. Min Temp (categorical) – derived sensor
+  # 10. Min Temp (categorical) – derived
   # ------------------------------------------------------------------
   min_temp_data <- movebank_base %>%
     filter(!is.na(`min_temp [°C]`)) %>%
@@ -399,6 +472,7 @@ prep_sigfox_movebank <- function(
   )
 }
 
+
 # res <- prep_sigfox_movebank(
 #   wc_path           = NULL,
 #   movebank_csv_path = "../../../Dropbox/MPI/Moths/Data/movebank/movebank_fall_2025.csv",
@@ -421,11 +495,11 @@ prep_sigfox_movebank <- function(
 
 
 res <- prep_sigfox_movebank(
-  wc_path           = "../../../Dropbox/MPI/Noctule/Data/Freinat/Fall2025_nanofox",
+  wc_path           = "../../../Dropbox/MPI/Noctule/Data/movebank/Belgium/wildcloud/",
   movebank_csv_path = NULL,
-  animals_path      = "../../../Dropbox/MPI/Noctule/Data/Freinat/Fall2025_nanofox/Capture_Data_Autumn25_MPI_Sheet.csv",
-  output_dir        = "../../../Dropbox/MPI/Noctule/Data/Freinat/Fall2025_nanofox/movebank",
-  movebank_project_name = "Nyctalus leisleri Autumn 2025",
+  animals_path      = "../../../Dropbox/MPI/Noctule/Data/movebank/Belgium/belgium-reference-data.csv",
+  output_dir        = "../../../Dropbox/MPI/Noctule/Data/movebank/Belgium/movebank/",
+  movebank_project_name = "ICARUS Bats. Nyctalus leisleri Nyctalus leisleri Flanders",
   clean_lat_range   = c(30, 60),
   clean_lon_range   = NULL
 )
