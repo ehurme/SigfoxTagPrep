@@ -4,8 +4,8 @@ prep_sigfox_movebank <- function(
     animals_path,
     output_dir,
     movebank_project_name,
-    species              = "Acherontia atropos",
-    life_stage           = "Adult",
+    species              = NULL,
+    life_stage           = NULL,
     clean_lat_range      = NULL,  # e.g. c(30, 60) or NULL to skip
     clean_lon_range      = NULL   # e.g. c(0, 30) or NULL to skip
 ) {
@@ -41,8 +41,20 @@ prep_sigfox_movebank <- function(
   animals <- read.csv(animals_path,
                       header = TRUE, sep = ",", stringsAsFactors = FALSE)
 
-  animals$species <- species
-  animals$animal.life.stage <- life_stage
+  if(!is.null(species)){
+    animals$species <- species
+  }
+  if(is.null(species)){
+      if(!is.null(animals$genus)){
+        animals$species <- paste(animals$genus, animals$species)
+      }
+  }
+
+  if(!is.null(life_stage)){
+    animals$animal.life.stage <- life_stage
+  }
+
+  animals$life
 
   # Helper: parse tagging / release times to Berlin time
   parse_tagging_time <- function(x) {
