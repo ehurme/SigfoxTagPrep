@@ -74,7 +74,7 @@ wc_wide_to_mb_long <- function(df) {
 
     df %>%
       mutate(.row_id = dplyr::row_number()) %>%
-      select(.row_id, all_of(value_cols)) %>%
+      dplyr::select(.row_id, all_of(value_cols)) %>%
       left_join(base, by = ".row_id") %>%
       tidyr::pivot_longer(
         cols = all_of(value_cols),
@@ -87,7 +87,7 @@ wc_wide_to_mb_long <- function(df) {
         `Time end`   = .end,
         `Time start` = .end - as.difftime(36, units = "mins")
       ) %>%
-      select(-metric, -minutes_ago, -.end)
+      dplyr::select(-metric, -minutes_ago, -.end)
   }
 
   vedba_long <- build_36min_long(vedba_cols, "VeDBA [m/s²]")
@@ -106,14 +106,14 @@ wc_wide_to_mb_long <- function(df) {
   if (min_pres_col %in% names(df)) {
     pres_long <- three_hr_base %>%
       mutate(`pressure [mbar]` = suppressWarnings(as.numeric(df[[min_pres_col]]))) %>%
-      select(-.row_id)
+      dplyr::select(-.row_id)
   }
 
   min_temp_long <- NULL
   if (min_temp_col %in% names(df)) {
     min_temp_long <- three_hr_base %>%
       mutate(`min_temp_range [°C]` = as.character(df[[min_temp_col]])) %>%
-      select(-.row_id)
+      dplyr::select(-.row_id)
   }
 
   # Location rows
@@ -123,7 +123,7 @@ wc_wide_to_mb_long <- function(df) {
       `Time end`   = `timestamp SF transmission`,
       mb_record_type = "location"
     ) %>%
-    select(-.row_id)
+    dplyr::select(-.row_id)
 
   # VeDBA rows
   if (!is.null(vedba_long)) {
@@ -196,7 +196,7 @@ write_movebank_upload_csvs <- function(
     min_temp_proj <- min_temp_data %>% filter(Movebank.Project == proj)
     dep_proj      <- deployment_data %>%
       filter(Movebank.Project == proj) %>%
-      select(-Movebank.Project)
+      dplyr::select(-Movebank.Project)
 
     readr::write_csv(loc_proj,      file.path(project_folder, "data.csv"))
     readr::write_csv(vedba_proj,    file.path(project_folder, "dataVeDBA.csv"))
@@ -313,7 +313,7 @@ wildcloud_nanofox_to_movebank <- function(
         )
       ) %>%
       filter(keep_row) %>%
-      select(-keep_row)
+      dplyr::select(-keep_row)
   }
 
   # ---- base fields for derived columns ----
@@ -382,7 +382,7 @@ wildcloud_nanofox_to_movebank <- function(
       `sensor type` = "acceleration"
     ) %>%
     left_join(
-      animals_mb %>% select(Tag.ID, Movebank.Project, Animal.ID),
+      animals_mb %>% dplyr::select(Tag.ID, Movebank.Project, Animal.ID),
       by = c("tag ID" = "Tag.ID")
     )
 
@@ -411,7 +411,7 @@ wildcloud_nanofox_to_movebank <- function(
       `sensor type` = "barometer"
     ) %>%
     left_join(
-      animals_mb %>% select(Tag.ID, Movebank.Project, Animal.ID),
+      animals_mb %>% dplyr::select(Tag.ID, Movebank.Project, Animal.ID),
       by = c("tag ID" = "Tag.ID")
     )
 
@@ -434,7 +434,7 @@ wildcloud_nanofox_to_movebank <- function(
       `sensor type` = "accessory-measurements"
     ) %>%
     left_join(
-      animals_mb %>% select(Tag.ID, Movebank.Project, Animal.ID),
+      animals_mb %>% dplyr::select(Tag.ID, Movebank.Project, Animal.ID),
       by = c("tag ID" = "Tag.ID")
     )
 
@@ -463,7 +463,7 @@ wildcloud_nanofox_to_movebank <- function(
       `sensor type` = "Derived"
     ) %>%
     left_join(
-      animals_mb %>% select(Tag.ID, Movebank.Project, Animal.ID),
+      animals_mb %>% dplyr::select(Tag.ID, Movebank.Project, Animal.ID),
       by = c("tag ID" = "Tag.ID")
     )
 
@@ -475,7 +475,7 @@ wildcloud_nanofox_to_movebank <- function(
   )
 
   deployment_data <- animals_mb %>%
-    select(all_of(deployment_cols), Movebank.Project)
+    dplyr::select(all_of(deployment_cols), Movebank.Project)
 
   # ---- write ----
   write_movebank_upload_csvs(

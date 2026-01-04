@@ -1,3 +1,6 @@
+source("R/process_bat_capturesheet_to_movebank.R")
+source("R/wildcloud_nanofox_to_movebank.R")
+
 mb_ref <- process_bat_capturesheet_to_movebank(
   capture_csv = "../../../Dropbox/MPI/Noctule/Data/movebank/Belgium/capture_beligum.csv",
   out_csv     = "../../../Dropbox/MPI/Noctule/Data/movebank/Belgium/belgium-reference-data.csv",
@@ -135,6 +138,7 @@ mb_ref <- process_bat_capturesheet_to_movebank(
   deploy_time_source = "tag_deployment_time",
   tag_count_order = "deploy_time_then_tag"
 )
+
 wildcloud_nanofox_to_movebank(
   wc_path           = "../../../Dropbox/MPI/Noctule/Data/movebank/Navarre/wildcloud/",
   movebank_csv_path = NULL,

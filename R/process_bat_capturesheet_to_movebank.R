@@ -171,7 +171,7 @@ process_bat_capturesheet_to_movebank <- function(
     arrange(.data$.dedup_time, .by_group = TRUE) %>%
     slice(1) %>%
     ungroup() %>%
-    select(-.data$.dedup_time)
+    dplyr::select(-.data$.dedup_time)
 
   # ---------------- tag counter (deterministic) ----------------
   tag_key <- cap %>%
@@ -255,15 +255,15 @@ process_bat_capturesheet_to_movebank <- function(
   mb
 }
 
-mb_ref <- process_bat_capturesheet_to_movebank(
-  capture_csv = "../../../Dropbox/MPI/Noctule/Data/movebank/Czechia/Czechia_captures2024-2025.csv",
-  out_csv     = "../../../Dropbox/MPI/Noctule/Data/movebank/Czechia/czechia-reference-data.csv",
-  tz          = "CET",
-  location_name  = "czechia",
-  deploy_time_source = "tag_deployment_time",
-  tag_count_order = "deploy_time_then_tag"
-)
-
-head(mb_ref)
-t <- mb_ref$`tag-id` %>% table()
-which(t > 1)
+# mb_ref <- process_bat_capturesheet_to_movebank(
+#   capture_csv = "../../../Dropbox/MPI/Noctule/Data/movebank/Navarre/navarre_capturesheet2023-2025.csv",
+#   out_csv     = "../../../Dropbox/MPI/Noctule/Data/movebank/Navarre/navarre-reference-data.csv",
+#   tz          = "CET",
+#   location_name  = "navarre",
+#   deploy_time_source = "tag_deployment_time",
+#   tag_count_order = "deploy_time_then_tag"
+# )
+#
+# head(mb_ref)
+# t <- mb_ref$`tag-id` %>% table()
+# which(t > 1)
