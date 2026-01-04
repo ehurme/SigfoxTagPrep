@@ -16,6 +16,8 @@ import_nanofox_movebank <- function(
     script_mt_previous = "../SigfoxTagPrep/R/mt_previous.R",
     script_calc_displacement = "../SigfoxTagPrep/R/calc_displacement.R",
     script_pressure_to_altitude = "../SigfoxTagPrep/R/pressure_to_altitude_m.R",
+    script_daily = "../SigfoxTagPrep/R/mt_thin_daily_solar_noon.R",
+    script_daily_sensor = "../SigfoxTagPrep/R/mt_add_daily_sensor_metrics.R",
     # downstream funcs you already have in session / elsewhere:
     # mt_thin_daily_solar_noon(), mt_add_daily_sensor_metrics()
     tz = "UTC"
@@ -204,6 +206,8 @@ import_nanofox_movebank <- function(
   }
 
   # Produce a daily (solar-noon) location dataset and (optionally) join daily sensor metrics.
+  .source_local(script_daily)
+  .source_local(script_daily_sensor)
   .make_daily <- function(b_loc, b_full) {
     if (!exists("mt_thin_daily_solar_noon", mode = "function")) {
       stop("mt_thin_daily_solar_noon() not found in session. Source it before calling import_nanofox_movebank().")
@@ -334,9 +338,11 @@ import_nanofox_movebank <- function(
 
   full_list <- lapply(res_list, `[[`, "full")
   loc_list  <- lapply(res_list, `[[`, "location")
+  daily_list  <- lapply(res_list, `[[`, "daily")
 
   full_merged <- if (isTRUE(merge_studies)) merge_stack(full_list) else full_list
   loc_merged  <- if (isTRUE(merge_studies)) merge_stack(loc_list)  else loc_list
+  daily_merged  <- if (isTRUE(merge_studies)) merge_stack(daily_list)  else daily_list
 
   # ----------------------------
   # summaries
@@ -358,7 +364,8 @@ import_nanofox_movebank <- function(
     sensors_selected = sensor_selected,
     studies          = res_list,
     full             = full_merged,
-    location         = loc_merged
+    location         = loc_merged,
+    daily            = daily_merged
   )
 }
 
