@@ -70,20 +70,56 @@ process_bat_capturesheet_to_movebank <- function(
     format(dt, "%y")
   }
 
+  # sanitize ID tokens for use in Movebank animal-id strings
+  clean_token <- function(x) {
+    x <- as_chr(x)
+    x <- str_trim(x)
+    x <- ifelse(is.na(x), NA_character_, x)
+    # keep letters/digits/_/- only
+    x <- ifelse(is.na(x), NA_character_, str_replace_all(x, "[^A-Za-z0-9_\\-]", ""))
+    # collapse multiple underscores
+    x <- ifelse(is.na(x), NA_character_, str_replace_all(x, "_+", "_"))
+    x
+  }
+
   loc_id <- location_name |>
     tolower() |>
     str_replace_all("\\s+", "_") |>
     str_replace_all("[^a-z0-9_\\-]", "")
 
   # ---------------- read ----------------
+  # Force tag IDs and common ID columns to character (avoid 1.21E7 type issues)
   cap <- readr::read_csv(
     capture_csv,
     show_col_types = FALSE,
     locale = readr::locale(encoding = encoding),
-    col_types = readr::cols(.default = readr::col_guess())
+    col_types = readr::cols(
+      .default        = readr::col_guess(),
+      `tag ID`        = readr::col_character(),
+      `ring number`   = readr::col_character(),
+      `ID_alternate`  = readr::col_character(),
+      `animal id`     = readr::col_character()
+    )
   )
 
   get_col <- function(df, name) if (name %in% names(df)) df[[name]] else rep(NA, nrow(df))
+
+  # pick an animal-id source column if present (priority order)
+  pick_animal_id <- function(df) {
+    candidates <- c(
+      "animal id",
+      "animal_id",
+      "Animal ID",
+      "Animal.ID",
+      "ID_alternate",
+      "id_alternate",
+      "ID alternate",
+      "ID"
+    )
+    present <- candidates[candidates %in% names(df)]
+    if (length(present) == 0) return(rep(NA_character_, nrow(df)))
+    as_chr(df[[present[1]]])
+  }
 
   # ---------------- build all required columns inside one mutate ----------------
   cap <- cap %>%
@@ -106,7 +142,8 @@ process_bat_capturesheet_to_movebank <- function(
       deploy_dt = dplyr::coalesce(deploy_dt, capture_dt),
 
       # id + taxonomy
-      tag_id  = as_chr(get_col(., "tag ID")),
+      tag_id  = clean_token(get_col(., "tag ID")),
+      animal_id_sheet = clean_token(pick_animal_id(.)),  # <-- NEW
       genus   = as_chr(get_col(., "genus")),
       species = as_chr(get_col(., "species")),
 
@@ -162,8 +199,7 @@ process_bat_capturesheet_to_movebank <- function(
     )
 
   # ------------------------------------------------------------------
-  # NEW STEP: Deduplicate by tag_id, keep earliest record
-  #   - "earliest" uses deploy_dt if present, else capture_dt
+  # Deduplicate by tag_id, keep earliest record
   # ------------------------------------------------------------------
   cap <- cap %>%
     mutate(.dedup_time = dplyr::coalesce(.data$deploy_dt, .data$capture_dt)) %>%
@@ -192,15 +228,16 @@ process_bat_capturesheet_to_movebank <- function(
     left_join(tag_key, by = c("tag_id", "deploy_dt")) %>%
     mutate(
       tag_index_str = str_pad(.data$tag_index, width = tag_counter_pad, pad = "0"),
-      `animal-id` = paste0(
-        .data$species_abbrev,
-        .data$year_yy,
-        "_",
-        loc_id,
-        "_",
-        .data$tag_index_str,
-        "_",
-        .data$tag_id
+
+      # NEW animal-id rule:
+      # If an animal id exists in the capture sheet, use it:
+      #   {species_abbrev}{yy}_{loc}_{animal_id_sheet}_{tag_id}
+      # Else fallback to your counter version:
+      #   {species_abbrev}{yy}_{loc}_{tag_index}_{tag_id}
+      `animal-id` = dplyr::if_else(
+        !is.na(.data$animal_id_sheet) & nzchar(.data$animal_id_sheet),
+        paste0(.data$species_abbrev, .data$year_yy, "_", loc_id, "_", .data$animal_id_sheet, "_", .data$tag_id),
+        paste0(.data$species_abbrev, .data$year_yy, "_", loc_id, "_", .data$tag_index_str, "_", .data$tag_id)
       )
     )
 
@@ -214,10 +251,10 @@ process_bat_capturesheet_to_movebank <- function(
       `deploy-off-date` = NA_character_,
 
       `animal-comments` = .data$animal_comments,
-      `animal-life-stage` = .data$age,
+      `animal-life-stage` = .data$life_stage,  # FIX: was .data$age
       `animal-mass` = .data$animal_mass,
       `animal-reproductive-condition` = .data$repro_cond,
-      `animal-ring-id` = as_chr(get_col(cap, "ring number")),
+      `animal-ring-id` = clean_token(get_col(cap, "ring number")),
       `animal-sex` = .data$animal_sex,
 
       `attachment-type` = .data$attach_type,
@@ -255,15 +292,16 @@ process_bat_capturesheet_to_movebank <- function(
   mb
 }
 
+
 # mb_ref <- process_bat_capturesheet_to_movebank(
-#   capture_csv = "../../../Dropbox/MPI/Noctule/Data/movebank/Navarre/navarre_capturesheet2023-2025.csv",
-#   out_csv     = "../../../Dropbox/MPI/Noctule/Data/movebank/Navarre/navarre-reference-data.csv",
+#   capture_csv = "../../../Dropbox/MPI/Noctule/Data/Freinat/Fall2025_nanofox/Capture_Data_Autumn25_MPI_Sheet.csv",
+#   out_csv     = "../../../Dropbox/MPI/Noctule/Data/Freinat/Fall2025_nanofox/freinat25f-reference-data.csv",
 #   tz          = "CET",
-#   location_name  = "navarre",
+#   location_name  = "freinat",
 #   deploy_time_source = "tag_deployment_time",
 #   tag_count_order = "deploy_time_then_tag"
 # )
-#
+# mb_ref$`animal-id`
 # head(mb_ref)
 # t <- mb_ref$`tag-id` %>% table()
 # which(t > 1)

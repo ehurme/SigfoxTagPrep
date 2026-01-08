@@ -18,8 +18,6 @@ import_nanofox_movebank <- function(
     script_pressure_to_altitude = "../SigfoxTagPrep/R/pressure_to_altitude_m.R",
     script_daily = "../SigfoxTagPrep/R/mt_thin_daily_solar_noon.R",
     script_daily_sensor = "../SigfoxTagPrep/R/mt_add_daily_sensor_metrics.R",
-    # downstream funcs you already have in session / elsewhere:
-    # mt_thin_daily_solar_noon(), mt_add_daily_sensor_metrics()
     tz = "UTC"
 ) {
   suppressPackageStartupMessages({
@@ -148,6 +146,29 @@ import_nanofox_movebank <- function(
     x
   }
 
+  # calculate distance and bearing
+  .calc_dist_bearing <- function(lon1, lat1, lon2, lat2) {
+    if (requireNamespace("geosphere", quietly = TRUE)) {
+      d <- geosphere::distHaversine(cbind(lon1, lat1), cbind(lon2, lat2))
+      b <- geosphere::bearing(cbind(lon1, lat1), cbind(lon2, lat2))
+      b <- (b + 360) %% 360
+      return(list(dist_m = d, bearing_deg = b))
+    } else {
+      # fallback: approximate distance via sf in EPSG:3857
+      require(sf)
+      p1 <- sf::st_as_sf(data.frame(lon = lon1, lat = lat1), coords = c("lon", "lat"), crs = 4326)
+      p2 <- sf::st_as_sf(data.frame(lon = lon2, lat = lat2), coords = c("lon", "lat"), crs = 4326)
+      p1m <- sf::st_transform(p1, 3857)
+      p2m <- sf::st_transform(p2, 3857)
+      d <- as.numeric(sf::st_distance(p1m, p2m, by_element = TRUE))
+      # bearing fallback (spherical-ish)
+      b <- atan2(lon2 - lon1, lat2 - lat1) * 180 / pi
+      b <- (b + 360) %% 360
+      return(list(dist_m = d, bearing_deg = b))
+    }
+  }
+
+
   # Merge sensor_type label onto event rows
   .label_sensor_type <- function(x, sensor_selected) {
     x %>%
@@ -200,32 +221,44 @@ import_nanofox_movebank <- function(
     b_loc <- calc_displacement(b_loc)
 
     .source_local(script_pressure_to_altitude)
-    b_loc <- .safe_try(pressure_to_altitude_m(b_loc), "pressure_to_altitude_m") %||% b_loc
+    b_loc <- .safe_try(add_altitude_from_pressure(b_loc), "add_altitude_from_pressure") %||% b_loc
 
     b_loc
   }
 
-  # Produce a daily (solar-noon) location dataset and (optionally) join daily sensor metrics.
-  .source_local(script_daily)
-  .source_local(script_daily_sensor)
-  .make_daily <- function(b_loc, b_full) {
+  # Produce a daily (solar-noon) location dataset with daily movement + sensor summaries (bat-night aligned).
+  .source_local(script_daily)         # should define mt_filter_daily_solar_noon(), mt_thin_daily_solar_noon()
+  .source_local(script_daily_sensor)  # should define mt_make_daily_bat_metrics() + helpers
+
+  .make_daily <- function(x) {
+
+    # Fallback requirement (at minimum we can thin)
     if (!exists("mt_thin_daily_solar_noon", mode = "function")) {
       stop("mt_thin_daily_solar_noon() not found in session. Source it before calling import_nanofox_movebank().")
     }
-
-    b_daily <- mt_thin_daily_solar_noon(b_loc)
-
-    # attach daily sensor metrics if function exists and multiple sensor types are present
-    if (exists("mt_add_daily_sensor_metrics", mode = "function") &&
-        length(unique(b_full$sensor_type)) > 1) {
-      b_daily2 <- .safe_try(
-        mt_add_daily_sensor_metrics(b_all = b_loc, b_daily = b_daily, tz = tz),
-        "mt_add_daily_sensor_metrics"
+    if (exists("mt_thin_daily_solar_noon", mode = "function")) {
+      b_daily <- .safe_try(
+        mt_thin_daily_solar_noon(x, tz = tz)
       )
-      return(b_daily2 %||% b_daily)
     }
 
-    b_daily
+    # Preferred: all-in-one daily metrics (movement + sensors) + drop raw columns
+    if (exists("mt_add_daily_sensor_metrics", mode = "function")) {
+      b_daily <- .safe_try(
+        mt_add_daily_sensor_metrics(
+          b_all = x,
+          b_daily = b_daily,
+          tz = tz,
+          day_anchor_hour = 12   # noon->noon keeps one full night per summary
+          # optionally pass your column mappings here if they differ
+          # nano_pres_col = "min_3h_pressure",
+          # nano_temp_col = "avg_temp",
+          # nano_vedba_col = "vedba_sum"
+        ),
+        "mt_make_daily_sensor_metrics"
+      )
+    }
+    return(b_daily)
   }
 
   `%||%` <- function(a, b) if (!is.null(a)) a else b
@@ -307,17 +340,32 @@ import_nanofox_movebank <- function(
     .source_local(script_add_min_pressure)
     b <- .safe_try(add_min_pressure_to_locations(df = b), "add_min_pressure_to_locations") %||% b
 
+    # convert pressure to altitude
+    .source_local(script_pressure_to_altitude)
+    b <- .safe_try(
+      add_altitude_from_pressure(
+        df = b,
+        nano_pressure_col = "min_3h_pressure",
+        tiny_pressure_col = "tinyfox_pressure_min_last_24h",
+        altitude_col = "altitude_m"
+      ),
+      "add_altitude_from_pressure"
+    ) %||% b
+
     # Location-only + metrics
     b_loc <- .make_location_metrics(b)
 
     # Daily dataset
-    b_daily <- .make_daily(b_loc, b)
+    .source_local(script_daily)
+    b_daily <- .make_daily(b)
+
+    b_daily2 <- .make_location_metrics(b_daily)
 
     list(
       study_id  = id,
       full      = b,
       location  = b_loc,
-      daily     = b_daily
+      daily     = b_daily2
     )
   }
 
@@ -369,14 +417,19 @@ import_nanofox_movebank <- function(
   )
 }
 
+
 # # One study
 # x <- {}
-# x <- import_nanofox_movebank(study_id = 7772112798)
+# x <- import_nanofox_movebank(study_id = 3597331705) # 7772112798)
 # terra::ext(x$location)
 # b_full <- x$full
 # b_loc  <- x$location
-#
+# b_daily <- x$daily
+# b_daily$geometry
+# b_daily$displacement
 # plot(b_loc$geometry)
+# names(b_daily)
+# plot(b_daily$daily_total_vedba_24h)
 # summary(b_full$timestamp)
 # table(b_full$sensor_type)
 #
@@ -385,8 +438,10 @@ import_nanofox_movebank <- function(
 # y <- import_nanofox_movebank(study_id = c(7772112798, 7771879004, 7771978717, 3597331705))
 # leisler_full <- y$full
 # leisler_loc  <- y$location
+# leisler_daily <- y$daily
 # plot(leisler_loc$geometry, col = leisler_loc$species)
-#
+# plot(leisler_daily$timestamp, leisler_daily$displacement)
+# leisler_daily$tag_type %>% table()
 # track_data <- mt_track_data(leisler_loc)
 # names(leisler_loc)
 # track_data$taxon_canonical_name %>% table()
