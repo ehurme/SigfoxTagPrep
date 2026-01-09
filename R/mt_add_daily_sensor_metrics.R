@@ -169,6 +169,8 @@ mt_add_daily_sensor_metrics <- function(b_all,
         daily_vedba_sum   = if (nano_vedba_col %in% names(.)) sum(.data[[nano_vedba_col]], na.rm = TRUE) else NA_real_,
         daily_vedba_sum_n = if (nano_vedba_col %in% names(.)) sum(!is.na(.data[[nano_vedba_col]])) else 0L,
 
+        daily_temp_min   = if (nano_temp_col %in% names(.)) min(.data[[nano_temp_col]], na.rm = TRUE) else NA_real_,
+        daily_temp_max   = if (nano_temp_col %in% names(.)) max(.data[[nano_temp_col]], na.rm = TRUE) else NA_real_,
         daily_temp_mean   = if (nano_temp_col %in% names(.)) mean(.data[[nano_temp_col]], na.rm = TRUE) else NA_real_,
         daily_temp_n      = if (nano_temp_col %in% names(.)) sum(!is.na(.data[[nano_temp_col]])) else 0L,
 

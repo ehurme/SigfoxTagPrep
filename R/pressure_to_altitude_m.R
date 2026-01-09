@@ -18,6 +18,15 @@ add_altitude_from_pressure <- function(df,
                                        altitude_col = "altitude_m",
                                        pressure_used_col = "pressure_hpa_used") {
   require(dplyr)
+  require(elevatr)
+  require(sf)
+
+  df$elevation <- NA
+  idx <- which(!sf::st_is_empty(df$geometry) & df$sensor_type == "location" & !is.na(df$lon))
+  try({
+    df$elevation[idx] <- get_elev_point(locations = with(df[idx,], data.frame(x = lon, y = lat)),
+                                        src = "aws", prj = 4326)$elevation
+  })
 
   if (!tag_type_col %in% names(df)) {
     stop("add_altitude_from_pressure(): tag_type_col not found: ", tag_type_col)

@@ -340,7 +340,7 @@ import_nanofox_movebank <- function(
     .source_local(script_add_min_pressure)
     b <- .safe_try(add_min_pressure_to_locations(df = b), "add_min_pressure_to_locations") %||% b
 
-    # convert pressure to altitude
+    # convert pressure to altitude and get elevation
     .source_local(script_pressure_to_altitude)
     b <- .safe_try(
       add_altitude_from_pressure(
