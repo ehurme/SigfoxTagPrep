@@ -148,6 +148,7 @@ mt_add_daily_sensor_metrics <- function(b_all,
       pressure_hpa_used = pressure_used,
       altitude_m = pressure_to_altitude_m(pressure_hpa_used, p0_hpa = p0_hpa)
     )
+  b2$altitude_m[which(b2$altitude_m > 7000)] <- NA
 
   # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
   # CRITICAL: DO ALL SUMMARIES ON ATTRIBUTE TABLE ONLY (NO GEOMETRY)

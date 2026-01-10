@@ -97,7 +97,7 @@ import_nanofox_movebank <- function(
       mutate(name_n = .norm(.data$name))
 
     wanted_ids <- sensor_selected_n %>%
-      filter(.data$name_n %in% study_sensor_names_n) %>%
+      dplyr::filter(.data$name_n %in% study_sensor_names_n) %>%
       pull(.data$id)
 
     list(
@@ -192,7 +192,7 @@ import_nanofox_movebank <- function(
   # Create a location-only object and compute movement metrics, with dedupe prior to mt_speed.
   .make_location_metrics <- function(x) {
     b_loc <- x %>%
-      filter(.data$sensor_type == "location", !sf::st_is_empty(.data$geometry))
+      dplyr::filter(.data$sensor_type == "location", !sf::st_is_empty(.data$geometry))
 
     # Strictly increasing timestamps required by mt_speed/mt_distance/mt_time_lags
     b_loc <- .dedupe_timestamps(b_loc)
@@ -277,7 +277,7 @@ import_nanofox_movebank <- function(
   sensors_tbl <- move2::movebank_retrieve(entity_type = "tag_type") %>% as_tibble()
 
   sensor_selected <- sensors_tbl %>%
-    filter(.data$external_id %in% sensor_external_ids) %>%
+    dplyr::filter(.data$external_id %in% sensor_external_ids) %>%
     mutate(sensor_type = sensor_labels[match(.data$external_id, sensor_external_ids)])
 
   if (nrow(sensor_selected) == 0) {
@@ -420,11 +420,13 @@ import_nanofox_movebank <- function(
 
 # # One study
 # x <- {}
-# x <- import_nanofox_movebank(study_id = 3597331705) # 7772112798)
+# x <- import_nanofox_movebank(study_id = 4589981234) # 7772112798)
 # terra::ext(x$location)
 # b_full <- x$full
 # b_loc  <- x$location
 # b_daily <- x$daily
+# plot(abs(b_daily$dnsd), b_daily$dist_prev)
+
 # b_daily$geometry
 # b_daily$displacement
 # plot(b_loc$geometry)
