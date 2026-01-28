@@ -1,3 +1,4 @@
+
 add_env_to_move2 <- function(
     m,
     raster_by_year,
@@ -14,6 +15,7 @@ add_env_to_move2 <- function(
   require(terra)
   require(dplyr)
   require(lubridate)
+  require(sf)
 
   stopifnot(inherits(m, "move2"))
 
@@ -159,27 +161,23 @@ add_env_to_move2 <- function(
   df_out <- df |>
     dplyr::select(-.lon, -.lat, -.time_adj, -.time_round, -.year)
 
-  # reattach geometry to preserve move2 class
+  # # reattach geometry to preserve move2 class
+  # m_out <- m
+  # sf::st_drop_geometry(m_out) <- df_out
+  # return(m_out)
+
+  # ---- return: move2 with new columns (safe; no st_drop_geometry<-) ----
   m_out <- m
-  sf::st_drop_geometry(m_out) <- df_out
+  geom_col <- attr(m_out, "sf_column")
+  non_geom <- setdiff(names(df_out), geom_col)
+
+  for (nm in non_geom) {
+    m_out[[nm]] <- df_out[[nm]]
+  }
+
   return(m_out)
+
 }
 
-raster_by_year <- list(
-  "2022" = "../../../Dropbox/MPI/Noctule/Data/ECMWF/2022/ERA_2022.grib",
-  "2023" = "../../../Dropbox/MPI/Noctule/Data/ECMWF/2023/ERA_2023.grib",
-  "2024" = "../../../Dropbox/MPI/Noctule/Data/ECMWF/2024/ERA_2024.grib",
-  "2025" = "../../../Dropbox/MPI/Noctule/Data/ECMWF/2025/ERA_2025.grib"
-)
 
-vars <- c("u10","v10","u100","v100","tp","t2m","msl","i10fg","tcc")
 
-m2_env <- add_env_to_move2(
-  m = m2,
-  raster_by_year = raster_by_year,
-  var_names = vars,
-  shift_hours = 0,
-  time_round = "hour",
-  tz = "UTC",
-  verbose = TRUE
-)

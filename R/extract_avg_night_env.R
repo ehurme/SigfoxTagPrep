@@ -138,26 +138,39 @@ extract_avg_night_env_from_year_stacks <- function(
     }
 
     r <- open_raster(raster_by_year[[yr_chr]])
-    rt <- terra::time(r)
-    if (is.null(rt)) stop("Raster for year ", yr_chr, " has no time vector (terra::time() is NULL).")
 
+    # ---- define sub_idx FIRST (rows in long_tbl for this year) ----
     sub_idx <- which(long_tbl$year == yr)
     if (length(sub_idx) == 0) next
 
-    # match each night_hour to raster time index
-    t_num <- as.numeric(as.POSIXct(long_tbl$night_hour[sub_idx], tz = tz))
-    rt_num <- as.numeric(rt)
-    idx_match <- match(t_num, rt_num)
+    # --- GRIB FIX: layers are (time x variable), time repeats for each variable ---
+    rt <- as.POSIXct(terra::time(r), tz = tz)
+    if (is.null(rt)) stop("Raster for year ", yr_chr, " has no time vector.")
 
-    ok <- which(!is.na(idx_match))
+    n_var <- length(var_names)
+    if (terra::nlyr(r) %% n_var != 0) {
+      stop("nlyr(r) (", terra::nlyr(r), ") is not divisible by n_var (", n_var,
+           "). Check var_names ordering / raster contents.")
+    }
+
+    rt_unique <- unique(rt)
+    rt_unique_round <- lubridate::round_date(rt_unique, unit = "hour")
+
+    # match each night_hour to *hour index* (not layer index)
+    t_round <- as.POSIXct(long_tbl$night_hour[sub_idx], tz = tz)
+    t_round <- lubridate::round_date(t_round, unit = "hour")
+
+    hour_idx <- match(as.numeric(t_round), as.numeric(rt_unique_round))
+
+    ok <- which(!is.na(hour_idx))
     if (length(ok) == 0) {
       if (verbose) message("No matching raster hours for year ", yr_chr)
       next
     }
 
-    sub_ok <- sub_idx[ok]
-    time_idx <- idx_match[ok]
-    uniq_time_idx <- sort(unique(time_idx))
+    sub_ok    <- sub_idx[ok]
+    hour_idx  <- hour_idx[ok]
+    uniq_hours <- sort(unique(hour_idx))
 
     # points for the ok rows
     pts <- terra::vect(
@@ -173,19 +186,24 @@ extract_avg_night_env_from_year_stacks <- function(
     }
 
     if (verbose) {
-      message("Year ", yr_chr, ": rows=", length(sub_ok), ", unique hours=", length(uniq_time_idx))
-      pb <- utils::txtProgressBar(min = 0, max = length(uniq_time_idx), style = 3)
+      message("Year ", yr_chr, ": rows=", length(sub_ok), ", unique hours=", length(uniq_hours),
+              ", vars/hour=", n_var)
+      pb <- utils::txtProgressBar(min = 0, max = length(uniq_hours), style = 3)
       on.exit(close(pb), add = TRUE)
     }
 
-    for (i in seq_along(uniq_time_idx)) {
-      if (verbose) utils::setTxtProgressBar(pb, i)
-      ti <- uniq_time_idx[i]
-      p_idx <- which(time_idx == ti)
+    for (ii in seq_along(uniq_hours)) {
+      if (verbose) utils::setTxtProgressBar(pb, ii)
+
+      hidx <- uniq_hours[ii]
+      p_idx <- which(hour_idx == hidx)
       if (length(p_idx) == 0) next
 
-      rr <- r[[ti]]
-      if (!is.null(var_names) && length(var_names) == terra::nlyr(rr)) names(rr) <- var_names
+      # hour index -> layer indices for all variables
+      layer_idx <- ((hidx - 1L) * n_var + 1L) : (hidx * n_var)
+
+      rr <- r[[layer_idx]]
+      names(rr) <- var_names
 
       vals <- terra::extract(rr, pts[p_idx], ID = FALSE)
 
@@ -234,25 +252,84 @@ extract_avg_night_env_from_year_stacks <- function(
   )
 }
 
-raster_by_year <- list(
-  "2022" = "../../../Dropbox/MPI/Noctule/Data/ECMWF/2022/ERA_2022.grib",
-  "2023" = "../../../Dropbox/MPI/Noctule/Data/ECMWF/2023/ERA_2023.grib",
-  "2024" = "../../../Dropbox/MPI/Noctule/Data/ECMWF/2024/ERA_2024.grib",
-  "2025" = "../../../Dropbox/MPI/Noctule/Data/ECMWF/2025/ERA_2025.grib"
-)
 
-vars <- c("u10","v10","u100","v100","tp","t2m","msl","i10fg","tcc")
 
-b_daily <- x$daily
-res <- extract_avg_night_env_from_year_stacks(
-  timestamps = b_daily,
-  latitudes  = b_daily$lat,
-  longitudes = b_daily$lon,
-  IDs        = b_daily$individual_local_identifier,
-  shift_hours = 0,
-  raster_by_year = raster_by_year,
-  var_names = vars
-)
+consolidate_avg_night <- function(avg_night, row_id = ".row_id") {
+  require(dplyr)
 
-avg_night <- res$average_night_data
-night_long <- res$night_data
+  stopifnot(row_id %in% names(avg_night))
+
+  avg_night %>%
+    # drop NA / blank row_id
+    dplyr::filter(!is.na(.data[[row_id]]), .data[[row_id]] != "") %>%
+    # ensure numeric row_id if it came in as character
+    dplyr::mutate(!!row_id := as.integer(.data[[row_id]])) %>%
+    # consolidate duplicate rows per row_id by taking first non-NA value in each column
+    dplyr::group_by(.data[[row_id]]) %>%
+    dplyr::summarise(
+      dplyr::across(
+        dplyr::everything(),
+        ~ {
+          x <- .x
+          x <- x[!is.na(x)]
+          if (length(x) == 0) NA else x[[1]]
+        }
+      ),
+      .groups = "drop"
+    )
+}
+
+add_avg_night_to_move2 <- function(m, avg_night_data, row_id = ".row_id") {
+  require(dplyr)
+  require(sf)
+  stopifnot(inherits(m, "move2"))
+  stopifnot(row_id %in% names(avg_night_data))
+
+  attr_df <- sf::st_drop_geometry(m)
+
+  if (!(row_id %in% names(attr_df))) {
+    attr_df[[row_id]] <- seq_len(nrow(attr_df))
+  }
+
+  # IMPORTANT: only join the *new* env cols (+ row_id), avoid duplicating timestamp/ID/etc
+  env_cols <- setdiff(names(avg_night_data), row_id)
+  # remove extra timestamps
+  env_cols <- env_cols[which(!grepl(pattern = "timestamp.", env_cols))]
+  # remove row_id NA
+  avg_night_data <- avg_night_data[!is.na(avg_night_data$.row_id),]
+
+  avg_night_slim <- avg_night_data %>% dplyr::select(dplyr::all_of(c(row_id, env_cols)))
+
+  attr_df2 <- attr_df %>%
+    dplyr::left_join(avg_night_slim, by = row_id)
+
+  m_out <- m
+  geom_col <- attr(m_out, "sf_column")
+  for (nm in setdiff(names(attr_df2), geom_col)) {
+    m_out[[nm]] <- attr_df2[[nm]]
+  }
+
+  m_out
+}
+
+
+
+
+
+# b_daily$individual_local_identifier %>% table()
+# temp <- b_daily %>% filter(individual_local_identifier == "Nnoc24_swiss_133_120CC37")
+# for(day in days){
+#   res <- extract_avg_night_env_from_year_stacks(
+#     timestamps = temp$timestamp,
+#     latitudes  = temp$lat,
+#     longitudes = temp$lon,
+#     IDs        = temp$individual_local_identifier,
+#     shift_hours = day*24,
+#     raster_by_year = raster_by_year,
+#     var_names = vars
+#   )
+#   temp <- add_avg_night_to_move2(
+#     m = temp,
+#     avg_night_data = res$average_night_data
+#   )
+# }
