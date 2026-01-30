@@ -62,7 +62,10 @@ add_env_many_offsets <- function(
     m,
     offsets_days,
     raster_by_year,
-    var_names,
+    var_names = c("u10","v10","t2m",
+                  "msl","sp","tp",
+                  "u100","v100",
+                  "i10fg","tcc"),
     time_round = "hour",
     tz = "UTC",
     id_col = ".row_id",
@@ -125,45 +128,70 @@ add_env_many_offsets <- function(
   return(list(m = m_out, env_df = env_df))
 }
 
-# raster_by_year <- list(
-#   "2022" = "../../../Dropbox/MPI/Noctule/Data/ECMWF/2022/ERA_2022.grib",
-#   "2023" = "../../../Dropbox/MPI/Noctule/Data/ECMWF/2023/ERA_2023.grib",
-#   "2024" = "../../../Dropbox/MPI/Noctule/Data/ECMWF/2024/ERA_2024.grib",
-#   "2025" = "../../../Dropbox/MPI/Noctule/Data/ECMWF/2025/ERA_2025.grib"
-# )
-# r <- terra::rast("../../../Dropbox/MPI/Noctule/Data/ECMWF/2025/ERA_2025.grib")
-# r
-# vars <- c("u10","v10","u100","v100","tp","t2m","msl","i10fg","tcc")
-#
-# days <- -2:2
-# res <- add_env_many_offsets(
-#   m = bats_loc, # %>% filter(individual_local_identifier == "Nlei25_freinat_Tier111_272A99C"),
-#   offsets_days = days,
-#   raster_by_year = raster_by_year,
-#   var_names = vars,
-#   tz = "UTC",
-#   verbose = TRUE
-# )
-#
-# try(m2_env <- res)
-#
-# # calculate wind features
-# source("./R/calculate_wind_features.R")
-# m2_wind <- calculate_wind_features(
-#     data = m2_env,
-#     u_col_base = "u100",
-#     v_col_base = "v100",
-#     distance_col = "distance",
-#     time_diff_col = "dt_prev",
-#     bearing_col = "azimuth",
-#     offsets = -2:2,
-#     offset_units = "days",
-#     time_diff_units = "seconds"
-#   )
-#
-# # Year 2024: matched rows = 9252, unique raster hours = 2635; 33%
-# save(m2_env, m2_wind, file = "../../../Dropbox/MPI/Noctule/Data/rdata/m2_env.robj")
-#
+library(tidyverse)
+library(move2)
+library(terra)
+library(sf)
+library(units)
+load("../../../Dropbox/MPI/Noctule/Data/rdata/move_icarus_bats.robj")
+
+raster_by_year <- list(
+  "2022" = "../../../Dropbox/MPI/Noctule/Data/ECMWF/2022/ERA_2022.grib",
+  "2023" = "../../../Dropbox/MPI/Noctule/Data/ECMWF/2023/ERA_2023.grib",
+  "2024" = "../../../Dropbox/MPI/Noctule/Data/ECMWF/2024/ERA_2024.grib",
+  "2025" = "../../../Dropbox/MPI/Noctule/Data/ECMWF/2025/ERA_2025.grib"
+)
+vars <- c("u10","v10","t2m",
+          "msl","sp","tp",
+          "u100","v100",
+          "i10fg","tcc")
+
+# bats_loc$individual_local_identifier %>% table()
+days <- -2:2
+res <- add_env_many_offsets(
+  m = bats_loc, # %>% filter(individual_local_identifier == "Nnoc24_swiss_155_1210944"),
+  offsets_days = days,
+  raster_by_year = raster_by_year,
+  var_names = vars,
+  tz = "UTC",
+  verbose = TRUE
+)
+res$m %>% summary()
+try(m2_env <- res$m)
+
+
+m2_env <- m2_env[,!grepl(pattern = "timestamp.", names(m2_env))]
+m2_env <- m2_env[,!grepl(pattern = "individual_local_identifier.", names(m2_env))]
+m2_env$season <- ifelse(month(m2_env$timestamp) > 6, "Fall", "Spring")
+m2_env$season <- factor(m2_env$season, levels = c("Spring", "Fall"))
+
+# calculate wind features
+source("./R/calculate_wind_features.R")
+m2_wind <- calculate_wind_features(
+  data = m2_env,
+  u_col_base = "u10",
+  v_col_base = "v10",
+  distance_col = "distance",
+  time_diff_col = "dt_prev",
+  bearing_col = "azimuth",
+  offsets = -2:2,
+  offset_units = "days",
+  time_diff_units = "seconds"
+)
+m2_wind <- calculate_wind_features(
+    data = m2_wind,
+    u_col_base = "u100",
+    v_col_base = "v100",
+    distance_col = "distance",
+    time_diff_col = "dt_prev",
+    bearing_col = "azimuth",
+    offsets = -2:2,
+    offset_units = "days",
+    time_diff_units = "seconds"
+  )
+
+save(m2_env, m2_wind, file = "../../../Dropbox/MPI/Noctule/Data/rdata/m2_env.robj")
+
 # # do we need to sort weather by time of previous message to correlate with speed?
 # library(tidyverse)
 # library(units)

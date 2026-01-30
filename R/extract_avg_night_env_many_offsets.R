@@ -36,8 +36,16 @@ extract_avg_night_env_many_offsets <- function(
     longitudes,
     IDs = NULL,
     offsets_days,
-    raster_by_year,
-    var_names,
+    raster_by_year = list(
+      "2022" = "../../../Dropbox/MPI/Noctule/Data/ECMWF/2022/ERA_2022.grib",
+      "2023" = "../../../Dropbox/MPI/Noctule/Data/ECMWF/2023/ERA_2023.grib",
+      "2024" = "../../../Dropbox/MPI/Noctule/Data/ECMWF/2024/ERA_2024.grib",
+      "2025" = "../../../Dropbox/MPI/Noctule/Data/ECMWF/2025/ERA_2025.grib"
+    ),
+    var_names = c("u10","v10","t2m",
+                  "msl","sp","tp",
+                  "u100","v100",
+                  "i10fg","tcc"),
     tz = "UTC",
     coord_crs = "EPSG:4326",
     keep_night_long = FALSE,
@@ -101,51 +109,51 @@ extract_avg_night_env_many_offsets <- function(
     night_long_list = night_long
   )
 }
-
-days <- -2:2
-
-# b <- b_daily #%>%
-  # filter(individual_local_identifier == "Nnoc24_swiss_133_120CC37")
-
-# extract all offsets (wide table)
-out <- extract_avg_night_env_many_offsets(
-  timestamps = b_daily$timestamp,
-  latitudes  = b_daily$lat,
-  longitudes = b_daily$lon,
-  IDs        = b_daily$individual_local_identifier,
-  offsets_days = days,
-  raster_by_year = raster_by_year,
-  var_names = vars,
-  keep_night_long = FALSE,
-  verbose = TRUE
-)
-
-# add to move2 once
-bats_daily_env <- add_avg_night_to_move2(
-  m = b_daily,
-  avg_night_data = out$avg_night_wide,
-  row_id = ".row_id"
-)
-
-avg_night <- out$avg_night_wide
-
-
-# calculate wind features
-source("./R/calculate_wind_features.R")
-bats_daily_wind <- calculate_wind_features(
-  data = bats_daily_env,
-  u_col_base = "u100",
-  v_col_base = "v100",
-  distance_col = "distance",
-  time_diff_col = "dt_prev",
-  bearing_col = "azimuth",
-  offsets = -2:2,
-  offset_units = "days",
-  time_diff_units = "seconds"
-)
+# load("../../../Dropbox/MPI/Noctule/Data/rdata/move_icarus_bats.robj")
+# days <- -2:2
+#
+# # b <- b_daily #%>%
+#   # filter(individual_local_identifier == "Nnoc24_swiss_133_120CC37")
+#
+# # extract all offsets (wide table)
+# out <- extract_avg_night_env_many_offsets(
+#   timestamps = b_daily$timestamp,
+#   latitudes  = b_daily$lat,
+#   longitudes = b_daily$lon,
+#   IDs        = b_daily$individual_local_identifier,
+#   offsets_days = days,
+#   raster_by_year = raster_by_year,
+#   var_names = vars,
+#   keep_night_long = FALSE,
+#   verbose = TRUE
+# )
+#
+# # add to move2 once
+# bats_daily_env <- add_avg_night_to_move2(
+#   m = b_daily,
+#   avg_night_data = out$avg_night_wide,
+#   row_id = ".row_id"
+# )
+#
+# avg_night <- out$avg_night_wide
+#
+#
+# # calculate wind features
+# source("./R/calculate_wind_features.R")
+# bats_daily_wind <- calculate_wind_features(
+#   data = bats_daily_env,
+#   u_col_base = "u100",
+#   v_col_base = "v100",
+#   distance_col = "distance",
+#   time_diff_col = "dt_prev",
+#   bearing_col = "azimuth",
+#   offsets = -2:2,
+#   offset_units = "days",
+#   time_diff_units = "seconds"
+# )
 
 # bats_daily_wind$airspeed100_0h %>% plot()
-save(bats_daily_env, bats_daily_wind, out, avg_night, file = "../../../Dropbox/MPI/Noctule/Data/rdata/move_icarus_avg_night_env.robj")
+# save(bats_daily_env, bats_daily_wind, out, avg_night, file = "../../../Dropbox/MPI/Noctule/Data/rdata/move_icarus_avg_night_env.robj")
 # load("../../../Dropbox/MPI/Noctule/Data/rdata/move_icarus_avg_night_env.robj")
 # library(tidyverse)
 # library(units)

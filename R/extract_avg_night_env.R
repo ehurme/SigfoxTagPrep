@@ -252,8 +252,6 @@ extract_avg_night_env_from_year_stacks <- function(
   )
 }
 
-
-
 consolidate_avg_night <- function(avg_night, row_id = ".row_id") {
   require(dplyr)
 
@@ -311,9 +309,6 @@ add_avg_night_to_move2 <- function(m, avg_night_data, row_id = ".row_id") {
 
   m_out
 }
-
-
-
 
 
 # b_daily$individual_local_identifier %>% table()
