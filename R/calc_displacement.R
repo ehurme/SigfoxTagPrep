@@ -3,19 +3,21 @@ calc_displacement <- function(x, units = "km") {
   require(sf)
   require(move2)
 
-  if (!inherits(x, "move2")) {
-    stop("x must be a 'move2' object.")
-  }
+  if (!inherits(x, "move2")) stop("x must be a 'move2' object.")
+  if (!units %in% c("km", "m")) stop("units must be 'km' or 'm'")
 
-  geom <- sf::st_geometry(x)
-  ids  <- move2::mt_track_id(x)
+  geom     <- sf::st_geometry(x)
+  ids      <- move2::mt_track_id(x)
   comments <- x$comments
 
   n <- length(geom)
 
   displacement_m <- rep(NA_real_, n)
-  nsd            <- rep(NA_real_, n)
-  dnsd           <- rep(NA_real_, n)
+  nsd_m2         <- rep(NA_real_, n)
+
+  # NEW:
+  ddisp_m        <- rep(NA_real_, n)  # delta displacement (meters)
+  ddisp2_m2      <- rep(NA_real_, n)  # (delta displacement)^2 (m^2)
 
   track_levels <- unique(ids)
 
@@ -41,37 +43,40 @@ calc_displacement <- function(x, units = "km") {
     origin_geom  <- ggeom[origin_local]
     origin_rep   <- origin_geom[rep(1, length(idx))]
 
-    # Compute displacement (meters)
+    # displacement from origin (meters)
     d <- sf::st_distance(ggeom, origin_rep, by_element = TRUE)
     d <- as.numeric(d)
 
     displacement_m[idx] <- d
-    nsd[idx]            <- d^2
+    nsd_m2[idx]         <- d^2
 
-    # Change in NSD (ΔNSD) within the track
-    # dnsd[i] = nsd[i] - nsd[i-1]  ; first point gets NA
-    dnsd_track <- rep(NA_real_, length(idx))
-
-    if (sum(!is.na(nsd[idx])) > 1) {
-      dnsd_track[-1] <- diff(nsd[idx])
+    # NEW: delta displacement within track order (first is NA)
+    ddisp_track <- rep(NA_real_, length(idx))
+    if (length(idx) >= 2) {
+      prev <- d[-length(d)]
+      curr <- d[-1]
+      ddisp_track[-1] <- ifelse(is.finite(prev) & is.finite(curr), curr - prev, NA_real_)
     }
 
-    dnsd[idx] <- dnsd_track
+    ddisp_m[idx]   <- ddisp_track
+    ddisp2_m2[idx] <- ddisp_track^2
   }
 
-  # Unit conversion
+  # Unit conversion + attach
   if (units == "km") {
-    displacement <- displacement_m / 1000
-  } else if (units == "m") {
-    displacement <- displacement_m
-  } else {
-    stop("units must be 'km' or 'm'")
+    x$displacement        <- displacement_m / 1000
+    x$nsd                 <- nsd_m2                 # keep NSD in m^2 as in your current function
+    x$d_displacement      <- ddisp_m / 1000         # km
+    x$d_displacement2     <- ddisp2_m2 / (1000^2)   # km^2
+  } else { # "m"
+    x$displacement        <- displacement_m
+    x$nsd                 <- nsd_m2
+    x$d_displacement      <- ddisp_m               # m
+    x$d_displacement2     <- ddisp2_m2             # m^2
   }
 
-  # Attach results
-  x$displacement <- displacement
-  x$nsd          <- nsd
-  x$dnsd         <- dnsd
+  # Remove old dnsd if it exists (since we’re replacing it)
+  if ("dnsd" %in% names(x)) x$dnsd <- NULL
 
-  return(x)
+  x
 }
