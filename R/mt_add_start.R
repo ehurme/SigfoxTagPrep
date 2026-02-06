@@ -13,7 +13,7 @@ mt_add_start <- function(m2){
     m2$comments <- NA
   }
 
-  if(!any(c(st_is_empty(track_data$deploy_on_location),
+  if(any(c(st_is_empty(track_data$deploy_on_location),
      st_is_empty(track_data$capture_location)))){
     captures <- mt_as_move2(x = track_data %>%
                               dplyr::mutate(timestamp = deploy_on_timestamp,
@@ -24,6 +24,10 @@ mt_add_start <- function(m2){
                             time_column = "timestamp",
                             track_id_column = "individual_local_identifier", sf_column_name = "geometry")
     captures <- move2::mt_set_track_data(captures, data = track_data)
+    # add lon lat
+    coords <- st_coordinates(captures)
+    captures$lon <- coords[,1]
+    captures$lat <- coords[,2]
 
     m2 <- mt_stack(m2,
                    captures,
@@ -55,4 +59,3 @@ mt_add_start <- function(m2){
   }
   return(m2)
 }
-
