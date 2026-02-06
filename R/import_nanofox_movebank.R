@@ -8,6 +8,8 @@ import_nanofox_movebank <- function(
     compute_vedba_sum = TRUE,  # (kept for backwards-compat; logic lives in sourced helpers)
     vedba_col = "vedba",       # (kept for backwards-compat; logic lives in sourced helpers)
     vedba_sum_name = "vedba_sum",
+    run_elevation = TRUE,
+    run_daily_metrics = TRUE,
     verbose = TRUE,
     # ---- local project scripts (keep explicit, so paths are discoverable) ----
     script_mt_add_start = "../SigfoxTagPrep/R/mt_add_start.R",
@@ -21,11 +23,24 @@ import_nanofox_movebank <- function(
     tz = "UTC"
 ) {
   suppressPackageStartupMessages({
-    library(dplyr)
-    library(move2)
-    library(lubridate)
-    library(sf)
-    library(tidyr)
+    # core
+    requireNamespace("dplyr", quietly = TRUE)
+    requireNamespace("tibble", quietly = TRUE)
+    requireNamespace("purrr", quietly = TRUE)
+    requireNamespace("tidyr", quietly = TRUE)
+    requireNamespace("stringr", quietly = TRUE)
+    requireNamespace("lubridate", quietly = TRUE)
+
+    # move2 pipeline deps
+    requireNamespace("move2", quietly = TRUE)
+    requireNamespace("sf", quietly = TRUE)
+
+    # IMPORTANT: this fixes your first-run failure
+    requireNamespace("assertthat", quietly = TRUE)
+
+    # optional extras used in your pipeline
+    if (isTRUE(run_elevation)) requireNamespace("elevatr", quietly = TRUE)
+    if (isTRUE(run_daily_metrics)) requireNamespace("suncalc", quietly = TRUE)
   })
 
   # ----------------------------
@@ -196,6 +211,9 @@ import_nanofox_movebank <- function(
 
     # Strictly increasing timestamps required by mt_speed/mt_distance/mt_time_lags
     b_loc <- .dedupe_timestamps(b_loc)
+
+    # add year
+    b_loc$year <- year(b_loc$timestamp)
 
     # If still not time-ordered, bail with informative error
     if (!move2::mt_is_time_ordered(b_loc)) {
