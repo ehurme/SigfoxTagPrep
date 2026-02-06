@@ -420,7 +420,7 @@ import_nanofox_movebank <- function(
 
 # # One study
 # x <- {}
-# x <- import_nanofox_movebank(study_id = 7771978717) # 7772112798)
+# x <- import_nanofox_movebank(study_id = 4520022960) # 7772112798)
 # terra::ext(x$location)
 # b_full <- x$full
 # b_loc  <- x$location
