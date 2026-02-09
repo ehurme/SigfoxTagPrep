@@ -338,28 +338,28 @@ scan_track_plot <- function(
   invisible(list(plot = p_all, df_full = df_full, df_thin = df_thin))
 }
 
-# full data: s[[4]] ; thinned data: s[[6]]
-# Nlei25_freinat_Tier135_3639D2C
-# Nlei25_swiss_296_9EB3C6
-tags <- df_thin$individual_local_identifier[which(df_thin$displacement > 100)] %>% unique()
-for(tag in tags){
-  try({
-    res <- scan_track_plot(
-      df_full = y$full,
-      df_loc = y$location,
-      df_thin = y$daily,
-      individual_id = tag,   # example
-      idcol = "individual_local_identifier",
-      out_path = "../../../Dropbox/MPI/Noctule/Plots/ScanTrack/"
-    )
-  })
-}
-res$plot
-
-
-# view plot
-res$plot
-
-# see stats objects
-str(res$stats_full)
-str(res$stats_thin)
+# # full data: s[[4]] ; thinned data: s[[6]]
+# # Nlei25_freinat_Tier135_3639D2C
+# # Nlei25_swiss_296_9EB3C6
+# tags <- df_thin$individual_local_identifier[which(df_thin$displacement > 100)] %>% unique()
+# for(tag in tags){
+#   try({
+#     res <- scan_track_plot(
+#       df_full = y$full,
+#       df_loc = y$location,
+#       df_thin = y$daily,
+#       individual_id = tag,   # example
+#       idcol = "individual_local_identifier",
+#       out_path = "../../../Dropbox/MPI/Noctule/Plots/ScanTrack/"
+#     )
+#   })
+# }
+# res$plot
+#
+#
+# # view plot
+# res$plot
+#
+# # see stats objects
+# str(res$stats_full)
+# str(res$stats_thin)
