@@ -100,6 +100,42 @@ import_nanofox_movebank <- function(
     mt_add_start(x)
   }
 
+  add_prev_latlon <- function(x,
+                              lat_name = "lat_prev",
+                              lon_name = "lon_prev") {
+    require(move2)
+    require(sf)
+    require(dplyr)
+
+    if (!inherits(x, "move2")) {
+      stop("x must be a move2 object")
+    }
+
+    # extract coordinates
+    coords <- sf::st_coordinates(x)
+
+    # get track ids (already defines grouping)
+    track_id <- move2::mt_track_id(x)
+
+    df_coords <- tibble::tibble(
+      track_id = track_id,
+      lon = coords[, "X"],
+      lat = coords[, "Y"]
+    ) %>%
+      group_by(track_id) %>%
+      mutate(
+        !!lon_name := dplyr::lag(lon),
+        !!lat_name := dplyr::lag(lat)
+      ) %>%
+      ungroup()
+
+    # attach back to move2 object
+    x[[lon_name]] <- df_coords[[lon_name]]
+    x[[lat_name]] <- df_coords[[lat_name]]
+
+    return(x)
+  }
+
   # Determine requested sensors present in study, returning sensor_type_id values for download.
   .wanted_sensor_ids <- function(study_info, sensor_selected) {
     study_sensor_names <- as.character(study_info$sensor_type_ids)
@@ -372,12 +408,14 @@ import_nanofox_movebank <- function(
 
     # Location-only + metrics
     b_loc <- .make_location_metrics(b)
+    b_loc <- add_prev_latlon(b_loc)
 
     # Daily dataset
     .source_local(script_daily)
     b_daily <- .make_daily(b)
 
     b_daily2 <- .make_location_metrics(b_daily)
+    b_daily2 <- add_prev_latlon(b_daily2)
 
     list(
       study_id  = id,
