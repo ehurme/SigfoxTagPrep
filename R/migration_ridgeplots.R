@@ -3,7 +3,7 @@ migration_ridgeplots <- function(
     plot_fun = plot_variable_env_ridges,
 
     # filtering
-    tolerance_hours = 6,
+    # tolerance_hours = 6,
     # season_filter = "Spring",
     # dist_prev_min = 50,
     ids = NULL,  # optional vector of individual_local_identifier to keep
