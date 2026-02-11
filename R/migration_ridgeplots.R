@@ -4,8 +4,8 @@ migration_ridgeplots <- function(
 
     # filtering
     tolerance_hours = 6,
-    season_filter = "Spring",
-    dist_prev_min = 50,
+    # season_filter = "Spring",
+    # dist_prev_min = 50,
     ids = NULL,  # optional vector of individual_local_identifier to keep
 
     # ridge settings
@@ -52,15 +52,15 @@ migration_ridgeplots <- function(
 
   # ---- filter subset ----
   mig <- data %>%
-    as.data.frame() %>%
-    filter(
-      dt_prev > (24 - tolerance_hours) * 3600,
-      dt_prev < (24 + tolerance_hours) * 3600,
-      !is.na(season),
-      !is.na(dist_prev),
-      dist_prev > dist_prev_min,
-      season == season_filter
-    )
+    as.data.frame() #%>%
+    # filter(
+    #   dt_prev > (24 - tolerance_hours) * 3600,
+    #   dt_prev < (24 + tolerance_hours) * 3600,
+      # !is.na(season),
+      # !is.na(dist_prev),
+      # dist_prev > dist_prev_min,
+      # season == season_filter
+    # )
 
   if (!is.null(ids)) {
     mig <- mig %>% filter(individual_local_identifier %in% ids)
