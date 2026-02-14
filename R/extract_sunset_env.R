@@ -173,19 +173,50 @@ vars <- c("u10","v10","t2m",
 
 load("../../../Dropbox/MPI/Noctule/Data/rdata/move_icarus_bats.robj")
 
-sun1 <- extract_sunset_env(
-  timestamps = bats_daily$timestamp,
-  latitudes  = bats_daily$lat,
-  longitudes = bats_daily$lon,
-  IDs        = bats_daily$individual_local_identifier,
-  shift_hours = 0,
-  raster_by_year = raster_by_year,
-  var_names = c("u10","v10","t2m","msl","sp","tp","u100","v100","i10fg","tcc"),
-  tz = "UTC",
-  verbose = TRUE
+hours <- -2:2*24
+for(hour in hours){
+  sun1 <- extract_sunset_env(
+    timestamps = bats_daily$timestamp,
+    latitudes  = bats_daily$lat,
+    longitudes = bats_daily$lon,
+    IDs        = bats_daily$individual_local_identifier,
+    shift_hours = hour,
+    raster_by_year = raster_by_year,
+    var_names = c("u10","v10","t2m","msl","sp","tp","u100","v100","i10fg","tcc"),
+    tz = "UTC",
+    verbose = TRUE
+  )
+
+  # join back by .row_id if you already have it; otherwise add one first
+  bats_daily$.row_id <- seq_len(nrow(bats_daily))
+  bats_daily_sunset <- dplyr::left_join(bats_daily, sun1, by = ".row_id")
+}
+
+
+# calculate wind features
+source("./R/calculate_wind_features.R")
+bats_daily_sunset <- calculate_wind_features(
+  data = bats_daily_sunset,
+  u_col_base = "u10",
+  v_col_base = "v10",
+  distance_col = "distance",
+  time_diff_col = "dt_prev",
+  bearing_col = "azimuth_prev",
+  offsets = -2:2,
+  offset_units = "days",
+  time_diff_units = "seconds"
 )
 
-# join back by .row_id if you already have it; otherwise add one first
-bats_daily$.row_id <- seq_len(nrow(bats_daily))
-bats_daily_sunset <- dplyr::left_join(bats_daily, sun1, by = ".row_id")
-save(bats_daily_sunset, "../../../Dropbox/MPI/Noctule/Data/rdata/move_icarus_bats_sunset_env.robj")
+bats_daily_sunset <- calculate_wind_features(
+  data = bats_daily_sunset,
+  u_col_base = "u100",
+  v_col_base = "v100",
+  distance_col = "distance",
+  time_diff_col = "dt_prev",
+  bearing_col = "azimuth_prev",
+  offsets = -2:2,
+  offset_units = "days",
+  time_diff_units = "seconds"
+)
+summary(bats_daily_sunset)
+save(bats_daily_sunset, file = "../../../Dropbox/MPI/Noctule/Data/rdata/move_icarus_bats_sunset_env.robj")

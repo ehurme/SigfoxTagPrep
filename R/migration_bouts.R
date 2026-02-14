@@ -93,7 +93,7 @@ mt_add_migration_bouts <- function(
       ..bout_len = ifelse(first(..is_mig), n(), 0L)
     ) %>%
     ungroup() %>%
-    select(..id, ..date, ..mig_day, ..bout_id, ..day_in_bout, ..bout_len)
+    dplyr::select(..id, ..date, ..mig_day, ..bout_id, ..day_in_bout, ..bout_len)
 
   # Add a "which migration bout is this?" (1st, 2nd, 3rd...) per individual
   df_bouts <- df_bouts %>%
