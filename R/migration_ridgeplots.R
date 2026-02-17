@@ -26,6 +26,8 @@ migration_ridgeplots <- function(
     save = FALSE,
     out_env_file  = NULL,
     out_wind_file = NULL,
+    ncols = 1,
+    nrows = 4,
     width = 8,
     height = 11,
     dpi = 300,
@@ -114,13 +116,15 @@ migration_ridgeplots <- function(
     if (length(env_keys) > 0) {
       env_plot <- ggpubr::ggarrange(
         plotlist = lapply(env_keys, function(k) results[[k]]$plot),
-        ncol = 1
+        ncol = ncols,
+        nrow = nrows
       )
     }
     if (length(wind_keys) > 0) {
       wind_plot <- ggpubr::ggarrange(
         plotlist = lapply(wind_keys, function(k) results[[k]]$plot),
-        ncol = 1
+        ncol = ncols,
+        nrow = nrows
       )
     }
   }
