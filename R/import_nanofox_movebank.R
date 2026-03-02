@@ -417,6 +417,20 @@ import_nanofox_movebank <- function(
     b_daily2 <- .make_location_metrics(b_daily)
     b_daily2 <- add_prev_latlon(b_daily2)
 
+    # add year, yday, season
+    b$year <- factor(year(b$timestamp))
+    b_loc$year <- factor(year(b_loc$timestamp))
+    b_daily2$year <- factor(year(b_daily2$timestamp))
+
+    b$yday <- factor(yday(b$timestamp))
+    b_loc$yday <- factor(yday(b_loc$timestamp))
+    b_daily2$yday <- factor(yday(b_daily2$timestamp))
+
+    b$season <- ifelse(month(b$timestamp) > 7, "Fall", "Spring")
+    b_loc$season <- ifelse(month(b_loc$timestamp) > 7, "Fall", "Spring")
+    b_daily2$season <- ifelse(month(b_daily2$timestamp) > 7, "Fall", "Spring")
+
+
     list(
       study_id  = id,
       full      = b,

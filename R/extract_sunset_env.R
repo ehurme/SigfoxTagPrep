@@ -241,8 +241,8 @@ for(hour in hours){
 source("./R/calculate_wind_features.R")
 bats_daily_sunset <- calculate_wind_features(
   data = bats_daily_sunset,
-  u_col_base = "u10",
-  v_col_base = "v10",
+  u_col_base = "u10_sunset1h",
+  v_col_base = "v10_sunset1h",
   distance_col = "distance",
   time_diff_col = "dt_prev",
   bearing_col = "azimuth_prev",
