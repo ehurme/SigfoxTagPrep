@@ -1,6 +1,9 @@
-# ============================================================
-# WildCloud (new wide headers) -> Movebank upload CSVs
-# ============================================================
+# Wildcloud  to movebank ----
+# Updated: 2026-03-10
+# Edward Hurme
+
+# Summary:
+# Process wildcloud data to be in the correct format for movebank uploads
 
 # ---- Helper: parse "14.06.2025, 17:56:24" as UTC ----
 parse_wc_time_utc <- function(x) {
@@ -20,15 +23,14 @@ split_position_wc <- function(df) {
   df
 }
 
-# ============================================================
-# 1) Expand NEW WildCloud wide schema into a "long-ish" table
+# 1) Expand NEW Wildcloud wide schema into a long table ----
 #    that contains:
 #    - location rows (start=end=tx time)
 #    - VeDBA (5 x 36-min windows) -> VeDBA [m/s²]
 #    - temp  (5 x 36-min windows) -> temperature [°C]
 #    - min pressure (3-hr)        -> pressure [mbar]
 #    - min temp range label (3-hr)-> min_temp_range [°C]
-# ============================================================
+
 wc_wide_to_mb_long <- function(df) {
   suppressPackageStartupMessages({
     require(dplyr)
@@ -165,9 +167,9 @@ wc_wide_to_mb_long <- function(df) {
   out
 }
 
-# ============================================================
-# 2) Writer: standard Movebank upload CSV set, per project
-# ============================================================
+
+# 2) Writer: standard Movebank upload CSV set, per project ----
+
 write_movebank_upload_csvs <- function(
     loc_data, vedba_data, bar_data, temp_data, min_temp_data, deployment_data,
     output_dir
@@ -211,10 +213,9 @@ write_movebank_upload_csvs <- function(
   invisible(TRUE)
 }
 
-# ============================================================
-# 3) Updated main function
-# ============================================================
-wildcloud_nanofox_to_movebank <- function(
+# 3) Updated main function ----
+
+wildcloud_to_movebank <- function(
     wc_path              = NULL,
     movebank_csv_path    = NULL,
     animals_path,
