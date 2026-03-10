@@ -201,28 +201,72 @@ writeLines(stan_code, "migration_hmm.stan")
 mod <- cmdstan_model("migration_hmm.stan")
 
 
-fit_migration_hmm <- function(stan_data, chains = 4, iter_warmup = 1000, iter_sampling = 1000, seed = 123) {
-  mod <- cmdstan_model("migration_hmm.stan")
+# fit_migration_hmm <- function(stan_data, chains = 4, iter_warmup = 1000, iter_sampling = 1000, seed = 123) {
+#   mod <- cmdstan_model("migration_hmm.stan")
+#
+#   fit <- mod$sample(
+#     data = stan_data,
+#     chains = chains,
+#     parallel_chains = chains,
+#     iter_warmup = iter_warmup,
+#     iter_sampling = iter_sampling,
+#     seed = seed,
+#     refresh = 200
+#   )
+#
+#   return(fit)
+# }
 
-  fit <- mod$sample(
-    data = stan_data,
-    chains = chains,
-    parallel_chains = chains,
-    iter_warmup = iter_warmup,
-    iter_sampling = iter_sampling,
-    seed = seed,
-    refresh = 200
-  )
+fit_migration_hmm <- function(mod, stan_data,
+                        chains = 4,
+                        iter_warmup = 1000,
+                        iter_sampling = 1000,
+                        seed = 123,
+                        use_threads = FALSE,
+                        n_cores = parallel::detectCores(logical = FALSE)) {
 
-  return(fit)
+  if (!use_threads) {
+    fit <- mod$sample(
+      data = stan_data,
+      chains = chains,
+      parallel_chains = min(chains, n_cores),
+      iter_warmup = iter_warmup,
+      iter_sampling = iter_sampling,
+      seed = seed,
+      refresh = 100
+    )
+  } else {
+    # simple default split
+    parallel_chains <- min(chains, max(1, floor(n_cores / 2)))
+    threads_per_chain <- max(1, floor(n_cores / parallel_chains))
+
+    fit <- mod$sample(
+      data = stan_data,
+      chains = chains,
+      parallel_chains = parallel_chains,
+      threads_per_chain = threads_per_chain,
+      iter_warmup = iter_warmup,
+      iter_sampling = iter_sampling,
+      seed = seed,
+      refresh = 100
+    )
+  }
+
+  fit
 }
 
 load("../../../Dropbox/MPI/Noctule/Data/rdata/move_icarus_bats.robj")
-x <- bats_loc %>% filter(species == "Nyctalus leisleri")
+x <- bats_loc %>% filter(species == "Nyctalus leisleri", tag_type == "nanofox")
 
 df_mov <- prepare_hmm_data(x)
 model_input <- make_model_data(df_mov)
 
-fit <- fit_migration_hmm(model_input$stan_data)
+# fit <- fit_migration_hmm(model_input$stan_data)
+mod <- cmdstan_model("migration_hmm.stan")
+fit <- fit_migration_hmm(mod, model_input$stan_data, use_threads = FALSE)
 
 fit$summary(c("mu_step", "sigma_step", "kappa", "trans"))
+
+# Chain 7 finished in 2735.0 seconds.
+# Chain 6 Iteration:  200 / 2000 [ 10%]  (Warmup)
+# Chain 3 Iteration:  200 / 2000 [ 10%]  (Warmup)
