@@ -101,7 +101,8 @@ extract_sunset_env <- function(
     )
 
   # ---- preallocate env columns ----
-  out_cols <- paste0(var_names, "_sunset1h_", shift_hours, "h")
+  out_cols <- paste0(var_names, "_", #"_sunset1h_",
+                     shift_hours, "h")
   for (nm in out_cols) df[[nm]] <- NA_real_
 
   years_needed <- sort(unique(df$year[!is.na(df$year)]))
@@ -197,106 +198,106 @@ extract_sunset_env <- function(
   }
 }
 
-raster_by_year <- list(
-  "2022" = "../../../Dropbox/MPI/Noctule/Data/ECMWF/2022/ERA_2022.grib",
-  "2023" = "../../../Dropbox/MPI/Noctule/Data/ECMWF/2023/ERA_2023.grib",
-  "2024" = "../../../Dropbox/MPI/Noctule/Data/ECMWF/2024/ERA_2024.grib",
-  "2025" = "../../../Dropbox/MPI/Noctule/Data/ECMWF/2025/ERA_2025.grib"
-)
-
-vars <- c("u10","v10","t2m",
-          "msl","sp","tp",
-          "u100","v100",
-          "i10fg","tcc")
-
-load("../../../Dropbox/MPI/Noctule/Data/rdata/move_icarus_bats.robj")
-
-bats_daily$.row_id <- seq_len(nrow(bats_daily))
-bats_daily_sunset <- bats_daily
-hours <- -2:2*24
-for(hour in hours){
-  # ensure stable row id once
-  bats_daily_sunset$.row_id <- seq_len(nrow(bats_daily_sunset))
-
-  sun1 <- extract_sunset_env(
-    timestamps = bats_daily_sunset$timestamp,
-    latitudes  = bats_daily_sunset$lat,
-    longitudes = bats_daily_sunset$lon,
-    lat_prev   = bats_daily_sunset$lat_prev,
-    lon_prev   = bats_daily_sunset$lon_prev,
-    IDs        = bats_daily_sunset$individual_local_identifier,
-    shift_hours = 0,
-    raster_by_year = raster_by_year,
-    var_names = vars,
-    tz = "UTC",
-    keep_debug_cols = TRUE
-  )
-
-  # join-safe: bring in only what sun1 returns
-  bats_daily_sunset <- dplyr::left_join(bats_daily_sunset, sun1, by = ".row_id")
-}
+# raster_by_year <- list(
+#   "2022" = "../../../Dropbox/MPI/Noctule/Data/ECMWF/2022/ERA_2022.grib",
+#   "2023" = "../../../Dropbox/MPI/Noctule/Data/ECMWF/2023/ERA_2023.grib",
+#   "2024" = "../../../Dropbox/MPI/Noctule/Data/ECMWF/2024/ERA_2024.grib",
+#   "2025" = "../../../Dropbox/MPI/Noctule/Data/ECMWF/2025/ERA_2025.grib"
+# )
+#
+# vars <- c("u10","v10","t2m",
+#           "msl","sp","tp",
+#           "u100","v100",
+#           "i10fg","tcc")
+#
+# load("../../../Dropbox/MPI/Noctule/Data/rdata/move_icarus_bats.robj")
+#
+# bats_daily$.row_id <- seq_len(nrow(bats_daily))
+# bats_daily_sunset <- bats_daily
+# hours <- -2:2*24
+# for(hour in hours){
+#   # ensure stable row id once
+#   bats_daily_sunset$.row_id <- seq_len(nrow(bats_daily_sunset))
+#
+#   sun1 <- extract_sunset_env(
+#     timestamps = bats_daily_sunset$timestamp,
+#     latitudes  = bats_daily_sunset$lat,
+#     longitudes = bats_daily_sunset$lon,
+#     lat_prev   = bats_daily_sunset$lat_prev,
+#     lon_prev   = bats_daily_sunset$lon_prev,
+#     IDs        = bats_daily_sunset$individual_local_identifier,
+#     shift_hours = 0,
+#     raster_by_year = raster_by_year,
+#     var_names = vars,
+#     tz = "UTC",
+#     keep_debug_cols = TRUE
+#   )
+#
+#   # join-safe: bring in only what sun1 returns
+#   bats_daily_sunset <- dplyr::left_join(bats_daily_sunset, sun1, by = ".row_id")
+# }
+# # summary(bats_daily_sunset)
+#
+# # calculate wind features
+# source("./R/calculate_wind_features.R")
+# bats_daily_sunset <- calculate_wind_features(
+#   data = bats_daily_sunset,
+#   u_col_base = "u10_sunset1h",
+#   v_col_base = "v10_sunset1h",
+#   distance_col = "distance",
+#   time_diff_col = "dt_prev",
+#   bearing_col = "azimuth_prev",
+#   offsets = -2:2,
+#   offset_units = "days",
+#   time_diff_units = "seconds"
+# )
+#
+# bats_daily_sunset <- calculate_wind_features(
+#   data = bats_daily_sunset,
+#   u_col_base = "u100",
+#   v_col_base = "v100",
+#   distance_col = "distance",
+#   time_diff_col = "dt_prev",
+#   bearing_col = "azimuth_prev",
+#   offsets = -2:2,
+#   offset_units = "days",
+#   time_diff_units = "seconds"
+# )
+#
+# # delta wind direction helper (degrees), result in [-180, 180]
+# circ_diff_deg <- function(to_deg, from_deg) {
+#   ((to_deg - from_deg + 180) %% 360) - 180
+# }
+#
+# bats_daily_sunset <- bats_daily_sunset %>%
+#   mutate(
+#     # ---- scalar ERA5 variables ----
+#     dt2m_1d   = t2m_0h - `t2m_-24h`,
+#     dmsl_1d   = msl_0h - `msl_-24h`,
+#     dsp_1d    = sp_0h  - `sp_-24h`,
+#     dtp_1d    = tp_0h  - `tp_-24h`,
+#     dtcc_1d   = tcc_0h - `tcc_-24h`,
+#
+#     # ---- wind magnitude/support etc. (pick your level, here "100") ----
+#     ## 10m
+#     dwindsp10_1d  = windsp10_0h - `windsp10_-24h`,
+#     dwinddir10_1d = circ_diff_deg(winddir10_0h, `winddir10_-24h`),
+#
+#     dws10_1d      = ws10_0h - `ws10_-24h`,
+#     dcw10_1d      = cw10_0h - `cw10_-24h`,
+#     dairspeed10_1d = airspeed10_0h - `airspeed10_-24h`,
+#     ## 100m
+#     dwindsp100_1d  = windsp100_0h - `windsp100_-24h`,
+#     dwinddir100_1d = circ_diff_deg(winddir100_0h, `winddir100_-24h`),
+#
+#     dws100_1d      = ws100_0h - `ws100_-24h`,
+#     dcw100_1d      = cw100_0h - `cw100_-24h`,
+#     dairspeed100_1d = airspeed100_0h - `airspeed100_-24h`
+#   )
+#
 # summary(bats_daily_sunset)
-
-# calculate wind features
-source("./R/calculate_wind_features.R")
-bats_daily_sunset <- calculate_wind_features(
-  data = bats_daily_sunset,
-  u_col_base = "u10_sunset1h",
-  v_col_base = "v10_sunset1h",
-  distance_col = "distance",
-  time_diff_col = "dt_prev",
-  bearing_col = "azimuth_prev",
-  offsets = -2:2,
-  offset_units = "days",
-  time_diff_units = "seconds"
-)
-
-bats_daily_sunset <- calculate_wind_features(
-  data = bats_daily_sunset,
-  u_col_base = "u100",
-  v_col_base = "v100",
-  distance_col = "distance",
-  time_diff_col = "dt_prev",
-  bearing_col = "azimuth_prev",
-  offsets = -2:2,
-  offset_units = "days",
-  time_diff_units = "seconds"
-)
-
-# delta wind direction helper (degrees), result in [-180, 180]
-circ_diff_deg <- function(to_deg, from_deg) {
-  ((to_deg - from_deg + 180) %% 360) - 180
-}
-
-bats_daily_sunset <- bats_daily_sunset %>%
-  mutate(
-    # ---- scalar ERA5 variables ----
-    dt2m_1d   = t2m_0h - `t2m_-24h`,
-    dmsl_1d   = msl_0h - `msl_-24h`,
-    dsp_1d    = sp_0h  - `sp_-24h`,
-    dtp_1d    = tp_0h  - `tp_-24h`,
-    dtcc_1d   = tcc_0h - `tcc_-24h`,
-
-    # ---- wind magnitude/support etc. (pick your level, here "100") ----
-    ## 10m
-    dwindsp10_1d  = windsp10_0h - `windsp10_-24h`,
-    dwinddir10_1d = circ_diff_deg(winddir10_0h, `winddir10_-24h`),
-
-    dws10_1d      = ws10_0h - `ws10_-24h`,
-    dcw10_1d      = cw10_0h - `cw10_-24h`,
-    dairspeed10_1d = airspeed10_0h - `airspeed10_-24h`,
-    ## 100m
-    dwindsp100_1d  = windsp100_0h - `windsp100_-24h`,
-    dwinddir100_1d = circ_diff_deg(winddir100_0h, `winddir100_-24h`),
-
-    dws100_1d      = ws100_0h - `ws100_-24h`,
-    dcw100_1d      = cw100_0h - `cw100_-24h`,
-    dairspeed100_1d = airspeed100_0h - `airspeed100_-24h`
-  )
-
-summary(bats_daily_sunset)
-# remove extra ID, timestamp, lat, lon, sunset_time, target_time
-
-save(bats_daily_sunset, file = "../../../Dropbox/MPI/Noctule/Data/rdata/move_icarus_bats_sunset_env.robj")
-
+# # remove extra ID, timestamp, lat, lon, sunset_time, target_time
+#
+# save(bats_daily_sunset, file = "../../../Dropbox/MPI/Noctule/Data/rdata/move_icarus_bats_sunset_env.robj")
+#
 
