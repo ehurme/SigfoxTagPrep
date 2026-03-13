@@ -13,7 +13,37 @@ suppressPackageStartupMessages({
   library(stringr)
 })
 
-guess_nanofox_columns <- function(x) {
+add_seasonal_directionality <- function(df) {
+  df %>%
+    mutate(
+      heading = atan2(dy, dx),  # radians, east = 0
+
+      month_mid = lubridate::month(t_mid),
+      season = case_when(
+        month_mid %in% c(3, 4, 5, 6)  ~ "spring",
+        month_mid %in% c(8, 9, 10, 11) ~ "fall",
+        TRUE ~ "other"
+      ),
+
+      # target migration direction in radians
+      target_heading = case_when(
+        season == "spring" ~ pi / 4,        # 45 deg = NE
+        season == "fall"   ~ 5 * pi / 4,    # 225 deg = SW
+        TRUE ~ NA_real_
+      ),
+
+      dir_align = ifelse(
+        is.na(target_heading),
+        0,
+        cos(heading - target_heading)
+      )
+    ) %>%
+    mutate(
+      z_dir_align = safe_scale(dir_align)
+    )
+}
+
+  guess_nanofox_columns <- function(x) {
   nm <- names(x)
 
   pick_first <- function(candidates, nm) {
@@ -646,10 +676,10 @@ plot_hmm2_params <- function(fit) {
 load("../../../Dropbox/MPI/Noctule/Data/rdata/move_icarus_bats.robj")
 
 x <- bats_loc %>%
-  filter(species == "Nyctalus leisleri", tag_type == "nanofox")
+  filter(species == "Nyctalus leisleri")
 
 # optional subset for testing
-x <- x[2000:3000, ]
+# x <- x[1:3000, ]
 
 res <- fit_nanofox_2state_hmm(
   x,
@@ -669,3 +699,4 @@ plot_hmm2_params(res$fit)
 
 res$fit$summary(c("mu_speed", "mu_progress", "sigma_speed", "sigma_progress"))
 res$fit$diagnostic_summary()
+
