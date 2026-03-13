@@ -37,4 +37,4 @@ rsconnect/
 .Rdata
 .DS_Store
 .quarto
-nanofox_3state_hmm.stan
+migration_hmm.stan
