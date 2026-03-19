@@ -36,8 +36,10 @@ import_nanofox_movebank <- function(
     requireNamespace("move2", quietly = TRUE)
     requireNamespace("sf", quietly = TRUE)
 
-    # IMPORTANT: this fixes your first-run failure
-    requireNamespace("assertthat", quietly = TRUE)
+    # assertthat must be *attached* (not just namespace-loaded) because
+    # mt_thin_daily_solar_noon() calls assert_that() without a :: prefix.
+    # requireNamespace() alone is not enough -- use require() to attach it.
+    require(assertthat, quietly = TRUE)
 
     # optional extras used in your pipeline
     if (isTRUE(run_elevation)) requireNamespace("elevatr", quietly = TRUE)
@@ -326,11 +328,10 @@ import_nanofox_movebank <- function(
       return(x)
     }
 
-    # solar position (vectorised)
+    # solar position — use the data= form which is robust across suncalc versions
+    # and correctly handles vectorised lat/lon without the "must be unique" error.
     sun_pos <- suncalc::getSunlightPosition(
-      date = df$timestamp,
-      lat  = df$lat,
-      lon  = df$lon,
+      data = data.frame(date = df$timestamp, lat = df$lat, lon = df$lon),
       keep = "altitude"
     )
     df$night_day <- ifelse(sun_pos$altitude < 0, "night", "day")
@@ -607,21 +608,30 @@ import_nanofox_movebank <- function(
     .source_local(script_daily)
     b_daily <- .make_daily(b)
 
-    b_daily2 <- .make_location_metrics(b_daily)
-    b_daily2 <- add_prev_latlon(b_daily2)
+    # Guard: if daily selection failed/returned NULL, skip metrics rather than crash
+    if (is.null(b_daily) || nrow(b_daily) == 0) {
+      .msg("Warning: daily dataset is empty for study ", id, " — skipping daily metrics.")
+      b_daily2 <- b_daily
+    } else {
+      b_daily2 <- .make_location_metrics(b_daily)
+      b_daily2 <- add_prev_latlon(b_daily2)
+    }
 
     # add year, yday, season
-    b$year <- factor(year(b$timestamp))
+    b$year    <- factor(year(b$timestamp))
     b_loc$year <- factor(year(b_loc$timestamp))
-    b_daily2$year <- factor(year(b_daily2$timestamp))
 
-    b$yday <- factor(yday(b$timestamp))
+    b$yday    <- factor(yday(b$timestamp))
     b_loc$yday <- factor(yday(b_loc$timestamp))
-    b_daily2$yday <- factor(yday(b_daily2$timestamp))
 
-    b$season <- ifelse(month(b$timestamp) > 7, "Fall", "Spring")
+    b$season    <- ifelse(month(b$timestamp) > 7, "Fall", "Spring")
     b_loc$season <- ifelse(month(b_loc$timestamp) > 7, "Fall", "Spring")
-    b_daily2$season <- ifelse(month(b_daily2$timestamp) > 7, "Fall", "Spring")
+
+    if (!is.null(b_daily2) && nrow(b_daily2) > 0) {
+      b_daily2$year   <- factor(year(b_daily2$timestamp))
+      b_daily2$yday   <- factor(yday(b_daily2$timestamp))
+      b_daily2$season <- ifelse(month(b_daily2$timestamp) > 7, "Fall", "Spring")
+    }
 
 
     list(
