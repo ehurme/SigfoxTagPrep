@@ -10,6 +10,7 @@ import_nanofox_movebank <- function(
     vedba_sum_name = "vedba_sum",
     run_elevation = TRUE,
     run_daily_metrics = TRUE,
+    daily_method = c("solar_noon", "daytime_only", "noon_roost"),
     verbose = TRUE,
     # ---- local project scripts (keep explicit, so paths are discoverable) ----
     script_mt_add_start = "../SigfoxTagPrep/R/mt_add_start.R",
@@ -284,34 +285,223 @@ import_nanofox_movebank <- function(
   .source_local(script_daily)         # should define mt_filter_daily_solar_noon(), mt_thin_daily_solar_noon()
   .source_local(script_daily_sensor)  # should define mt_make_daily_bat_metrics() + helpers
 
-  .make_daily <- function(x) {
+  # ---------------------------------------------------------------------------
+  # .add_night_day_id()
+  #   Adds a `night_day_id` column to a move2/sf object.
+  #
+  #   Format:  "<night|day>_<period>"
+  #     - night/day : solar altitude at the fix location and time.
+  #                   "night" when sun altitude < 0, "day" otherwise.
+  #     - period    : integer days since the individual's first timestamp
+  #                   (0 = capture day, 1 = next day, …). Uses calendar date
+  #                   (UTC), so period increments cleanly at midnight.
+  #
+  #   Requires: suncalc (loaded when run_daily_metrics = TRUE),
+  #             columns: timestamp, lon, lat, individual_local_identifier.
+  # ---------------------------------------------------------------------------
+  .add_night_day_id <- function(x) {
+    if (!requireNamespace("suncalc", quietly = TRUE)) {
+      warning(".add_night_day_id: suncalc not available; skipping night_day_id.")
+      return(x)
+    }
 
-    # Fallback requirement (at minimum we can thin)
+    # lon/lat should already exist from .add_lonlat(), but guard anyway
+    if (!all(c("lon", "lat") %in% names(x))) {
+      coords <- sf::st_coordinates(x)
+      x$lon  <- coords[, 1]
+      x$lat  <- coords[, 2]
+    }
+
+    df <- tibble::tibble(
+      .row_idx   = seq_len(nrow(x)),
+      individual = x$individual_local_identifier,
+      timestamp  = x$timestamp,
+      lon        = x$lon,
+      lat        = x$lat
+    ) %>%
+      dplyr::filter(!is.na(.data$lon), !is.na(.data$lat), !is.na(.data$timestamp))
+
+    if (nrow(df) == 0) {
+      x$night_day_id <- NA_character_
+      return(x)
+    }
+
+    # solar position (vectorised)
+    sun_pos <- suncalc::getSunlightPosition(
+      date = df$timestamp,
+      lat  = df$lat,
+      lon  = df$lon,
+      keep = "altitude"
+    )
+    df$night_day <- ifelse(sun_pos$altitude < 0, "night", "day")
+
+    # period: calendar days since each individual's first fix
+    df <- df %>%
+      dplyr::group_by(.data$individual) %>%
+      dplyr::mutate(
+        first_date = as.Date(min(.data$timestamp, na.rm = TRUE)),
+        period     = as.integer(as.Date(.data$timestamp) - .data$first_date)
+      ) %>%
+      dplyr::ungroup()
+
+    df$night_day_id <- paste(df$night_day, df$period, sep = "_")
+
+    # attach back — NA for rows with missing coords/timestamp
+    out_vec <- rep(NA_character_, nrow(x))
+    out_vec[df$.row_idx] <- df$night_day_id
+    x$night_day_id <- out_vec
+
+    .msg("  night_day_id assigned. Unique labels: ",
+         dplyr::n_distinct(df$night_day_id),
+         " | night fixes: ", sum(df$night_day == "night"),
+         " | day fixes: ",   sum(df$night_day == "day"))
+
+    x
+  }
+
+  # ---------------------------------------------------------------------------
+  # Daily location method: "daytime_only"
+  #   Same as solar_noon thinning but first removes fixes between 20:00-04:00
+  #   UTC, as bats are actively flying then and unlikely to represent a roost.
+  # ---------------------------------------------------------------------------
+  .select_daily_daytime_only <- function(x) {
+    if (!inherits(x, c("move2", "sf"))) stop("x must be a move2/sf object")
+
+    # Filter out night-flight window (20:00 to 04:00 UTC, exclusive of endpoints)
+    hr <- lubridate::hour(x$timestamp)
+    flying_window <- hr >= 20 | hr < 4
+    n_removed <- sum(flying_window, na.rm = TRUE)
+    .msg("  [daytime_only] Removing ", n_removed, " fixes in 20:00-04:00 UTC flight window.")
+    x_day <- x[!flying_window, ]
+
+    if (nrow(x_day) == 0) {
+      warning("[daytime_only] No fixes remain after removing flight window. Returning NULL.")
+      return(NULL)
+    }
+
+    # Then apply the standard solar-noon thinning on the filtered set
     if (!exists("mt_thin_daily_solar_noon", mode = "function")) {
-      stop("mt_thin_daily_solar_noon() not found in session. Source it before calling import_nanofox_movebank().")
+      stop("mt_thin_daily_solar_noon() not found. Source script_daily first.")
     }
-    if (exists("mt_thin_daily_solar_noon", mode = "function")) {
-      b_daily <- .safe_try(
-        mt_thin_daily_solar_noon(x, tz = tz)
-      )
+    mt_thin_daily_solar_noon(x_day, tz = tz)
+  }
+
+  # ---------------------------------------------------------------------------
+  # Daily location method: "noon_roost"
+  #   Assigns each fix to its biological noon (night fixes before midnight go
+  #   to the *next* day's noon; night fixes after midnight stay on the same
+  #   day's noon). Selects the fix closest to noon per individual x period,
+  #   preferring daytime fixes. Drops period-0 fixes except the capture point.
+  #
+  #   Requires columns: night_day_id, individual_local_identifier, timestamp
+  #   (night_day_id is computed by .add_night_day_id() earlier in the pipeline).
+  # ---------------------------------------------------------------------------
+  .select_daily_noon_roost <- function(x) {
+    if (!"night_day_id" %in% names(x)) {
+      stop("[noon_roost] Column 'night_day_id' not found. Ensure .add_night_day_id() ran successfully.")
     }
 
-    # Preferred: all-in-one daily metrics (movement + sensors) + drop raw columns
+    # 1. Drop period-0 fixes (capture night/next day) except the true capture point
+    rep_daily <- x %>%
+      dplyr::filter(!stringr::str_detect(.data$night_day_id, "_0$")) %>%
+      dplyr::mutate(
+        night_day_split = stringr::str_split_fixed(.data$night_day_id, "_", 2),
+        night_day  = night_day_split[, 1],
+        period_id  = night_day_split[, 2]
+      ) %>%
+      dplyr::select(-night_day_split)
+
+    .msg("  [noon_roost] Period-0 fixes removed. Remaining: ",
+         nrow(rep_daily), " of ", nrow(x))
+
+    # 2. Assign biological noon to each fix
+    #    - daytime fix         -> same day's noon
+    #    - night fix >= 12:00  -> next day's noon  (pre-midnight; bat still flying)
+    #    - night fix <  12:00  -> same day's noon  (post-midnight; bat at roost)
+    rep_daily <- rep_daily %>%
+      dplyr::mutate(
+        noon_date = dplyr::case_when(
+          .data$night_day == "night" & lubridate::hour(.data$timestamp) >= 12 ~
+            as.Date(.data$timestamp) + 1,
+          TRUE ~ as.Date(.data$timestamp)
+        ),
+        noon_time    = as.POSIXct(paste0(.data$noon_date, " 12:00:00"), tz = "UTC"),
+        dist_to_noon = abs(as.numeric(
+          difftime(.data$timestamp, .data$noon_time, units = "secs")
+        ))
+      )
+
+    # 3. One representative fix per individual x period
+    #    Daytime fixes sorted first (FALSE < TRUE), then by proximity to noon.
+    rep_daily_selected <- rep_daily %>%
+      dplyr::group_by(.data$individual_local_identifier, .data$period_id) %>%
+      dplyr::arrange(.data$night_day == "night", .data$dist_to_noon, .by_group = TRUE) %>%
+      dplyr::slice(1) %>%
+      dplyr::ungroup()
+
+    .msg("  [noon_roost] Daily representative points selected.\n",
+         "   Individuals: ", dplyr::n_distinct(rep_daily_selected$individual_local_identifier), "\n",
+         "   Rows selected: ", nrow(rep_daily_selected))
+
+    # Drop helper columns — keep night_day_id intact for downstream use
+    rep_daily_selected <- rep_daily_selected %>%
+      dplyr::select(-dplyr::any_of(c("night_day", "period_id", "noon_date",
+                                     "noon_time", "dist_to_noon")))
+
+    rep_daily_selected
+  }
+
+  # ---------------------------------------------------------------------------
+  # .make_daily(): dispatcher — routes to the requested method, then appends
+  #                daily sensor summaries via mt_add_daily_sensor_metrics()
+  #                (same post-processing regardless of selection method).
+  # ---------------------------------------------------------------------------
+  .make_daily <- function(x) {
+    method <- match.arg(daily_method,
+                        c("solar_noon", "daytime_only", "noon_roost"))
+
+    # --- location selection -------------------------------------------------
+    b_daily <- switch(
+      method,
+
+      "solar_noon" = {
+        if (!exists("mt_thin_daily_solar_noon", mode = "function")) {
+          stop("mt_thin_daily_solar_noon() not found. Source script_daily first.")
+        }
+        .msg("Daily method: solar_noon (standard)")
+        .safe_try(mt_thin_daily_solar_noon(x, tz = tz), "mt_thin_daily_solar_noon")
+      },
+
+      "daytime_only" = {
+        .msg("Daily method: daytime_only (excludes 20:00-04:00 UTC)")
+        .safe_try(.select_daily_daytime_only(x), "select_daily_daytime_only")
+      },
+
+      "noon_roost" = {
+        .msg("Daily method: noon_roost (biological-noon assignment)")
+        .safe_try(.select_daily_noon_roost(x), "select_daily_noon_roost")
+      }
+    )
+
+    if (is.null(b_daily) || nrow(b_daily) == 0) {
+      warning(".make_daily(): daily location selection returned no rows for method '",
+              method, "'.")
+      return(b_daily)
+    }
+
+    # --- daily sensor summaries (same for all methods) ----------------------
     if (exists("mt_add_daily_sensor_metrics", mode = "function")) {
       b_daily <- .safe_try(
         mt_add_daily_sensor_metrics(
-          b_all = x,
+          b_all   = x,
           b_daily = b_daily,
-          tz = tz,
-          day_anchor_hour = 12   # noon->noon keeps one full night per summary
-          # optionally pass your column mappings here if they differ
-          # nano_pres_col = "min_3h_pressure",
-          # nano_temp_col = "avg_temp",
-          # nano_vedba_col = "vedba_sum"
+          tz      = tz,
+          day_anchor_hour = 12
         ),
-        "mt_make_daily_sensor_metrics"
-      )
+        "mt_add_daily_sensor_metrics"
+      ) %||% b_daily
     }
+
     return(b_daily)
   }
 
@@ -405,6 +595,9 @@ import_nanofox_movebank <- function(
       ),
       "add_altitude_from_pressure"
     ) %||% b
+
+    # Assign night_day_id: "<night|day>_<days_since_capture>" for every fix
+    b <- .safe_try(.add_night_day_id(b), "add_night_day_id") %||% b
 
     # Location-only + metrics
     b_loc <- .make_location_metrics(b)
