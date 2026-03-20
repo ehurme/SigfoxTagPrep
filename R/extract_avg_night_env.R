@@ -128,9 +128,14 @@ extract_avg_night_env_from_year_stacks <- function(
   requireNamespace("dplyr",     quietly = TRUE)
 
   # activate terra's own C++ thread pool — safe on Windows, no serialisation
-  old_threads <- terra::terraOptions(print = FALSE)$threads
-  terra::terraOptions(threads = max(1L, as.integer(n_threads)))
-  on.exit(terra::terraOptions(threads = old_threads), add = TRUE)
+  # terra's default thread count is unset (NULL/empty), so we cannot
+  # save-and-restore it with terraOptions() — passing NULL or integer(0)
+  # back to threads= throws "Expecting a single value: [extent=0]".
+  # Instead, just set the requested thread count and leave it in place;
+  # the caller can reset it manually if needed (see usage example below).
+  if (!is.null(n_threads) && !is.na(n_threads) && n_threads > 1L) {
+    terra::terraOptions(threads = as.integer(n_threads))
+  }
 
   n <- length(timestamps)
   stopifnot(length(latitudes) == n, length(longitudes) == n)
@@ -274,7 +279,7 @@ extract_avg_night_env_from_year_stacks <- function(
               ", unique hours=", length(uniq_hours),
               ", total layers=", length(all_layers),
               ", vars/hour=", n_var,
-              ", terra threads=", terra::terraOptions(print = FALSE)$threads)
+              ", terra threads=", n_threads)
     }
 
     # --- project points once per year ---
@@ -394,7 +399,9 @@ add_avg_night_to_move2 <- function(m, avg_night_data, row_id = ".row_id") {
 # -----------------------------------------------------------------------------
 # Usage example (commented out)
 # -----------------------------------------------------------------------------
-# terra::terraOptions(threads = 8)   # or let the function set it via n_threads
+# Note: the function sets terra's thread count but does NOT restore the previous
+# value on exit (terra's default is unset, and passing it back crashes).
+# If you need to reset threads after the call: terra::terraOptions(threads = 1)
 #
 # for (day in days) {
 #   res <- extract_avg_night_env_from_year_stacks(

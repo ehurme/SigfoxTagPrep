@@ -368,11 +368,11 @@ import_nanofox_movebank <- function(
   .select_daily_daytime_only <- function(x) {
     if (!inherits(x, c("move2", "sf"))) stop("x must be a move2/sf object")
 
-    # Filter out night-flight window (20:00 to 04:00 UTC, exclusive of endpoints)
+    # Filter out night-flight window (22:00 to 06:00 CET, exclusive of endpoints)
     hr <- lubridate::hour(x$timestamp)
-    flying_window <- hr >= 20 | hr < 4
+    flying_window <- hr >= 21 | hr < 5
     n_removed <- sum(flying_window, na.rm = TRUE)
-    .msg("  [daytime_only] Removing ", n_removed, " fixes in 20:00-04:00 UTC flight window.")
+    .msg("  [daytime_only] Removing ", n_removed, " fixes in 21:00-05:00 UTC flight window.")
     x_day <- x[!flying_window, ]
 
     if (nrow(x_day) == 0) {
