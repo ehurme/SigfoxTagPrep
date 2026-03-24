@@ -41,7 +41,7 @@ migration_ridgeplots <- function(
   # Each entry: env_name, env_component, transform, group ("env" or "wind"), optional main_color override
   if (is.null(vars)) {
     vars <- list(
-      tp = list(env_name = "tp",       env_component = "Total precipitation (log1p)",     transform = "precip_log1p", group = "env"),
+      tp = list(env_name = "tp",       env_component = "Total precipitation (mm)",       transform = "precip",       group = "env"),
       tcc = list(env_name = "tcc",     env_component = "Total cloud cover",              transform = "none",         group = "env"),
       t2m = list(env_name = "t2m",     env_component = "Temperature (°C)",               transform = "temp_C",       group = "env"),
       msl = list(env_name = "msl",     env_component = "Mean sea level pressure (hPa)",  transform = "pressure_hPa", group = "env"),

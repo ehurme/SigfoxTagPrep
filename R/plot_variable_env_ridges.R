@@ -3,7 +3,7 @@ plot_variable_env_ridges <- function(
     env_name,
     env_component,
     hours,
-    transform = c("none", "temp_C", "pressure_hPa", "precip_log1p"),
+    transform = c("none", "temp_C", "pressure_hPa", "precip", "precip_log1p"),
     transform_fn = NULL,                 # optional custom function(x)
     log_base = exp(1),
     main_color = "cornflowerblue",
@@ -49,6 +49,8 @@ plot_variable_env_ridges <- function(
     long_data$value <- long_data$value - 272.15
   } else if (transform == "pressure_hPa") {
     long_data$value <- long_data$value / 100
+  } else if (transform == "precip") {
+    long_data$value <- long_data$value * 1000
   } else if (transform == "precip_log1p") {
     # stable for zeros; handles negatives just in case
     if (isTRUE(all(long_data$value >= 0, na.rm = TRUE))) {
