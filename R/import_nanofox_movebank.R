@@ -362,7 +362,7 @@ import_nanofox_movebank <- function(
 
   # ---------------------------------------------------------------------------
   # Daily location method: "daytime_only"
-  #   Same as solar_noon thinning but first removes fixes between 20:00-04:00
+  #   Same as solar_noon thinning but first removes fixes between 21:00-05:00
   #   UTC, as bats are actively flying then and unlikely to represent a roost.
   # ---------------------------------------------------------------------------
   .select_daily_daytime_only <- function(x) {

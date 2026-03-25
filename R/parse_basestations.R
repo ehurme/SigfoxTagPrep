@@ -32,17 +32,16 @@
   token <- trimws(token)
   if (nchar(token) == 0) return(NULL)
 
-  # --- Format A: {ID:37AE,N:2,RSSI:-140} ------------------------------------
-  if (grepl("\\{", token)) {
-    token <- gsub("[\\{\\}]", "", token)
-
+  # --- Format A: ID:37AE,N:2,RSSI:-140 (braces already stripped by .split_to_tokens) ----
+  # Detect by presence of "ID:" key rather than "{" which is stripped upstream.
+  if (grepl("(?i)ID:[0-9A-Fa-f]", token, perl = TRUE)) {
     id_m   <- regmatches(token, regexpr("(?i)ID:([0-9A-Fa-f]+)", token, perl = TRUE))
     rssi_m <- regmatches(token, regexpr("(?i)RSSI:\\s*(-?[0-9]+)", token, perl = TRUE))
-    n_m    <- regmatches(token, regexpr("(?i)N:\\s*([0-9]+)", token, perl = TRUE))
+    n_m    <- regmatches(token, regexpr("(?i)\\bN:\\s*([0-9]+)", token, perl = TRUE))
 
     id   <- if (length(id_m))   sub("(?i)ID:",   "", id_m,   perl = TRUE) else NA_character_
     rssi <- if (length(rssi_m)) as.integer(sub("(?i)RSSI:", "", rssi_m, perl = TRUE)) else NA_integer_
-    n    <- if (length(n_m))    as.integer(sub("(?i)N:",   "", n_m,   perl = TRUE)) else NA_integer_
+    n    <- if (length(n_m))    as.integer(sub("(?i)\\bN:", "", n_m,   perl = TRUE)) else NA_integer_
 
     if (is.na(id)) return(NULL)
     return(list(id = toupper(id), rssi = rssi, n = n))
