@@ -1306,7 +1306,38 @@ wildcloud_to_movebank <- function(
     )
   }
 
-  # For each tag, sort by deploy-on time and set deploy-off to 1s before next
+  # ---- remove duplicate deployments (same tag + same individual = retrap) ----
+  # When the same tag is recaptured on the same individual, the second row is
+  # not a real new deployment — the tag was never moved to a different animal.
+  # Keep only the first (earliest) deployment per tag+animal combination.
+  deploy_df <- deploy_df %>%
+    arrange(tag.id, .deploy_on_ts) %>%
+    group_by(tag.id, animal.id) %>%
+    mutate(.deploy_rank = row_number()) %>%
+    ungroup()
+
+  retrap_dupes <- deploy_df %>% filter(.deploy_rank > 1)
+  if (nrow(retrap_dupes) > 0) {
+    message(sprintf(
+      "[deploy] Removed %d duplicate deployment(s) (same tag + same individual retrap):",
+      nrow(retrap_dupes)))
+    for (i in seq_len(min(nrow(retrap_dupes), 10))) {
+      r <- retrap_dupes[i, ]
+      message(sprintf("      tag %s, animal %s: duplicate on %s (keeping first deployment)",
+                      r$tag.id, r$animal.id, r$deploy.on.date))
+    }
+    if (nrow(retrap_dupes) > 10)
+      message("      ... and ", nrow(retrap_dupes) - 10, " more")
+  }
+
+  deploy_df <- deploy_df %>%
+    filter(.deploy_rank == 1) %>%
+    dplyr::select(-.deploy_rank)
+
+  # ---- compute deploy.off.date for remaining overlapping tag deployments ----
+  # When the same tag is redeployed on a DIFFERENT individual, the previous
+  # deployment must end before the next one begins. Set deploy.off.date to
+  # 1 second before the next deploy.on.date for that tag.
   deploy_df <- deploy_df %>%
     arrange(tag.id, .deploy_on_ts) %>%
     group_by(tag.id) %>%
@@ -1325,8 +1356,8 @@ wildcloud_to_movebank <- function(
     filter(!is.na(deploy.off.date))
   if (nrow(overlaps) > 0) {
     message(sprintf(
-      "[deploy] %d tag(s) have multiple deployments — deploy.off.date set automatically:",
-      n_distinct(overlaps$tag.id)))
+      "[deploy] %d tag redeployment(s) on different individuals — deploy.off.date set:",
+      nrow(overlaps)))
     for (i in seq_len(min(nrow(overlaps), 10))) {
       r <- overlaps[i, ]
       message(sprintf("      tag %s: %s deployed on %s, off %s (next deploy: %s)",
