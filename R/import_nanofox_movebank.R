@@ -25,25 +25,26 @@ import_nanofox_movebank <- function(
 ) {
   suppressPackageStartupMessages({
     # core
-    requireNamespace("dplyr", quietly = TRUE)
-    requireNamespace("tibble", quietly = TRUE)
-    requireNamespace("purrr", quietly = TRUE)
-    requireNamespace("tidyr", quietly = TRUE)
-    requireNamespace("stringr", quietly = TRUE)
-    requireNamespace("lubridate", quietly = TRUE)
+    require("tidyverse", quietly = TRUE)
+    require("dplyr", quietly = TRUE)
+    require("tibble", quietly = TRUE)
+    require("purrr", quietly = TRUE)
+    require("tidyr", quietly = TRUE)
+    require("stringr", quietly = TRUE)
+    require("lubridate", quietly = TRUE)
 
     # move2 pipeline deps
-    requireNamespace("move2", quietly = TRUE)
-    requireNamespace("sf", quietly = TRUE)
+    require("move2", quietly = TRUE)
+    require("sf", quietly = TRUE)
 
     # assertthat must be *attached* (not just namespace-loaded) because
     # mt_thin_daily_solar_noon() calls assert_that() without a :: prefix.
-    # requireNamespace() alone is not enough -- use require() to attach it.
+    # require() alone is not enough -- use require() to attach it.
     require(assertthat, quietly = TRUE)
 
     # optional extras used in your pipeline
-    if (isTRUE(run_elevation)) requireNamespace("elevatr", quietly = TRUE)
-    if (isTRUE(run_daily_metrics)) requireNamespace("suncalc", quietly = TRUE)
+    if (isTRUE(run_elevation)) require("elevatr", quietly = TRUE)
+    if (isTRUE(run_daily_metrics)) require("suncalc", quietly = TRUE)
   })
 
   # ----------------------------
@@ -202,7 +203,7 @@ import_nanofox_movebank <- function(
 
   # calculate distance and bearing
   .calc_dist_bearing <- function(lon1, lat1, lon2, lat2) {
-    if (requireNamespace("geosphere", quietly = TRUE)) {
+    if (require("geosphere", quietly = TRUE)) {
       d <- geosphere::distHaversine(cbind(lon1, lat1), cbind(lon2, lat2))
       b <- geosphere::bearing(cbind(lon1, lat1), cbind(lon2, lat2))
       b <- (b + 360) %% 360
@@ -302,7 +303,7 @@ import_nanofox_movebank <- function(
   #             columns: timestamp, lon, lat, individual_local_identifier.
   # ---------------------------------------------------------------------------
   .add_night_day_id <- function(x) {
-    if (!requireNamespace("suncalc", quietly = TRUE)) {
+    if (!require("suncalc", quietly = TRUE)) {
       warning(".add_night_day_id: suncalc not available; skipping night_day_id.")
       return(x)
     }
@@ -693,7 +694,7 @@ import_nanofox_movebank <- function(
 
 # # One study
 # x <- {}
-# x <- import_nanofox_movebank(study_id = 4520022960) # 7772112798)
+# x <- import_nanofox_movebank(study_id = 3597331705) # 7772112798)
 # terra::ext(x$location)
 # b_full <- x$full
 # b_loc  <- x$location

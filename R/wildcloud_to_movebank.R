@@ -561,6 +561,16 @@ wildcloud_to_movebank <- function(
                                            "tagdeploymenttime", "capturetime",
                                            "deployontime"))
   sex_col     <- detect_col(animals, c("animal.sex", "sex", "animalsex"))
+  fa_col      <- detect_col(animals, c("FA 1", "forearm", "forearm.length",
+                                       "fa1", "fa", "forearmlength"))
+  attach_col  <- detect_col(animals, c("tag attachment", "tag.attachment",
+                                       "tag_attachment", "tagattachment",
+                                       "attachment.type", "attachmenttype"))
+  repro_col   <- detect_col(animals, c("reproductive state", "reproductive.state",
+                                       "reproductive_state", "reproductivestate",
+                                       "repro.state"))
+  tag_wt_col  <- detect_col(animals, c("tag weight", "tag.weight", "tag_weight",
+                                       "tagweight", "tag.mass", "tagmass"))
   model_col   <- detect_col(animals, c("tag model", "tag.model", "tag_model",
                                        "tagmodel", "sensor.type.id"))
   fw_col      <- detect_col(animals, c("firmware version", "firmware.version",
@@ -572,6 +582,10 @@ wildcloud_to_movebank <- function(
           "life stage: ", ifelse(is.null(stage_col), "none", stage_col), ", ",
           "sex: ", ifelse(is.null(sex_col), "none", sex_col), ", ",
           "mass: ", ifelse(is.null(mass_col), "none", mass_col), ", ",
+          "forearm: ", ifelse(is.null(fa_col), "none", fa_col), ", ",
+          "attachment: ", ifelse(is.null(attach_col), "none", attach_col), ", ",
+          "repro state: ", ifelse(is.null(repro_col), "none", repro_col), ", ",
+          "tag weight: ", ifelse(is.null(tag_wt_col), "none", tag_wt_col), ", ",
           "lat: ", ifelse(is.null(lat_col), "none", lat_col), ", ",
           "lon: ", ifelse(is.null(lon_col), "none", lon_col), ", ",
           "deploy date: ", ifelse(is.null(date_col), "none", date_col), ", ",
@@ -596,10 +610,14 @@ wildcloud_to_movebank <- function(
 
   } else {
     # ---- per-row cascade: PIT > ring > animal.id > tag ID ----
-    # Build each candidate as character, NA if column absent or blank
+    # Build each candidate as character, NA if column absent, blank, or literal "NA"
     safe_char <- function(x) {
       x <- as.character(x)
-      ifelse(is.na(x) | trimws(x) == "", NA_character_, trimws(x))
+      x <- trimws(x)
+      # Treat literal NA strings as missing
+      x <- ifelse(is.na(x) | x == "" | toupper(x) %in% c("NA", "N/A", "NAN", "NULL", "NONE"),
+                  NA_character_, x)
+      x
     }
 
     pit_vals  <- if (!is.null(pit_col))  safe_char(animals[[pit_col]])  else rep(NA_character_, nrow(animals))
@@ -665,8 +683,15 @@ wildcloud_to_movebank <- function(
   }
 
   # Store ring and PIT IDs separately for Movebank export
-  animals$Ring.ID <- if (!is.null(ring_col)) as.character(animals[[ring_col]]) else NA_character_
-  animals$PIT.ID  <- if (!is.null(pit_col))  as.character(animals[[pit_col]])  else NA_character_
+  # Clean literal "NA"/"na" strings to actual NA so they export as empty cells
+  clean_id <- function(x) {
+    x <- as.character(x)
+    x <- trimws(x)
+    ifelse(is.na(x) | x == "" | toupper(x) %in% c("NA", "N/A", "NAN", "NULL", "NONE"),
+           NA_character_, x)
+  }
+  animals$Ring.ID <- if (!is.null(ring_col)) clean_id(animals[[ring_col]]) else NA_character_
+  animals$PIT.ID  <- if (!is.null(pit_col))  clean_id(animals[[pit_col]])  else NA_character_
 
   # ---- build species string ----
   # Combine genus + species if both exist; fall back to species_col alone
@@ -699,12 +724,57 @@ wildcloud_to_movebank <- function(
       `animal.life.stage` = if (!is.null(life_stage)) life_stage else safe_col(stage_col),
       `animal.sex`        = safe_col(sex_col),
       `Weight..g.`        = safe_col(mass_col, "numeric"),
+      `forearm.length.mm` = safe_col(fa_col, "numeric"),
+      `tag.attachment.raw` = safe_col(attach_col),
+      `animal.reproductive.condition` = safe_col(repro_col),
+      `tag.mass.g`        = safe_col(tag_wt_col, "numeric"),
       Deploy.On.Latitude  = safe_col(lat_col, "numeric"),
       Deploy.On.Longitude = safe_col(lon_col, "numeric"),
       tag_model_raw       = safe_col(model_col),
       firmware_version    = safe_col(fw_col),
       Movebank.Project    = movebank_project_name
     )
+
+  # ---- standardize values ----
+
+  # Sex: uppercase, standardize to M / F
+  animals_mb$`animal.sex` <- toupper(trimws(animals_mb$`animal.sex`))
+  animals_mb$`animal.sex` <- ifelse(
+    animals_mb$`animal.sex` %in% c("M", "F"),
+    animals_mb$`animal.sex`,
+    NA_character_
+  )
+
+  # Life stage: lowercase, standardize
+  animals_mb$`animal.life.stage` <- tolower(trimws(animals_mb$`animal.life.stage`))
+
+  # Mass: round to nearest 0.1 g
+  animals_mb$`Weight..g.` <- round(animals_mb$`Weight..g.`, 1)
+
+  # Forearm: round to nearest 0.1 mm
+  animals_mb$`forearm.length.mm` <- round(animals_mb$`forearm.length.mm`, 1)
+
+  # Tag mass: round to nearest 0.01 g
+  animals_mb$`tag.mass.g` <- round(animals_mb$`tag.mass.g`, 2)
+
+  # Reproductive condition: lowercase, standardize
+  animals_mb$`animal.reproductive.condition` <- tolower(
+    trimws(animals_mb$`animal.reproductive.condition`)
+  )
+  # Map shorthand values
+  animals_mb$`animal.reproductive.condition` <- dplyr::case_when(
+    animals_mb$`animal.reproductive.condition` == "nr" ~ "non-reproductive",
+    TRUE ~ animals_mb$`animal.reproductive.condition`
+  )
+
+  # Tag attachment: classify into type (glue / collar) and standardize
+  attach_raw <- tolower(trimws(animals_mb$`tag.attachment.raw`))
+  animals_mb$`tag.attachment.type` <- dplyr::case_when(
+    grepl("collar", attach_raw)                                       ~ "collar",
+    grepl("sauer|kryolan|ks|glue|bond|adhesive|epiglue", attach_raw)  ~ "glue",
+    is.na(attach_raw) | attach_raw == ""                              ~ NA_character_,
+    TRUE                                                              ~ attach_raw
+  )
 
   # ---- build deploy-on timestamp: date from date_col + HMS from deploy_time_col ----
   # The date column has the correct YMD. The deployment time column has the
@@ -1277,6 +1347,8 @@ wildcloud_to_movebank <- function(
       animal.life.stage    = `animal.life.stage`,
       animal.sex           = `animal.sex`,
       animal.mass          = `Weight..g.`,
+      animal.forearm.length = `forearm.length.mm`,
+      animal.reproductive.condition = `animal.reproductive.condition`,
       deploy.on.date       = Timestamp.release,
       animal.id            = Animal.ID,
       animal.ring.id       = Ring.ID,
@@ -1285,6 +1357,9 @@ wildcloud_to_movebank <- function(
       tag.model            = tag_model_raw,
       tag.model.family     = tag_model_family,
       tag.firmware         = firmware_version,
+      tag.mass             = `tag.mass.g`,
+      tag.attachment.type  = `tag.attachment.type`,
+      tag.attachment.detail = `tag.attachment.raw`,
       vedba.count          = vedba_count,
       vedba.type           = vedba_type,
       burst.duration.s     = burst_duration_s,
@@ -1373,9 +1448,11 @@ wildcloud_to_movebank <- function(
   deployment_data <- deploy_df %>%
     dplyr::select(
       tag.id, animal.taxon, animal.life.stage, animal.sex, animal.mass,
+      animal.forearm.length, animal.reproductive.condition,
       deploy.on.date, deploy.off.date,
       animal.id, animal.ring.id, animal.marker.id, animal.id.source,
       tag.model, tag.model.family, tag.firmware,
+      tag.mass, tag.attachment.type, tag.attachment.detail,
       vedba.count, vedba.type,
       burst.duration.s, burst.rate.hz, sampling.interval.s, sampling.count,
       Deploy.On.Latitude, Deploy.On.Longitude, Movebank.Project
@@ -1462,10 +1539,6 @@ if (FALSE) {
     animals_path          = "../../../Dropbox/MPI/Noctule/Data/movebank/Switzerland/swiss_MPIAB_captures.xlsx",
     output_dir            = "../../../Dropbox/MPI/Noctule/Data/movebank/Switzerland/movebank/",
     movebank_project_name = "ICARUS Bats. Nyctalus leisleri Nyctalus noctula. Thurgau, Switzerland",
-    sampling_config       = my_config,
-    correct_drift         = TRUE,
-    programmed_interval   = 3 * 3600,       # 3-hour schedule; NULL to infer per tag
-    drift_temp_col        = "temperature [°C]", # or NULL to skip temperature term
-    drift_diagnostics     = TRUE            # saves diagnostic plots to output_dir
+    sampling_config       = my_config
   )
 }
