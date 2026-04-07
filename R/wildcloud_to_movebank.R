@@ -190,10 +190,10 @@ harmonize_wc_columns <- function(df) {
     "Base Stations (ID, RSSI, Reps)"     = "^(Base\\s*Stations.*|base_stations|BS\\s*Info)$",
     "Compression"                        = "^(Compression|compression)$",
 
-    # ---- 3-hr summary sensors ----
-    "Min pressure of last 3 hrs (mbar)"  = "^(Min\\s*pressure.*3\\s*h|min_pressure_3h|Pressure.*3.*hr|barometric.*3.*hr)$",
+    # ---- summary sensors (3-hr or other window) ----
+    "Min pressure of last 3 hrs (mbar)"  = "^(Min\\.?\\s*pressure|min_pressure|Pressure.*min|barometric.*min)",
     "Min temperature of last 3 hrs (temperature range °C)" =
-      "^(Min\\s*temperature.*3\\s*h|min_temp.*3h|Temperature\\s*range.*3.*hr)$"
+      "^(Min\\.?\\s*temp(erature)?\\s*(of|range|\\()|min_temp|Temperature\\s*range)"
   )
 
   renames_done <- character(0)
@@ -272,14 +272,44 @@ wc_wide_to_mb_long <- function(df) {
   vedba_cols <- names(df)[stringr::str_detect(names(df), "^VeDBA sum\\s+\\d+\\s+min ago")]
   temp_cols  <- names(df)[stringr::str_detect(names(df), "^Average temperature\\s+\\d+\\s+min ago")]
 
-  min_temp_col <- "Min temperature of last 3 hrs (temperature range °C)"
-  min_pres_col <- "Min pressure of last 3 hrs (mbar)"
-  bs_col       <- "Base Stations (ID, RSSI, Reps)"
+  # Detect min temp and pressure columns flexibly — exact canonical name or regex
+  min_temp_col <- NULL
+  min_pres_col <- NULL
+
+  canonical_min_temp <- "Min temperature of last 3 hrs (temperature range °C)"
+  canonical_min_pres <- "Min pressure of last 3 hrs (mbar)"
+
+  if (canonical_min_temp %in% names(df)) {
+    min_temp_col <- canonical_min_temp
+  } else {
+    # Flexible match: any column starting with "Min" + "temp" (case-insensitive)
+    mt_match <- names(df)[stringr::str_detect(names(df),
+                                              regex("^Min\\.?\\s*temp", ignore_case = TRUE))]
+    if (length(mt_match) == 1) min_temp_col <- mt_match
+  }
+
+  if (canonical_min_pres %in% names(df)) {
+    min_pres_col <- canonical_min_pres
+  } else {
+    # Flexible match: any column starting with "Min" + "press" (case-insensitive)
+    mp_match <- names(df)[stringr::str_detect(names(df),
+                                              regex("^Min\\.?\\s*press", ignore_case = TRUE))]
+    if (length(mp_match) == 1) min_pres_col <- mp_match
+  }
+
+  bs_col <- "Base Stations (ID, RSSI, Reps)"
 
   has_new <- length(vedba_cols) > 0 || length(temp_cols) > 0 ||
-    (min_temp_col %in% names(df)) || (min_pres_col %in% names(df))
+    !is.null(min_pres_col) || !is.null(min_temp_col)
 
   if (!has_new) return(df)
+
+  message(sprintf(
+    "[expand] Sensor columns found: %d VeDBA bins, %d temp bins, min_pressure=%s, min_temp=%s",
+    length(vedba_cols), length(temp_cols),
+    ifelse(is.null(min_pres_col), "none", min_pres_col),
+    ifelse(is.null(min_temp_col), "none", min_temp_col)
+  ))
 
   df <- df %>%
     mutate(
@@ -346,14 +376,14 @@ wc_wide_to_mb_long <- function(df) {
     )
 
   pres_long <- NULL
-  if (min_pres_col %in% names(df)) {
+  if (!is.null(min_pres_col)) {
     pres_long <- three_hr_base %>%
       mutate(`pressure [mbar]` = suppressWarnings(as.numeric(df[[min_pres_col]]))) %>%
       dplyr::select(-.row_id)
   }
 
   min_temp_long <- NULL
-  if (min_temp_col %in% names(df)) {
+  if (!is.null(min_temp_col)) {
     min_temp_long <- three_hr_base %>%
       mutate(`min_temp_range [°C]` = as.character(df[[min_temp_col]])) %>%
       dplyr::select(-.row_id)
@@ -1302,8 +1332,14 @@ wildcloud_to_movebank <- function(
   min_temp_data <- movebank_base %>%
     mutate(
       .min_temp_range = dplyr::coalesce(
-        if ("min_temp_range [°C]" %in% names(.)) `min_temp_range [°C]` else NA_character_,
+        if ("min_temp_range [°C]" %in% names(.)) as.character(`min_temp_range [°C]`) else NA_character_,
         if ("Min temperature of last 3 hrs (temperature range °C)" %in% names(.)) as.character(`Min temperature of last 3 hrs (temperature range °C)`) else NA_character_
+      ),
+      # Treat literal "N/A", "NA", "" as true NA
+      .min_temp_range = ifelse(
+        is.na(.min_temp_range) | trimws(.min_temp_range) %in% c("", "N/A", "NA", "n/a"),
+        NA_character_,
+        .min_temp_range
       )
     ) %>%
     filter(!is.na(.min_temp_range)) %>%
