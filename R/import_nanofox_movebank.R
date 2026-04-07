@@ -36,6 +36,8 @@ import_nanofox_movebank <- function(
     # move2 pipeline deps
     require("move2", quietly = TRUE)
     require("sf", quietly = TRUE)
+    require("units", quietly = TRUE) # TODO add speed calculation
+    # TODO calculate change in altitude
 
     # assertthat must be *attached* (not just namespace-loaded) because
     # mt_thin_daily_solar_noon() calls assert_that() without a :: prefix.
