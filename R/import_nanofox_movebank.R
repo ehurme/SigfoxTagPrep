@@ -961,8 +961,29 @@ import_nanofox_movebank <- function(
            "Requested: ", paste(sensor_selected$name, collapse = ", "))
 
     b <- move2::movebank_download_study(study_id = id, sensor_type_id = wanted_ids)
-    if (is.null(b$individual_local_identifier))
-      mt_track_id(b) <- "individual_local_identifier"
+
+    # Some Movebank downloads do not expose individual_local_identifier as an
+    # event column. Recover it from track metadata if possible; otherwise fall
+    # back to the current move2 track id.
+    if (!"individual_local_identifier" %in% names(b)) {
+      td <- tryCatch(move2::mt_track_data(b), error = function(e) NULL)
+      if (!is.null(td) && "individual_local_identifier" %in% names(td)) {
+        track_key <- names(td)[1]
+        lookup <- stats::setNames(
+          as.character(td$individual_local_identifier),
+          as.character(td[[track_key]])
+        )
+        b$individual_local_identifier <- unname(
+          lookup[as.character(move2::mt_track_id(b))]
+        )
+      }
+    }
+
+    if (!"individual_local_identifier" %in% names(b) ||
+        all(is.na(b$individual_local_identifier))) {
+      b$individual_local_identifier <- as.character(move2::mt_track_id(b))
+      .msg("  individual_local_identifier missing; filled from move2 track id.")
+    }
 
     b <- .fix_track_data_lists(b)
     b <- .add_event_attrs(b)
