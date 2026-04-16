@@ -61,17 +61,44 @@ import_nanofox_movebank <- function(
 
   .source_local <- function(path) { .stop_if_missing(path); source(path); invisible(TRUE) }
 
+  # Choose the most specific identifier available for movement metrics.
+  # Prefer deployment_id, then tag_local_identifier, then individual_local_identifier,
+  # and finally the internal move2 track id.
+  .metric_group_col <- function(x) {
+    for (nm in c("deployment_id", "tag_local_identifier", "individual_local_identifier")) {
+      if (nm %in% names(x) && !all(is.na(x[[nm]]))) return(nm)
+    }
+    NULL
+  }
+
   # Enforce strict time ordering per track (required by mt_speed / mt_distance).
   .dedupe_timestamps <- function(x) {
-    x %>%
-      group_by(individual_local_identifier, timestamp) %>%
-      slice_max(
-        order_by  = (is.na(comments) | comments != "start") + 0.1 * (!is.na(event_id)),
+    grp_col <- .metric_group_col(x)
+    if (is.null(grp_col)) {
+      x <- x %>% dplyr::mutate(`..metric_group_id` = as.character(move2::mt_track_id(.)))
+      grp_col <- "..metric_group_id"
+    }
+
+    # Some studies do not include comments; prefer non-start rows only if comments exists.
+    ord_comments <- if ("comments" %in% names(x)) {
+      (is.na(x$comments) | x$comments != "start")
+    } else {
+      rep(TRUE, nrow(x))
+    }
+    ord_event <- if ("event_id" %in% names(x)) (!is.na(x$event_id)) else rep(FALSE, nrow(x))
+    x <- x %>% dplyr::mutate(`..dedupe_order` = ord_comments + 0.1 * ord_event)
+
+    out <- x %>%
+      dplyr::group_by(.data[[grp_col]], .data$timestamp) %>%
+      dplyr::slice_max(
+        order_by  = .data$`..dedupe_order`,
         n         = 1,
         with_ties = FALSE
       ) %>%
-      ungroup() %>%
-      arrange(individual_local_identifier, timestamp)
+      dplyr::ungroup() %>%
+      dplyr::arrange(.data[[grp_col]], .data$timestamp) %>%
+      dplyr::select(-dplyr::any_of(c("..dedupe_order", "..metric_group_id")))
+    out
   }
 
   .add_start <- function(x) { .source_local(script_mt_add_start); mt_add_start(x) }
@@ -119,91 +146,108 @@ import_nanofox_movebank <- function(
     x
   }
 
-  .set_tag_type <- function(x) {
-    # If caller explicitly specified a single tag_type, apply uniformly.
-    if (!is.null(tag_type) && length(tag_type) == 1) {
-      x$tag_type <- tag_type
-      return(x)
-    }
+  .set_tag_type <- function(x, study_id_current = NULL) {
+    allowed <- c("uWasp", "nanofox")
 
-    # Try to resolve model info from multiple possible sources, in priority order:
-    #   1. Event-level column (from mt_as_event_attribute("model"))
-    #   2. Track-data column: "tag_model", "model", or any column containing "model"
-    #   3. Fallback: infer from sensor column presence on the rows themselves
-
-    # Classify helper: maps any model/format string to a tag_type label.
     .classify_model <- function(s) {
-      dplyr::case_when(
-        grepl("Nano|NanoFox",              s, ignore.case = TRUE) ~ "nanofox",
-        grepl("Tiny|TinyFoxBat|TinyFox",   s, ignore.case = TRUE) ~ "tinyfox",
-        grepl("uWasp|SigfoxGH",            s, ignore.case = TRUE) ~ "uWasp",
-        .default = "tinyfox"
+      s <- as.character(s)
+      out <- dplyr::case_when(
+        grepl("uWasp|SigfoxGH", s, ignore.case = TRUE) ~ "uWasp",
+        grepl("Nano|NanoFox",  s, ignore.case = TRUE) ~ "nanofox",
+        TRUE ~ NA_character_
       )
+      out
     }
 
-    # Source 0: format_type on every event row — the most reliable indicator.
-    # Movebank encodes the Sigfox format identifier here: "TinyFoxBatt", "NanoFox30Days".
-    if ("format_type" %in% names(x) && !all(is.na(x[["format_type"]]))) {
-      x$tag_type <- .classify_model(as.character(x[["format_type"]]))
-      .msg("  tag_type: resolved from format_type. Distribution: ",
-           paste(names(table(x$tag_type)), table(x$tag_type), sep = "=", collapse = ", "))
-      return(x)
+    # 1) Prefer existing event-level tag_type if it is already valid.
+    if ("tag_type" %in% names(x) && any(!is.na(x$tag_type))) {
+      x$tag_type <- as.character(x$tag_type)
+      bad <- !is.na(x$tag_type) & !x$tag_type %in% allowed
+      if (any(bad)) {
+        x$tag_type[bad] <- NA_character_
+      }
+      if (any(!is.na(x$tag_type))) {
+        .msg("  tag_type: using existing event/data column. Distribution: ",
+             paste(names(table(x$tag_type, useNA = "no")),
+                   table(x$tag_type, useNA = "no"), sep = "=", collapse = ", "))
+        return(x)
+      }
     }
 
+    # 2) Prefer explicit per-study override only when tag_type is not inferable.
+    override <- NULL
+    if (!is.null(tag_type)) {
+      if (length(tag_type) == 1 && !is.na(tag_type)) {
+        override <- as.character(tag_type)
+      } else if (!is.null(names(tag_type)) && !is.null(study_id_current)) {
+        sid <- as.character(study_id_current)
+        if (sid %in% names(tag_type)) override <- as.character(tag_type[[sid]])
+      }
+      if (!is.null(override) && !is.na(override) && !override %in% allowed) {
+        stop("Invalid tag_type override for study ", study_id_current,
+             ": ", override, ". Allowed values are: ",
+             paste(allowed, collapse = ", "))
+      }
+    }
+
+    # 3) Infer from format_type if available.
+    inferred <- NULL
+    if ("format_type" %in% names(x) && any(!is.na(x[["format_type"]]))) {
+      inferred <- .classify_model(x[["format_type"]])
+      if (any(!is.na(inferred))) {
+        x$tag_type <- inferred
+        .msg("  tag_type: resolved from format_type. Distribution: ",
+             paste(names(table(x$tag_type, useNA = "no")),
+                   table(x$tag_type, useNA = "no"), sep = "=", collapse = ", "))
+        return(x)
+      }
+    }
+
+    # 4) Infer from event-level or track-level model metadata.
     model_vec <- NULL
-
-    # Source 1: event-level column already on x
     for (col in c("model", "tag_model")) {
-      if (col %in% names(x) && !all(is.na(x[[col]]))) {
+      if (col %in% names(x) && any(!is.na(x[[col]]))) {
         model_vec <- as.character(x[[col]])
         .msg("  tag_type: resolved from event column '", col, "'")
         break
       }
     }
-
-    # Source 2: track data
     if (is.null(model_vec)) {
       td <- tryCatch(move2::mt_track_data(x), error = function(e) NULL)
       if (!is.null(td)) {
-        td_model_col <- intersect(c("tag_model", "model"), names(td))[1]
-        if (!is.na(td_model_col)) {
-          track_id_vec  <- as.character(move2::mt_track_id(x))
-          id_col        <- names(td)[1]   # first col is the track identifier
-          td_lookup     <- stats::setNames(as.character(td[[td_model_col]]),
-                                           as.character(td[[id_col]]))
-          model_vec     <- td_lookup[track_id_vec]
+        td_model_cols <- intersect(c("tag_model", "model"), names(td))
+        if (length(td_model_cols) > 0) {
+          td_model_col <- td_model_cols[1]
+          track_id_vec <- as.character(move2::mt_track_id(x))
+          id_col <- names(td)[1]
+          td_lookup <- stats::setNames(as.character(td[[td_model_col]]),
+                                       as.character(td[[id_col]]))
+          model_vec <- td_lookup[track_id_vec]
           .msg("  tag_type: resolved from track data column '", td_model_col, "'")
         }
       }
     }
-
-    # Apply classification from model string
     if (!is.null(model_vec)) {
-      x$tag_type <- .classify_model(model_vec)
-      .msg("  tag_type distribution: ",
-           paste(names(table(x$tag_type)), table(x$tag_type), sep = "=", collapse = ", "))
+      inferred <- .classify_model(model_vec)
+      if (any(!is.na(inferred))) {
+        x$tag_type <- inferred
+        .msg("  tag_type distribution: ",
+             paste(names(table(x$tag_type, useNA = "no")),
+                   table(x$tag_type, useNA = "no"), sep = "=", collapse = ", "))
+        return(x)
+      }
+    }
+
+    # 5) Use explicit override only for studies where metadata are insufficient.
+    if (!is.null(override) && !is.na(override)) {
+      x$tag_type <- rep(override, nrow(x))
+      .msg("  tag_type set explicitly for unresolved study: ", override)
       return(x)
     }
 
-    # Source 3: infer from column presence (pressure column name differs by tag type)
-    # tinyfox_pressure_min_last_24h → TinyFox
-    # min_3h_pressure               → NanoFox
-    # If neither found, default to tinyfox (most common in this project)
-    has_tiny_pressure <- "tinyfox_pressure_min_last_24h" %in% names(x)
-    has_nano_pressure <- "min_3h_pressure" %in% names(x)
-
-    if (has_tiny_pressure && !has_nano_pressure) {
-      .msg("  tag_type: no model info found; inferred 'tinyfox' from column presence.")
-      x$tag_type <- "tinyfox"
-    } else if (has_nano_pressure && !has_tiny_pressure) {
-      .msg("  tag_type: no model info found; inferred 'nanofox' from column presence.")
-      x$tag_type <- "nanofox"
-    } else {
-      .msg("  tag_type: no model info found; defaulting to 'tinyfox'. ",
-           "Set tag_type= explicitly if incorrect.")
-      x$tag_type <- "tinyfox"
-    }
-    x
+    stop("tag_type could not be inferred for study ", as.character(study_id_current),
+         ". Supply tag_type as a named vector for only the unresolved studies. ",
+         "Allowed values are: ", paste(allowed, collapse = ", "), ".")
   }
 
   .add_lonlat <- function(x) {
@@ -233,48 +277,87 @@ import_nanofox_movebank <- function(
     # When individual_local_identifier is used as the track ID, Movebank may
     # bundle multiple deployments (different tags, capture dates, body mass, etc.)
     # for the same individual into list-columns in the track data.  This is
-    # expected move2 behaviour.  The correct resolution (per move2 team) is:
-    #
-    #   1. Collapse list-columns where every deployment has the same value
-    #      → unwrap to a plain scalar (vec_c of the single unique value).
-    #   2. For list-columns that genuinely differ across deployments
-    #      → stringify to a comma-separated character column so downstream code
-    #        never sees a list and cannot accidentally inflate row counts.
-    #
-    # unnest_longer() was previously used here but is WRONG: it multiplies track
-    # rows by the number of deployments, corrupting tag_local_identifier
-    # assignments and stretching deployment time windows.
+    # expected move2 behaviour. We collapse those list-columns without expanding
+    # rows, and we treat geometry columns specially because unique()/paste() can
+    # fail on sfc MULTIPOINT objects.
 
     td <- move2::mt_track_data(x)
-    if (!any(vapply(td, base::is_list, logical(1)))) return(x)
+    if (!any(vapply(td, base::is.list, logical(1)))) return(x)
 
     .msg("  Track data has list-columns; resolving multiple deployments per individual.")
 
-    # Step 1: collapse columns where all entries are identical across deployments
-    td <- td %>%
-      dplyr::mutate(dplyr::across(
-        dplyr::where(~base::is_list(.x) &&
-                       all(purrr::map_lgl(.x, function(y) length(unique(y)) == 1L))),
-        ~do.call(vctrs::vec_c, purrr::map(.x, utils::head, 1L))
-      ))
+    .is_geom_like <- function(z) {
+      inherits(z, "sfc") || inherits(z, "sf") || inherits(z, "sfg") ||
+        any(grepl("^XY|^POINT|^MULTIPOINT|^LINESTRING|^MULTILINESTRING|^POLYGON|^MULTIPOLYGON|^GEOMETRY", class(z)))
+    }
 
-    # Step 2: stringify remaining list-columns (values differ across deployments)
-    if (any(vapply(td, base::is_list, logical(1)))) {
-      td <- td %>%
-        dplyr::mutate(dplyr::across(
-          dplyr::where(~base::is_list(.x) &&
-                         any(purrr::map_lgl(.x, function(y) length(unique(y)) != 1L))),
-          ~unlist(purrr::map(.x, paste, collapse = ","))
-        ))
+    .canon_one <- function(v) {
+      if (length(v) == 0 || all(is.na(v))) return(NA_character_)
+      if (.is_geom_like(v)) {
+        out <- tryCatch(as.character(sf::st_as_text(v)), error = function(e) NA_character_)
+        return(paste(out, collapse = " | "))
+      }
+      if (inherits(v, c("POSIXct", "POSIXt"))) {
+        return(paste(format(v, tz = "UTC", usetz = TRUE), collapse = " | "))
+      }
+      if (inherits(v, "Date")) {
+        return(paste(as.character(v), collapse = " | "))
+      }
+      if (is.atomic(v)) {
+        return(paste(as.character(v), collapse = " | "))
+      }
+      paste(as.character(v), collapse = " | ")
+    }
+
+    .all_same <- function(y) {
+      vals <- tryCatch(vapply(y, .canon_one, character(1)), error = function(e) rep(NA_character_, length(y)))
+      vals2 <- unique(stats::na.omit(vals))
+      length(vals2) <= 1L
+    }
+
+    .collapse_list_entry <- function(y) {
+      if (length(y) == 0) return(NA)
+      if (.all_same(y)) {
+        first <- y[[1]]
+        if (.is_geom_like(first)) {
+          txt <- tryCatch(as.character(sf::st_as_text(first)), error = function(e) NA_character_)
+          return(if (length(txt)) txt[[1]] else NA_character_)
+        }
+        if (length(first) <= 1L) return(first)
+        return(first[[1]])
+      }
+      paste(vapply(y, .canon_one, character(1)), collapse = ", ")
+    }
+
+    list_cols <- names(td)[vapply(td, base::is.list, logical(1))]
+    for (nm in list_cols) {
+      td[[nm]] <- lapply(td[[nm]], .collapse_list_entry)
+
+      scalar_classes <- unique(vapply(td[[nm]], function(z) paste(class(z), collapse = "/"), character(1)))
+      scalar_classes <- stats::na.omit(scalar_classes)
+
+      if (length(scalar_classes) == 1L && !grepl("character", scalar_classes[1], fixed = TRUE)) {
+        simplified <- tryCatch(vctrs::list_unchop(td[[nm]]), error = function(e) NULL)
+        if (!is.null(simplified)) td[[nm]] <- simplified
+      } else {
+        td[[nm]] <- vapply(td[[nm]], function(z) {
+          if (length(z) == 0 || (length(z) == 1 && is.na(z))) return(NA_character_)
+          if (.is_geom_like(z)) {
+            txt <- tryCatch(as.character(sf::st_as_text(z)), error = function(e) NA_character_)
+            return(paste(txt, collapse = " | "))
+          }
+          paste(as.character(z), collapse = " | ")
+        }, character(1))
+      }
     }
 
     if (isTRUE(verbose)) {
-      list_cols <- names(td)[vapply(td, base::is_list, logical(1))]
-      if (length(list_cols) == 0)
+      list_cols_after <- names(td)[vapply(td, base::is.list, logical(1))]
+      if (length(list_cols_after) == 0)
         .msg("  Track data list-columns resolved.")
       else
         .msg("  Track data still has list-columns after resolution: ",
-             paste(list_cols, collapse = ", "))
+             paste(list_cols_after, collapse = ", "))
     }
 
     move2::mt_set_track_data(x, td)
@@ -707,9 +790,13 @@ import_nanofox_movebank <- function(
       return(x)
     }
 
+    # Group by the move2 track id (which should already be deployment_id when
+    # called from .make_location_metrics after re-keying).
+    group_vec <- as.character(move2::mt_track_id(x))
+
     delta <- tibble::tibble(
-      track_id   = move2::mt_track_id(x),
-      altitude_m = as.numeric(x$altitude_m)   # drop units for lag(); re-attach below
+      track_id   = group_vec,
+      altitude_m = as.numeric(x$altitude_m)
     ) %>%
       dplyr::group_by(track_id) %>%
       dplyr::mutate(delta_altitude_m = altitude_m - dplyr::lag(altitude_m)) %>%
@@ -742,6 +829,36 @@ import_nanofox_movebank <- function(
     b_loc <- .dedupe_timestamps(b_loc)
     b_loc$year <- lubridate::year(b_loc$timestamp)
 
+    # ---- Re-key move2 object to deployment_id for metric computation ----
+    # mt_speed(), mt_distance(), mt_time_lags(), mt_azimuth(), calc_displacement()
+    # and add_delta_altitude() all group by the move2 track id.  If the track id
+    # is individual_local_identifier (the merged case), an animal with multiple
+    # deployments gets one continuous track and metrics bridge across tag changes.
+    # Re-keying to deployment_id (when available and non-NA) fixes this: each
+    # deployment is its own track for metric purposes.  We restore the original
+    # track id column afterwards so the returned object remains consistent.
+    original_track_col <- move2::mt_track_id_column(b_loc)
+
+    dep_col <- .metric_group_col(b_loc)   # deployment_id > tag_local_id > individual_local_id
+    if (!is.null(dep_col) && dep_col != original_track_col &&
+        dep_col %in% names(b_loc) && !all(is.na(b_loc[[dep_col]]))) {
+      b_loc[[dep_col]] <- as.character(b_loc[[dep_col]])
+      b_loc <- tryCatch(
+        move2::mt_as_move2(b_loc,
+                           track_id_column = dep_col,
+                           time_column     = "timestamp",
+                           crs             = sf::st_crs(b_loc)
+        ),
+        error = function(e) {
+          .msg("  Note: could not re-key to ", dep_col, " (", conditionMessage(e),
+               "); using ", original_track_col, " for metrics.")
+          b_loc
+        }
+      )
+      .msg("  Metrics grouped by: ", dep_col,
+           " (", dplyr::n_distinct(b_loc[[dep_col]], na.rm = TRUE), " deployments)")
+    }
+
     if (!move2::mt_is_time_ordered(b_loc))
       stop("Location data still not strictly time-ordered within track after dedupe.")
 
@@ -756,51 +873,58 @@ import_nanofox_movebank <- function(
     .source_local(script_mt_previous)
     b_loc <- b_loc %>%
       mt_add_prev_metrics(dist_units  = "km",
-                          speed_units = "km/h",      # corrected from "km/hr"
+                          speed_units = "km/h",
                           time_units  = "secs")
 
     .source_local(script_calc_displacement)
     b_loc <- calc_displacement(b_loc)
 
-    # ---- Cumulative track distance ----
-    # cum_dist_km: running total distance (km) from the first fix of each track.
-    # Computed from the per-step `distance` column (already in km).
-    # NA steps (first fix of each track, or missing geometry) are treated as
-    # zero displacement so the cumsum is never interrupted — the NA is preserved
-    # in the output so the first fix correctly shows NA cumulative distance.
+    # ---- Cumulative distance — grouped by deployment_id ----
     if (isTRUE(compute_cum_dist) && "distance" %in% names(b_loc)) {
+      # Use the current (deployment-level) track id for grouping
       track_id_vec   <- as.character(move2::mt_track_id(b_loc))
-      dist_numeric   <- as.numeric(b_loc$distance)   # km, strip units for cumsum
+      dist_numeric   <- as.numeric(b_loc$distance)
       cum_dist       <- ave(
         ifelse(is.na(dist_numeric), 0, dist_numeric),
         track_id_vec,
         FUN = cumsum
       )
-      # Restore NA at first fix of each track (cumsum of 0 there is meaningless)
       first_fix <- !duplicated(track_id_vec)
       cum_dist[first_fix] <- NA_real_
       b_loc$cum_dist_km <- cum_dist
     }
 
     # ---- Altitude from pressure ----
-    # altitude_m is already set on `b` before .make_location_metrics() is called.
-    # Re-apply on the filtered location subset as a safety net (covers b_daily
-    # path where b_loc is a thinned copy of b that may not carry altitude_m).
     b_loc <- .add_altitude_from_pressure_col(b_loc)
 
-    # Re-apply temperature in case b_loc is a thinned copy (daily path) that
-    # dropped the temperature join. TinyFox flat cols survive on location rows;
-    # NanoFox external_temperature is also carried through.
+    # ---- Temperature ----
     b_loc <- .add_temperature_to_locations(b_loc)
 
-    # Change in altitude between consecutive fixes (units = m)
+    # ---- Delta altitude — grouped by deployment_id ----
     b_loc <- .safe_try(.add_delta_altitude(b_loc), "add_delta_altitude") %||% b_loc
+
+    # ---- Restore original track id column ----
+    cur_track_col <- move2::mt_track_id_column(b_loc)
+    if (cur_track_col != original_track_col &&
+        original_track_col %in% names(b_loc) &&
+        !all(is.na(b_loc[[original_track_col]]))) {
+      b_loc[[original_track_col]] <- as.character(b_loc[[original_track_col]])
+      b_loc <- tryCatch(
+        move2::mt_as_move2(b_loc,
+                           track_id_column = original_track_col,
+                           time_column     = "timestamp",
+                           crs             = sf::st_crs(b_loc)
+        ),
+        error = function(e) b_loc   # leave as deployment-keyed if restore fails
+      )
+    }
 
     b_loc
   }
 
   # Produce a daily (solar-noon) location dataset + bat-night sensor summaries.
   .source_local(script_daily)
+  .source_local(script_pressure_to_altitude)
   .source_local(script_daily_sensor)
 
   # ---------------------------------------------------------------------------
@@ -873,6 +997,12 @@ import_nanofox_movebank <- function(
       dplyr::select(-night_day_split)
     .msg("  [noon_roost] Period-0 removed. Remaining: ", nrow(rep_daily), " of ", nrow(x))
 
+    grp_col <- .metric_group_col(rep_daily)
+    if (is.null(grp_col)) {
+      rep_daily$`..metric_group_id` <- as.character(move2::mt_track_id(rep_daily))
+      grp_col <- "..metric_group_id"
+    }
+
     rep_daily <- rep_daily %>%
       dplyr::mutate(
         noon_date = dplyr::case_when(
@@ -883,13 +1013,13 @@ import_nanofox_movebank <- function(
         noon_time    = as.POSIXct(paste0(.data$noon_date, " 12:00:00"), tz = "UTC"),
         dist_to_noon = abs(as.numeric(difftime(.data$timestamp, .data$noon_time, units = "secs")))
       ) %>%
-      dplyr::group_by(.data$individual_local_identifier, .data$period_id) %>%
+      dplyr::group_by(.data[[grp_col]], .data$period_id) %>%
       dplyr::arrange(.data$night_day == "night", .data$dist_to_noon, .by_group = TRUE) %>%
       dplyr::slice(1) %>%
       dplyr::ungroup()
 
     .msg("  [noon_roost] Selected ", nrow(rep_daily), " daily points across ",
-         dplyr::n_distinct(rep_daily$individual_local_identifier), " individuals.")
+         dplyr::n_distinct(rep_daily[[grp_col]]), " groups (", grp_col, ").")
     rep_daily %>% dplyr::select(-dplyr::any_of(c("night_day", "period_id",
                                                  "noon_date", "noon_time", "dist_to_noon")))
   }
@@ -963,31 +1093,25 @@ import_nanofox_movebank <- function(
     b <- move2::movebank_download_study(study_id = id, sensor_type_id = wanted_ids)
 
     # Some Movebank downloads do not expose individual_local_identifier as an
-    # event column. Recover it from track metadata if possible; otherwise fall
-    # back to the current move2 track id.
+    # event column. In that case, recover it from track metadata or fall back to
+    # the current move2 track id so downstream grouping never breaks.
     if (!"individual_local_identifier" %in% names(b)) {
       td <- tryCatch(move2::mt_track_data(b), error = function(e) NULL)
       if (!is.null(td) && "individual_local_identifier" %in% names(td)) {
         track_key <- names(td)[1]
-        lookup <- stats::setNames(
-          as.character(td$individual_local_identifier),
-          as.character(td[[track_key]])
-        )
-        b$individual_local_identifier <- unname(
-          lookup[as.character(move2::mt_track_id(b))]
-        )
+        lookup <- stats::setNames(as.character(td$individual_local_identifier),
+                                  as.character(td[[track_key]]))
+        b$individual_local_identifier <- unname(lookup[as.character(move2::mt_track_id(b))])
       }
     }
-
-    if (!"individual_local_identifier" %in% names(b) ||
-        all(is.na(b$individual_local_identifier))) {
+    if (!"individual_local_identifier" %in% names(b) || all(is.na(b$individual_local_identifier))) {
       b$individual_local_identifier <- as.character(move2::mt_track_id(b))
       .msg("  individual_local_identifier missing; filled from move2 track id.")
     }
 
     b <- .fix_track_data_lists(b)
     b <- .add_event_attrs(b)
-    b <- .set_tag_type(b)
+    b <- .set_tag_type(b, study_id_current = id)
     b <- .add_lonlat(b)
     b <- .label_sensor_type(b, sensor_selected)
 
@@ -1083,15 +1207,161 @@ import_nanofox_movebank <- function(
     obj
   }
 
+  # ---------------------------------------------------------------------------
+  # Column type normalisation for cross-study binding
+  # ---------------------------------------------------------------------------
+  # Converts an sf/tibble to a maximally bind-safe form:
+  #   - units columns → plain numeric
+  #   - ordered/factor columns → character (avoids level-set conflicts)
+  #   - int64 (bit64) columns → character (avoids integer overflow in bind)
+  # Geometry column is left untouched.
+  .normalise_cols <- function(x) {
+    geom_col <- if (inherits(x, "sf")) attr(x, "sf_column") else NULL
+    for (nm in names(x)) {
+      if (!is.null(geom_col) && nm == geom_col) next
+      v <- x[[nm]]
+      if (inherits(v, "units"))              { x[[nm]] <- as.numeric(v);    next }
+      if (is.ordered(v) || is.factor(v))     { x[[nm]] <- as.character(v);  next }
+      if (inherits(v, "integer64"))          { x[[nm]] <- as.character(v);  next }
+    }
+    x
+  }
+
+  # Create a typed NA vector that matches `src` in class so bind_rows
+  # doesn't see a logical vs POSIXct / numeric / character clash.
+  .na_like <- function(src, n) {
+    if (inherits(src, "POSIXct"))
+      return(as.POSIXct(rep(NA_real_, n), origin = "1970-01-01", tz = "UTC"))
+    if (is.double(src))    return(rep(NA_real_,      n))
+    if (is.integer(src))   return(rep(NA_integer_,   n))
+    if (is.character(src)) return(rep(NA_character_,  n))
+    if (is.logical(src))   return(rep(NA,             n))
+    rep(NA_character_, n)   # safe fallback
+  }
+
   merge_stack <- function(objs) {
     objs <- Filter(Negate(is.null), objs)
     if (length(objs) == 0) return(NULL)
     if (length(objs) == 1) return(objs[[1]])
-    # Normalise units across all objects before stacking
-    objs <- lapply(objs, .strip_units_cols)
-    out  <- objs[[1]]
-    for (i in 2:length(objs))
-      out <- move2::mt_stack(out, objs[[i]], .track_combine = track_combine)
+
+    # Step 1: re-key every object to individual_local_identifier.
+    # Studies can arrive with different track_id_column values (e.g. x1 uses
+    # deployment_id, x2/x3 use individual_local_identifier). After bind_rows
+    # the only column guaranteed to be non-NA on every event row across all
+    # studies is individual_local_identifier — so we unify on that before merging.
+    # deployment_id is preserved as a plain column for within-study grouping.
+    .rekey_to_individual <- function(x) {
+      # Ensure individual_local_identifier is an event column (not track-data only)
+      if (!"individual_local_identifier" %in% names(x)) {
+        td <- tryCatch(move2::mt_track_data(x), error = function(e) NULL)
+        if (!is.null(td) && "individual_local_identifier" %in% names(td)) {
+          track_key <- as.character(move2::mt_track_id(x))
+          id_col    <- names(td)[1]
+          lkp <- stats::setNames(as.character(td$individual_local_identifier),
+                                 as.character(td[[id_col]]))
+          x$individual_local_identifier <- unname(lkp[track_key])
+        }
+      }
+      if (!"individual_local_identifier" %in% names(x) ||
+          all(is.na(x$individual_local_identifier))) {
+        x$individual_local_identifier <- as.character(move2::mt_track_id(x))
+      }
+      # Re-cast to move2 keyed on individual_local_identifier so the track data
+      # is consistent before we strip the class for binding.
+      x$individual_local_identifier <- as.character(x$individual_local_identifier)
+      tryCatch(
+        move2::mt_as_move2(x,
+                           track_id_column = "individual_local_identifier",
+                           time_column     = "timestamp",
+                           crs             = sf::st_crs(x)
+        ),
+        error = function(e) x   # if re-keying fails, proceed with original
+      )
+    }
+    objs <- lapply(objs, .rekey_to_individual)
+
+    # Step 2: strip units and normalise problematic column types.
+    # Explicitly drop the move2 subclass after st_as_sf() — bind_rows triggers
+    # dplyr_reconstruct.move2() which calls mt_track_id() and asserts no NAs.
+    # A plain sf tibble binds cleanly; we re-cast to move2 after combining.
+    .to_plain_sf <- function(x) {
+      x <- sf::st_as_sf(x)
+      class(x) <- class(x)[!class(x) %in% c("move2")]
+      x
+    }
+    sf_objs <- lapply(objs, function(x) .normalise_cols(.to_plain_sf(x)))
+
+    # Step 3: build the union column set (excluding geometry)
+    geom_cols <- vapply(sf_objs, function(x) attr(x, "sf_column"), character(1))
+    all_cols  <- unique(unlist(mapply(
+      function(x, gc) setdiff(names(x), gc),
+      sf_objs, geom_cols, SIMPLIFY = FALSE
+    )))
+
+    # Step 4: align each study to the full column set with typed NAs
+    # Also build a global type map: first non-null type wins per column.
+    type_map <- list()
+    for (x in sf_objs) {
+      for (nm in names(x)) {
+        if (!nm %in% names(type_map) && !inherits(x[[nm]], "sfc"))
+          type_map[[nm]] <- x[[nm]]
+      }
+    }
+
+    align_one <- function(x, gc) {
+      n <- nrow(x)
+      for (col in setdiff(all_cols, names(x))) {
+        src <- type_map[[col]]
+        x[[col]] <- if (!is.null(src)) .na_like(src, n) else rep(NA_character_, n)
+      }
+      x[, c(all_cols, gc), drop = FALSE]
+    }
+
+    sf_objs <- mapply(align_one, sf_objs, geom_cols, SIMPLIFY = FALSE)
+
+    # Step 5: bind — all column types now match
+    combined <- tryCatch(
+      do.call(dplyr::bind_rows, sf_objs),
+      error = function(e) {
+        # Last-resort: coerce every non-geometry column to character
+        .msg("  merge_stack: bind_rows failed (", conditionMessage(e),
+             "); falling back to all-character coercion.")
+        sf_objs2 <- lapply(sf_objs, function(x) {
+          gc <- attr(x, "sf_column")
+          for (nm in setdiff(names(x), gc))
+            x[[nm]] <- if (!inherits(x[[nm]], "sfc")) as.character(x[[nm]]) else x[[nm]]
+          x
+        })
+        do.call(dplyr::bind_rows, sf_objs2)
+      }
+    )
+
+    # Step 6: choose a stable track id, arrange, re-cast to move2.
+    # Always use individual_local_identifier because every object was re-keyed
+    # to it in Step 1 — it is the only column guaranteed non-NA across all studies.
+    track_col <- if ("individual_local_identifier" %in% names(combined) &&
+                     !all(is.na(combined$individual_local_identifier))) {
+      "individual_local_identifier"
+    } else {
+      combined$..metric_group_id <- as.character(seq_len(nrow(combined)))
+      "..metric_group_id"
+    }
+
+    if (!"timestamp" %in% names(combined))
+      stop("Cannot merge studies: timestamp column missing after harmonising schemas.")
+
+    combined[[track_col]] <- as.character(combined[[track_col]])
+    combined <- combined[order(combined[[track_col]], combined$timestamp), ]
+
+    out <- move2::mt_as_move2(
+      combined,
+      track_id_column = track_col,
+      time_column     = "timestamp",
+      crs             = sf::st_crs(sf_objs[[1]])
+    )
+
+    # Resolve any remaining list-columns in track data
+    out <- tryCatch(.fix_track_data_lists(out), error = function(e) out)
     out
   }
   full_merged  <- if (isTRUE(merge_studies)) merge_stack(lapply(res_list, `[[`, "full"))     else lapply(res_list, `[[`, "full")
