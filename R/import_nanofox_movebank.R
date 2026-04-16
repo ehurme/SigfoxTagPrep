@@ -147,13 +147,14 @@ import_nanofox_movebank <- function(
   }
 
   .set_tag_type <- function(x, study_id_current = NULL) {
-    allowed <- c("uWasp", "nanofox")
+    allowed <- c("uWasp", "nanofox", "tinyfox")
 
     .classify_model <- function(s) {
       s <- as.character(s)
       out <- dplyr::case_when(
         grepl("uWasp|SigfoxGH", s, ignore.case = TRUE) ~ "uWasp",
         grepl("Nano|NanoFox",  s, ignore.case = TRUE) ~ "nanofox",
+        grepl("Tinyfox|TinyFoxBatt",  s, ignore.case = TRUE) ~ "tinyfox",
         TRUE ~ NA_character_
       )
       out
