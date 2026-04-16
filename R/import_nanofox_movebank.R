@@ -11,6 +11,7 @@ import_nanofox_movebank <- function(
     run_elevation = TRUE,
     run_daily_metrics = TRUE,
     daily_method = c("solar_noon", "daytime_only", "noon_roost"),
+    compute_cum_dist = TRUE,
     verbose = TRUE,
     script_mt_add_start         = "../SigfoxTagPrep/R/mt_add_start.R",
     script_add_vedba_temp       = "../SigfoxTagPrep/R/add_vedba_temp_to_locations.R",
@@ -229,195 +230,220 @@ import_nanofox_movebank <- function(
   }
 
   .fix_track_data_lists <- function(x) {
-    td <- mt_track_data(x)
-    if (any(vapply(td, is.list, logical(1)))) {
-      .msg("Track data contains list-columns; expanding with tidyr::unnest_longer().")
-      x <- mt_set_track_data(x, td %>% tidyr::unnest_longer(col = tidyselect::everything()))
+    # When individual_local_identifier is used as the track ID, Movebank may
+    # bundle multiple deployments (different tags, capture dates, body mass, etc.)
+    # for the same individual into list-columns in the track data.  This is
+    # expected move2 behaviour.  The correct resolution (per move2 team) is:
+    #
+    #   1. Collapse list-columns where every deployment has the same value
+    #      → unwrap to a plain scalar (vec_c of the single unique value).
+    #   2. For list-columns that genuinely differ across deployments
+    #      → stringify to a comma-separated character column so downstream code
+    #        never sees a list and cannot accidentally inflate row counts.
+    #
+    # unnest_longer() was previously used here but is WRONG: it multiplies track
+    # rows by the number of deployments, corrupting tag_local_identifier
+    # assignments and stretching deployment time windows.
+
+    td <- move2::mt_track_data(x)
+    if (!any(vapply(td, vctrs::is_list, logical(1)))) return(x)
+
+    .msg("  Track data has list-columns; resolving multiple deployments per individual.")
+
+    # Step 1: collapse columns where all entries are identical across deployments
+    td <- td %>%
+      dplyr::mutate(dplyr::across(
+        dplyr::where(~vctrs::is_list(.x) &&
+                       all(purrr::map_lgl(.x, function(y) length(unique(y)) == 1L))),
+        ~do.call(vctrs::vec_c, purrr::map(.x, utils::head, 1L))
+      ))
+
+    # Step 2: stringify remaining list-columns (values differ across deployments)
+    if (any(vapply(td, vctrs::is_list, logical(1)))) {
+      td <- td %>%
+        dplyr::mutate(dplyr::across(
+          dplyr::where(~vctrs::is_list(.x) &&
+                         any(purrr::map_lgl(.x, function(y) length(unique(y)) != 1L))),
+          ~unlist(purrr::map(.x, paste, collapse = ","))
+        ))
     }
-    x
+
+    if (isTRUE(verbose)) {
+      list_cols <- names(td)[vapply(td, vctrs::is_list, logical(1))]
+      if (length(list_cols) == 0)
+        .msg("  Track data list-columns resolved.")
+      else
+        .msg("  Track data still has list-columns after resolution: ",
+             paste(list_cols, collapse = ", "))
+    }
+
+    move2::mt_set_track_data(x, td)
   }
 
   # ---------------------------------------------------------------------------
-  # .add_tinyfox_altitude()
+  # .add_altitude_from_pressure_col()
   #
-  # TinyFox tags transmit 4 barometer messages per 22-hour activity window,
-  # spaced ~30 minutes apart.  Each message reports the MINIMUM pressure
-  # observed since the start of that window, so values are monotonically
-  # non-increasing within a window (later messages can only hold the same
-  # or lower pressure).  The final message therefore carries the truest
-  # nightly minimum pressure, corresponding to the highest altitude reached.
+  # Converts any pressure column to altitude_m using the ISA hypsometric formula:
+  #   altitude_m = 44330 * (1 - (P / 1013.25) ^ (1/5.255))
   #
-  # Steps:
-  #   1. Extract barometer rows belonging to TinyFox tracks.
-  #   2. Cluster messages into 22-hour windows using time gaps:
-  #        - messages within a window are < 2 hours apart
-  #        - successive windows are ~22 hours apart
-  #      A new window is started whenever the gap to the previous message
-  #      exceeds 2 hours (within each individual's track).
-  #   3. Compute min(tinyfox_pressure_min_last_24h) per individual x window.
-  #      This is the peak-altitude pressure for that night.
-  #   4. Convert the window minimum pressure to altitude (m) using the
-  #      standard hypsometric formula:
-  #        altitude_m = 44330 * (1 - (P / P0) ^ (1/5.255))
-  #      where P0 = 1013.25 hPa (ISA sea-level pressure).
-  #   5. Propagate tinyfox_altitude_m onto every row (location and barometer)
-  #      for the same individual within that window's time span, so that
-  #      altitude is available when .make_location_metrics() runs.
+  # Handles both tag types with a single unified approach:
   #
-  # Output columns added to x:
-  #   tinyfox_pressure_window_min  [hPa]  - minimum pressure of the window
-  #   tinyfox_altitude_m           [m]    - altitude derived from window min pressure
-  #   altitude_m                   [m]    - set/overwritten for TinyFox rows;
-  #                                         NanoFox rows are left untouched
+  #   TinyFox (flat schema): tinyfox_pressure_min_last_24h [mbar] is a column
+  #     on every location row. Convert it directly — no grouping, no joining.
+  #     Each row carries its own pressure value.
+  #
+  #   NanoFox (separate-row schema): min_3h_pressure [mbar] is joined onto
+  #     location rows by add_min_pressure_to_locations() before this function.
+  #     Convert it directly in the same way.
+  #
+  # Priority when both columns exist (mixed-tag study):
+  #   NanoFox min_3h_pressure > TinyFox tinyfox_pressure_min_last_24h
+  #
+  # Writes altitude_m [m] to x. Never overwrites an existing non-NA value.
   # ---------------------------------------------------------------------------
-  .add_tinyfox_altitude <- function(x,
-                                    pressure_col    = "tinyfox_pressure_min_last_24h",
-                                    gap_threshold_h = 2,
-                                    P0              = 1013.25) {
+  .add_altitude_from_pressure_col <- function(x, P0 = 1013.25) {
+    pressure_to_alt <- function(P) 44330 * (1 - (as.numeric(P) / P0)^(1 / 5.255))
 
-    if (!pressure_col %in% names(x)) {
-      .msg("  .add_tinyfox_altitude: '", pressure_col, "' column not found; skipping.")
-      return(x)
-    }
-
-    # Hypsometric formula: altitude in metres from pressure in hPa
-    pressure_to_alt <- function(P, p0 = P0) {
-      44330 * (1 - (P / p0)^(1 / 5.255))
-    }
-
-    # ---- 1. Build a tidy barometer frame from any row with a non-NA pressure value ----
-    # Do NOT gate on tag_type or sensor_type: both may be unreliable depending on
-    # how Movebank stored the data and whether model metadata was available.
-    # The column itself is the definitive indicator: if tinyfox_pressure_min_last_24h
-    # is non-NA, this is a TinyFox pressure reading regardless of how rows are labelled.
-    has_pressure <- !is.na(x[[pressure_col]])
-
-    if (!any(has_pressure, na.rm = TRUE)) {
-      .msg("  .add_tinyfox_altitude: no non-NA values in '", pressure_col, "'; skipping.")
-      return(x)
-    }
-
-    n_pressure_rows <- sum(has_pressure, na.rm = TRUE)
-    .msg("  .add_tinyfox_altitude: found ", n_pressure_rows, " rows with '",
-         pressure_col, "' values.")
-
-    is_tinyfox_baro <- has_pressure
-
-    baro_df <- tibble::tibble(
-      .row_idx   = which(is_tinyfox_baro),
-      individual = as.character(x$individual_local_identifier[is_tinyfox_baro]),
-      timestamp  = x$timestamp[is_tinyfox_baro],
-      pressure   = as.numeric(x[[pressure_col]][is_tinyfox_baro])
-    ) %>%
-      dplyr::arrange(individual, timestamp)
-
-    # ---- 2. Assign window IDs using time gaps within each individual ----
-    # A new window begins whenever the gap to the previous message exceeds
-    # gap_threshold_h hours.  The cumulative sum of gap flags gives a
-    # monotonically increasing window index per individual.
-    baro_df <- baro_df %>%
-      dplyr::group_by(individual) %>%
-      dplyr::mutate(
-        gap_h      = as.numeric(difftime(timestamp,
-                                         dplyr::lag(timestamp, default = timestamp[1]),
-                                         units = "hours")),
-        new_window = gap_h > gap_threshold_h,
-        window_id  = cumsum(new_window)            # 0, 0, 0, 1, 1, 1, 1, ...
-      ) %>%
-      dplyr::ungroup()
-
-    # ---- 3. Minimum pressure per individual x window ----
-    window_summary <- baro_df %>%
-      dplyr::group_by(individual, window_id) %>%
-      dplyr::summarise(
-        window_start          = min(timestamp),
-        window_end            = max(timestamp),
-        pressure_window_min   = min(pressure, na.rm = TRUE),
-        n_messages            = dplyr::n(),
-        .groups               = "drop"
-      ) %>%
-      dplyr::mutate(
-        tinyfox_altitude_m = pressure_to_alt(pressure_window_min)
-      )
-
-    .msg("  TinyFox windows identified: ", nrow(window_summary),
-         " (", round(mean(window_summary$n_messages), 1),
-         " msgs/window on average)")
-    .msg("  Altitude range: [",
-         round(min(window_summary$tinyfox_altitude_m, na.rm = TRUE), 0), ", ",
-         round(max(window_summary$tinyfox_altitude_m, na.rm = TRUE), 0), "] m")
-
-    # ---- 4. Join window summary back to baro rows ----
-    baro_df <- baro_df %>%
-      dplyr::left_join(
-        window_summary %>% dplyr::select(individual, window_id,
-                                         pressure_window_min, tinyfox_altitude_m),
-        by = c("individual", "window_id")
-      )
-
-    # Write derived columns back to the full object on barometer rows
-    x$tinyfox_pressure_window_min <- NA_real_
-    x$tinyfox_altitude_m          <- NA_real_
-    x$tinyfox_pressure_window_min[baro_df$.row_idx] <- baro_df$pressure_window_min
-    x$tinyfox_altitude_m[baro_df$.row_idx]          <- baro_df$tinyfox_altitude_m
-
-    # ---- 5. Propagate window-minimum altitude back onto rows ----
-    #
-    # FLAT schema (TinyFox): pressure and location share the same row.
-    #   Write window-minimum altitude directly onto the pressure row indices.
-    #   No cross-join needed.
-    #
-    # SEPARATE schema (NanoFox): barometer rows differ from location rows.
-    #   Propagate via interval join over [window_start − 22h, window_end + 1h].
-
-    flat_schema <- !"sensor_type" %in% names(x) ||
-      all(x$sensor_type[is_tinyfox_baro] %in%
-            c("location", NA_character_), na.rm = TRUE)
-
+    # Initialise altitude_m if absent
     if (!"altitude_m" %in% names(x)) x$altitude_m <- NA_real_
+    existing <- !is.na(as.numeric(x$altitude_m))
 
-    if (flat_schema) {
-      x$altitude_m[baro_df$.row_idx] <- baro_df$tinyfox_altitude_m
-
-    } else {
-      all_df <- tibble::tibble(
-        .row_idx   = seq_len(nrow(x)),
-        individual = as.character(x$individual_local_identifier),
-        timestamp  = x$timestamp
-      )
-      window_intervals <- window_summary %>%
-        dplyr::mutate(
-          window_start_buffered = window_start - lubridate::dhours(22),
-          window_end_buffered   = window_end   + lubridate::dhours(1)
-        ) %>%
-        dplyr::select(individual, window_start, window_start_buffered,
-                      window_end_buffered, tinyfox_altitude_m)
-
-      matched <- all_df %>%
-        dplyr::left_join(window_intervals, by = "individual",
-                         relationship = "many-to-many") %>%
-        dplyr::filter(timestamp >= window_start_buffered &
-                        timestamp <= window_end_buffered) %>%
-        dplyr::mutate(dist_to_window = as.numeric(abs(difftime(
-          timestamp, window_start, units = "secs")))) %>%
-        dplyr::group_by(.row_idx) %>%
-        dplyr::slice_min(dist_to_window, n = 1, with_ties = FALSE) %>%
-        dplyr::ungroup()
-
-      already_has_alt <- !is.na(x$altitude_m)
-      fill_idx <- matched$.row_idx[!already_has_alt[matched$.row_idx]]
-      x$altitude_m[fill_idx] <- matched$tinyfox_altitude_m[
-        match(fill_idx, matched$.row_idx)]
+    # NanoFox: min_3h_pressure (joined from barometer sensor rows)
+    if ("min_3h_pressure" %in% names(x)) {
+      fill <- !existing & !is.na(as.numeric(x$min_3h_pressure))
+      if (any(fill, na.rm = TRUE)) {
+        x$altitude_m[fill] <- pressure_to_alt(x$min_3h_pressure[fill])
+        existing <- existing | fill
+        .msg("  altitude_m: ", sum(fill, na.rm = TRUE),
+             " NanoFox rows filled from min_3h_pressure.")
+      }
     }
 
-    # Apply units
-    x$tinyfox_pressure_window_min <- units::set_units(x$tinyfox_pressure_window_min, "hPa")
-    x$tinyfox_altitude_m          <- units::set_units(x$tinyfox_altitude_m,          "m")
-    x$altitude_m                  <- units::set_units(as.numeric(x$altitude_m),      "m")
+    # TinyFox: tinyfox_pressure_min_last_24h (flat column on location rows)
+    if ("tinyfox_pressure_min_last_24h" %in% names(x)) {
+      fill <- !existing & !is.na(as.numeric(x$tinyfox_pressure_min_last_24h))
+      if (any(fill, na.rm = TRUE)) {
+        x$altitude_m[fill] <- pressure_to_alt(x$tinyfox_pressure_min_last_24h[fill])
+        existing <- existing | fill
+        .msg("  altitude_m: ", sum(fill, na.rm = TRUE),
+             " TinyFox rows filled from tinyfox_pressure_min_last_24h.")
+      }
+    }
 
+    # Attach units
+    x$altitude_m <- units::set_units(as.numeric(x$altitude_m), "m")
     x
   }
 
+
+  # ---------------------------------------------------------------------------
+  # .add_temperature_to_locations()
+  #
+  # Ensures temperature columns are present on location rows for both tag types.
+  # Produces three unified columns (never overwrites existing non-NA values):
+  #
+  #   temperature_min  [°C]  – minimum temperature over the reporting window
+  #   temperature_max  [°C]  – maximum temperature over the reporting window
+  #   avg_temp         [°C]  – mean of min+max (TinyFox) or per-window average
+  #                            (NanoFox, from external_temperature joined by
+  #                            add_vedba_temp_to_locations())
+  #
+  # TinyFox (flat schema):
+  #   tinyfox_temperature_min_last_24h and tinyfox_temperature_max_last_24h are
+  #   columns on every location row. Copied directly; no join required.
+  #
+  # NanoFox (separate-row schema):
+  #   Temperature is stored in separate accessory-measurement sensor rows with
+  #   sensor_type == "avg.temp" and value column "external_temperature".
+  #   add_vedba_temp_to_locations() (sourced script) should have already joined
+  #   these onto location rows. If it did, external_temperature is present.
+  #   If it failed, we do a nearest-timestamp join here as a fallback.
+  # ---------------------------------------------------------------------------
+  .add_temperature_to_locations <- function(x) {
+
+    # ---- TinyFox flat columns ----
+    has_tmin <- "tinyfox_temperature_min_last_24h" %in% names(x)
+    has_tmax <- "tinyfox_temperature_max_last_24h" %in% names(x)
+
+    if (has_tmin || has_tmax) {
+      if (!"temperature_min" %in% names(x)) x$temperature_min <- NA_real_
+      if (!"temperature_max" %in% names(x)) x$temperature_max <- NA_real_
+      if (!"avg_temp"        %in% names(x)) x$avg_temp        <- NA_real_
+
+      if (has_tmin) {
+        fill <- is.na(x$temperature_min) & !is.na(as.numeric(x$tinyfox_temperature_min_last_24h))
+        x$temperature_min[fill] <- as.numeric(x$tinyfox_temperature_min_last_24h[fill])
+      }
+      if (has_tmax) {
+        fill <- is.na(x$temperature_max) & !is.na(as.numeric(x$tinyfox_temperature_max_last_24h))
+        x$temperature_max[fill] <- as.numeric(x$tinyfox_temperature_max_last_24h[fill])
+      }
+
+      # avg_temp from mid-range where both min and max are available
+      fill_avg <- is.na(x$avg_temp) &
+        !is.na(x$temperature_min) & !is.na(x$temperature_max)
+      x$avg_temp[fill_avg] <- (x$temperature_min[fill_avg] + x$temperature_max[fill_avg]) / 2
+
+      # avg_temp from whichever single value is available
+      fill_min_only <- is.na(x$avg_temp) & !is.na(x$temperature_min)
+      x$avg_temp[fill_min_only] <- x$temperature_min[fill_min_only]
+      fill_max_only <- is.na(x$avg_temp) & !is.na(x$temperature_max)
+      x$avg_temp[fill_max_only] <- x$temperature_max[fill_max_only]
+
+      n_filled <- sum(!is.na(x$avg_temp), na.rm = TRUE)
+      .msg("  temperature: ", n_filled, " TinyFox location rows have avg_temp.")
+    }
+
+    # ---- NanoFox: external_temperature already on location rows (from sourced script) ----
+    if ("external_temperature" %in% names(x)) {
+      if (!"avg_temp" %in% names(x)) x$avg_temp <- NA_real_
+      fill <- is.na(x$avg_temp) & !is.na(as.numeric(x$external_temperature))
+      if (any(fill, na.rm = TRUE)) {
+        x$avg_temp[fill] <- as.numeric(x$external_temperature[fill])
+        .msg("  temperature: ", sum(fill, na.rm = TRUE),
+             " NanoFox location rows filled avg_temp from external_temperature.")
+      }
+    }
+
+    # ---- NanoFox fallback: join from avg.temp sensor rows if still missing ----
+    # If add_vedba_temp_to_locations() failed, sensor_type=="avg.temp" rows carry
+    # external_temperature. Join the temporally nearest reading per individual.
+    if ("sensor_type" %in% names(x) &&
+        any(x$sensor_type == "avg.temp", na.rm = TRUE)) {
+
+      if (!"avg_temp" %in% names(x)) x$avg_temp <- NA_real_
+
+      loc_idx  <- which(x$sensor_type == "location" & is.na(x$avg_temp))
+      temp_idx <- which(x$sensor_type == "avg.temp" &
+                          !is.na(as.numeric(x$external_temperature)))
+
+      if (length(loc_idx) > 0 && length(temp_idx) > 0) {
+        loc_df  <- tibble::tibble(
+          .loc_row   = loc_idx,
+          individual = as.character(x$individual_local_identifier[loc_idx]),
+          timestamp  = x$timestamp[loc_idx]
+        )
+        temp_df <- tibble::tibble(
+          individual   = as.character(x$individual_local_identifier[temp_idx]),
+          temp_ts      = x$timestamp[temp_idx],
+          ext_temp_val = as.numeric(x$external_temperature[temp_idx])
+        )
+        joined <- loc_df %>%
+          dplyr::left_join(temp_df, by = "individual",
+                           relationship = "many-to-many") %>%
+          dplyr::mutate(dt = abs(as.numeric(difftime(timestamp, temp_ts, units = "secs")))) %>%
+          dplyr::group_by(.loc_row) %>%
+          dplyr::slice_min(dt, n = 1, with_ties = FALSE) %>%
+          dplyr::ungroup()
+
+        x$avg_temp[joined$.loc_row] <- joined$ext_temp_val
+        .msg("  temperature: ", nrow(joined),
+             " NanoFox location rows filled avg_temp via nearest-sensor join.")
+      }
+    }
+
+    x
+  }
 
   # ---------------------------------------------------------------------------
   # .expand_tinyfox_rows()
@@ -701,10 +727,12 @@ import_nanofox_movebank <- function(
   #
   # Computes per-fix movement metrics on a location-only move2 object.
   #
-  # Speed   : km/h  — "km/h" is the correct SI-derived units symbol.
-  #           "km/hr" is not recognised by the units package and will error.
-  # Distance: km
-  # dt      : seconds (numeric; used as-is for climb-rate arithmetic)
+  # Speed        : km/h  — "km/h" is the correct SI-derived units symbol.
+  #               "km/hr" is not recognised by the units package and will error.
+  # Distance      : km
+  # dt            : seconds (numeric; used as-is for climb-rate arithmetic)
+  # cum_dist_km   : cumulative distance from first fix per track (km, plain numeric)
+  #                 NA at the first fix; controlled by compute_cum_dist parameter.
   # delta_altitude_m: metres with explicit units (via .add_delta_altitude)
   # ---------------------------------------------------------------------------
   .make_location_metrics <- function(x) {
@@ -734,10 +762,36 @@ import_nanofox_movebank <- function(
     .source_local(script_calc_displacement)
     b_loc <- calc_displacement(b_loc)
 
-    # TODO add cumsum distance
+    # ---- Cumulative track distance ----
+    # cum_dist_km: running total distance (km) from the first fix of each track.
+    # Computed from the per-step `distance` column (already in km).
+    # NA steps (first fix of each track, or missing geometry) are treated as
+    # zero displacement so the cumsum is never interrupted — the NA is preserved
+    # in the output so the first fix correctly shows NA cumulative distance.
+    if (isTRUE(compute_cum_dist) && "distance" %in% names(b_loc)) {
+      track_id_vec   <- as.character(move2::mt_track_id(b_loc))
+      dist_numeric   <- as.numeric(b_loc$distance)   # km, strip units for cumsum
+      cum_dist       <- ave(
+        ifelse(is.na(dist_numeric), 0, dist_numeric),
+        track_id_vec,
+        FUN = cumsum
+      )
+      # Restore NA at first fix of each track (cumsum of 0 there is meaningless)
+      first_fix <- !duplicated(track_id_vec)
+      cum_dist[first_fix] <- NA_real_
+      b_loc$cum_dist_km <- cum_dist
+    }
 
-    .source_local(script_pressure_to_altitude)
-    b_loc <- .safe_try(add_altitude_from_pressure(b_loc), "add_altitude_from_pressure") %||% b_loc
+    # ---- Altitude from pressure ----
+    # altitude_m is already set on `b` before .make_location_metrics() is called.
+    # Re-apply on the filtered location subset as a safety net (covers b_daily
+    # path where b_loc is a thinned copy of b that may not carry altitude_m).
+    b_loc <- .add_altitude_from_pressure_col(b_loc)
+
+    # Re-apply temperature in case b_loc is a thinned copy (daily path) that
+    # dropped the temperature join. TinyFox flat cols survive on location rows;
+    # NanoFox external_temperature is also carried through.
+    b_loc <- .add_temperature_to_locations(b_loc)
 
     # Change in altitude between consecutive fixes (units = m)
     b_loc <- .safe_try(.add_delta_altitude(b_loc), "add_delta_altitude") %||% b_loc
@@ -940,29 +994,21 @@ import_nanofox_movebank <- function(
     .source_local(script_add_min_pressure)
     b <- .safe_try(add_min_pressure_to_locations(df = b), "add_min_pressure_to_locations") %||% b
 
-    # TinyFox: group the 4 repeated barometer messages into 22-hour windows,
-    # derive the nightly minimum pressure, convert to altitude, and propagate
-    # to location rows.  Must run before add_altitude_from_pressure() so that
-    # altitude_m is already populated for TinyFox rows when that function runs.
-    b <- .safe_try(.add_tinyfox_altitude(b), "add_tinyfox_altitude") %||% b
+    # Populate temperature_min, temperature_max, avg_temp on location rows for
+    # all tag types (TinyFox flat columns + NanoFox sensor-row join fallback).
+    b <- .add_temperature_to_locations(b)
 
-    # NanoFox: convert min_3h_pressure to altitude_m.
-    # For TinyFox rows, altitude_m was already set above; the sourced script
-    # should skip / not overwrite rows where altitude_m is already populated —
-    # pass tiny_pressure_col = NULL to signal that TinyFox is handled.
-    .source_local(script_pressure_to_altitude)
-    b <- .safe_try(
-      add_altitude_from_pressure(df = b,
-                                 nano_pressure_col = "min_3h_pressure",
-                                 tiny_pressure_col = NULL,   # handled by .add_tinyfox_altitude()
-                                 altitude_col      = "altitude_m"),
-      "add_altitude_from_pressure"
-    ) %||% b
+    # Convert pressure to altitude for all tag types.
+    # NanoFox: min_3h_pressure is joined by add_min_pressure_to_locations() above.
+    # TinyFox: tinyfox_pressure_min_last_24h is a flat column on location rows.
+    # Both are handled by a single direct hypsometric conversion — no sourced
+    # script dependency, no window grouping, no row-ordering issues.
+    b <- .add_altitude_from_pressure_col(b)
 
     # Expand TinyFox flat-schema columns into separate sensor rows (one per
     # measurement type per transmission), adding time_start and time_end.
-    # Must run AFTER .add_tinyfox_altitude() so altitude_m is already on rows,
-    # and BEFORE .add_night_day_id() so new rows get night/day labels too.
+    # Must run AFTER .add_altitude_from_pressure_col() so altitude_m is already
+    # on rows, and BEFORE .add_night_day_id() so new rows get night/day labels too.
     b <- .safe_try(.expand_tinyfox_rows(b), "expand_tinyfox_rows") %||% b
 
     b <- .safe_try(.add_night_day_id(b), "add_night_day_id") %||% b
@@ -1038,11 +1084,16 @@ import_nanofox_movebank <- function(
     .msg("Merged studies: ", paste(study_id, collapse = ", "))
     .msg("Sensor types (merged full):"); print(table(full_merged$sensor_type, useNA = "ifany"))
     .msg("Timestamp range (merged full):"); print(summary(full_merged$timestamp))
-    # if ("speed" %in% names(loc_merged))
-    #   .msg("Speed units (location): ", deparse(units::deparse_unit(loc_merged$speed)))
-    # if ("delta_altitude_m" %in% names(loc_merged))
-    #   .msg("Delta altitude units (location): ",
-    #        deparse(units::deparse_unit(loc_merged$delta_altitude_m)))
+    # Note: units are stripped from merged objects by .strip_units_cols() before
+    # mt_stack(), so deparse_unit() would error here — report class instead.
+    if (!is.null(loc_merged)) {
+      if ("speed" %in% names(loc_merged))
+        .msg("Speed column class (location): ", class(loc_merged$speed)[1])
+      if ("delta_altitude_m" %in% names(loc_merged))
+        .msg("Delta altitude column class (location): ", class(loc_merged$delta_altitude_m)[1])
+      if ("cum_dist_km" %in% names(loc_merged))
+        .msg("Cumulative distance column present (location): yes")
+    }
   } else if (verbose) {
     .msg("Downloaded ", length(study_id), " studies (not merged).")
   }
@@ -1056,7 +1107,3 @@ import_nanofox_movebank <- function(
     daily            = daily_merged
   )
 }
-
-# x <- {}
-# x <- import_nanofox_movebank(study_id = c(4358705312, 4882437204), daily_method = "daytime_only")
-# x$location$altitude_m %>% summary()

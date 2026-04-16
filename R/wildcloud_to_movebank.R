@@ -191,9 +191,14 @@ harmonize_wc_columns <- function(df) {
     "Compression"                        = "^(Compression|compression)$",
 
     # ---- summary sensors (3-hr or other window) ----
-    "Min pressure of last 3 hrs (mbar)"  = "^(Min\\.?\\s*pressure|min_pressure|Pressure.*min|barometric.*min)",
-    "Min temperature of last 3 hrs (temperature range °C)" =
-      "^(Min\\.?\\s*temp(erature)?\\s*(of|range|\\()|min_temp|Temperature\\s*range)"
+    # Min pressure: narrow pattern that will NOT match bin-style "Pressure X min ago"
+    "Min pressure of last 3 hrs (mbar)"  = "^Min\\.?\\s*pressure",
+    # Min temperature: matches legacy range-label ">10", new numeric, and FineScalePressure variants
+    "Min temperature of last 3 hrs (°C)" =
+      "^Min\\.?\\s*temp(erature)?\\s*(of|range|\\()",
+    # Max temperature: new in FineScalePressure firmware
+    "Max temperature of last 3 hrs (°C)" =
+      "^Max\\.?\\s*temp(erature)?\\s*(of|\\()"
   )
 
   renames_done <- character(0)
@@ -213,7 +218,6 @@ harmonize_wc_columns <- function(df) {
   }
 
   # ---- VeDBA bin columns: normalize to "VeDBA sum X min ago" pattern ----
-  # Firmware variants: "VeDBA X min ago", "vedba_sum_X_min", "VeDBA sum X min ago"
   vedba_variants <- current_names[stringr::str_detect(
     current_names, regex("^(vedba|VeDBA).*\\d+.*min", ignore_case = TRUE)
   )]
@@ -227,9 +231,14 @@ harmonize_wc_columns <- function(df) {
   }
 
   # ---- Temperature bin columns: normalize to "Average temperature X min ago" ----
-  # Variants: "Avg temp X min ago", "temperature_X_min", "Average temperature X min ago"
+  # Must match "X min ago" AND not start with "Min" or "Max" (those are summaries).
   temp_variants <- names(df)[stringr::str_detect(
-    names(df), regex("^(avg|average|mean)?\\s*(temp|temperature).*\\d+.*min", ignore_case = TRUE)
+    names(df),
+    regex("^(avg|average|mean)?\\s*(temp|temperature).*\\d+\\s*min\\s*ago",
+          ignore_case = TRUE)
+  )]
+  temp_variants <- temp_variants[!stringr::str_detect(
+    temp_variants, regex("^(min|max)", ignore_case = TRUE)
   )]
   for (tc in temp_variants) {
     mins <- stringr::str_extract(tc, "\\d+")
@@ -237,6 +246,21 @@ harmonize_wc_columns <- function(df) {
     if (tc != canonical_tc && !(canonical_tc %in% names(df))) {
       names(df)[names(df) == tc] <- canonical_tc
       renames_done <- c(renames_done, paste0("'", tc, "' -> '", canonical_tc, "'"))
+    }
+  }
+
+  # ---- Pressure bin columns (FineScalePressure firmware) ----
+  # 5 instantaneous pressure readings at 0/36/72/108/144 min ago; replaces the
+  # temperature bins in NanoFox FineScalePressure firmware.
+  pres_variants <- names(df)[stringr::str_detect(
+    names(df), regex("^Pressure\\s+\\d+\\s*min", ignore_case = TRUE)
+  )]
+  for (pc in pres_variants) {
+    mins <- stringr::str_extract(pc, "\\d+")
+    canonical_pc <- paste("Pressure", mins, "min ago")
+    if (pc != canonical_pc && !(canonical_pc %in% names(df))) {
+      names(df)[names(df) == pc] <- canonical_pc
+      renames_done <- c(renames_done, paste0("'", pc, "' -> '", canonical_pc, "'"))
     }
   }
 
@@ -271,27 +295,38 @@ wc_wide_to_mb_long <- function(df) {
 
   vedba_cols <- names(df)[stringr::str_detect(names(df), "^VeDBA sum\\s+\\d+\\s+min ago")]
   temp_cols  <- names(df)[stringr::str_detect(names(df), "^Average temperature\\s+\\d+\\s+min ago")]
+  # Pressure bins (FineScalePressure firmware): 5 instantaneous readings
+  pres_bin_cols <- names(df)[stringr::str_detect(names(df), "^Pressure\\s+\\d+\\s+min ago")]
 
-  # Detect min temp and pressure columns flexibly — exact canonical name or regex
+  # Detect min/max temp and min pressure summary columns flexibly
   min_temp_col <- NULL
+  max_temp_col <- NULL
   min_pres_col <- NULL
 
-  canonical_min_temp <- "Min temperature of last 3 hrs (temperature range °C)"
+  canonical_min_temp <- "Min temperature of last 3 hrs (°C)"
+  canonical_max_temp <- "Max temperature of last 3 hrs (°C)"
   canonical_min_pres <- "Min pressure of last 3 hrs (mbar)"
 
   if (canonical_min_temp %in% names(df)) {
     min_temp_col <- canonical_min_temp
   } else {
-    # Flexible match: any column starting with "Min" + "temp" (case-insensitive)
     mt_match <- names(df)[stringr::str_detect(names(df),
                                               regex("^Min\\.?\\s*temp", ignore_case = TRUE))]
     if (length(mt_match) == 1) min_temp_col <- mt_match
   }
 
+  if (canonical_max_temp %in% names(df)) {
+    max_temp_col <- canonical_max_temp
+  } else {
+    mx_match <- names(df)[stringr::str_detect(names(df),
+                                              regex("^Max\\.?\\s*temp", ignore_case = TRUE))]
+    if (length(mx_match) == 1) max_temp_col <- mx_match
+  }
+
   if (canonical_min_pres %in% names(df)) {
     min_pres_col <- canonical_min_pres
   } else {
-    # Flexible match: any column starting with "Min" + "press" (case-insensitive)
+    # "Min" + "press" only (NOT bin-style "Pressure X min ago")
     mp_match <- names(df)[stringr::str_detect(names(df),
                                               regex("^Min\\.?\\s*press", ignore_case = TRUE))]
     if (length(mp_match) == 1) min_pres_col <- mp_match
@@ -300,15 +335,17 @@ wc_wide_to_mb_long <- function(df) {
   bs_col <- "Base Stations (ID, RSSI, Reps)"
 
   has_new <- length(vedba_cols) > 0 || length(temp_cols) > 0 ||
-    !is.null(min_pres_col) || !is.null(min_temp_col)
+    length(pres_bin_cols) > 0 ||
+    !is.null(min_pres_col) || !is.null(min_temp_col) || !is.null(max_temp_col)
 
   if (!has_new) return(df)
 
   message(sprintf(
-    "[expand] Sensor columns found: %d VeDBA bins, %d temp bins, min_pressure=%s, min_temp=%s",
-    length(vedba_cols), length(temp_cols),
+    "[expand] Sensor columns found: %d VeDBA bins, %d temp bins, %d pressure bins, min_pressure=%s, min_temp=%s, max_temp=%s",
+    length(vedba_cols), length(temp_cols), length(pres_bin_cols),
     ifelse(is.null(min_pres_col), "none", min_pres_col),
-    ifelse(is.null(min_temp_col), "none", min_temp_col)
+    ifelse(is.null(min_temp_col), "none", min_temp_col),
+    ifelse(is.null(max_temp_col), "none", max_temp_col)
   ))
 
   df <- df %>%
@@ -363,11 +400,14 @@ wc_wide_to_mb_long <- function(df) {
       dplyr::select(-metric, -minutes_ago, -.end)
   }
 
-  vedba_long <- build_36min_long(vedba_cols, "VeDBA [m/s²]")
-  temp_long  <- build_36min_long(temp_cols,  "temperature [°C]")
+  vedba_long    <- build_36min_long(vedba_cols,    "VeDBA [m/s²]")
+  temp_long     <- build_36min_long(temp_cols,     "temperature [°C]")
+  # FineScalePressure: 5 instantaneous pressure readings (36-min bins)
+  pres_bin_long <- build_36min_long(pres_bin_cols, "pressure [mbar]")
 
-  if (!is.null(vedba_long)) vedba_long$`VeDBA [m/s²]`   <- suppressWarnings(as.numeric(vedba_long$`VeDBA [m/s²]`))
-  if (!is.null(temp_long))  temp_long$`temperature [°C]` <- suppressWarnings(as.numeric(temp_long$`temperature [°C]`))
+  if (!is.null(vedba_long))    vedba_long$`VeDBA [m/s²]`    <- suppressWarnings(as.numeric(vedba_long$`VeDBA [m/s²]`))
+  if (!is.null(temp_long))     temp_long$`temperature [°C]` <- suppressWarnings(as.numeric(temp_long$`temperature [°C]`))
+  if (!is.null(pres_bin_long)) pres_bin_long$`pressure [mbar]` <- suppressWarnings(as.numeric(pres_bin_long$`pressure [mbar]`))
 
   three_hr_base <- base %>%
     mutate(
@@ -375,6 +415,7 @@ wc_wide_to_mb_long <- function(df) {
       `Time end`   = `timestamp SF transmission`
     )
 
+  # 3-hr min pressure (legacy firmware: single aggregate value over the window)
   pres_long <- NULL
   if (!is.null(min_pres_col)) {
     pres_long <- three_hr_base %>%
@@ -382,10 +423,19 @@ wc_wide_to_mb_long <- function(df) {
       dplyr::select(-.row_id)
   }
 
+  # 3-hr min temp (character range label ">10" in legacy, numeric in new firmware)
   min_temp_long <- NULL
   if (!is.null(min_temp_col)) {
     min_temp_long <- three_hr_base %>%
       mutate(`min_temp_range [°C]` = as.character(df[[min_temp_col]])) %>%
+      dplyr::select(-.row_id)
+  }
+
+  # 3-hr max temp (new in FineScalePressure firmware)
+  max_temp_long <- NULL
+  if (!is.null(max_temp_col)) {
+    max_temp_long <- three_hr_base %>%
+      mutate(`max_temp_range [°C]` = as.character(df[[max_temp_col]])) %>%
       dplyr::select(-.row_id)
   }
 
@@ -399,10 +449,12 @@ wc_wide_to_mb_long <- function(df) {
 
   out <- dplyr::bind_rows(
     loc_rows,
-    if (!is.null(vedba_long)) vedba_long %>% mutate(mb_record_type = "vedba") %>% dplyr::select(-.row_id),
-    if (!is.null(temp_long))  temp_long  %>% mutate(mb_record_type = "temperature") %>% dplyr::select(-.row_id),
-    if (!is.null(pres_long))  pres_long  %>% mutate(mb_record_type = "pressure"),
-    if (!is.null(min_temp_long)) min_temp_long %>% mutate(mb_record_type = "min_temp_range")
+    if (!is.null(vedba_long))    vedba_long    %>% mutate(mb_record_type = "vedba")          %>% dplyr::select(-.row_id),
+    if (!is.null(temp_long))     temp_long     %>% mutate(mb_record_type = "temperature")    %>% dplyr::select(-.row_id),
+    if (!is.null(pres_bin_long)) pres_bin_long %>% mutate(mb_record_type = "pressure_bin")   %>% dplyr::select(-.row_id),
+    if (!is.null(pres_long))     pres_long     %>% mutate(mb_record_type = "pressure"),
+    if (!is.null(min_temp_long)) min_temp_long %>% mutate(mb_record_type = "min_temp_range"),
+    if (!is.null(max_temp_long)) max_temp_long %>% mutate(mb_record_type = "max_temp_range")
   ) %>%
     dplyr::distinct(
       Device, `timestamp SF transmission`, `Time start`, `Time end`,
@@ -421,6 +473,7 @@ wc_wide_to_mb_long <- function(df) {
 
 write_movebank_upload_csvs <- function(
     loc_data, vedba_data, bar_data, temp_data, min_temp_data, deployment_data,
+    max_temp_data = NULL,
     output_dir
 ) {
   suppressPackageStartupMessages({
@@ -456,6 +509,11 @@ write_movebank_upload_csvs <- function(
     readr::write_csv(min_temp_proj, file.path(project_folder, "dataMinTemp.csv"), na = "")
     readr::write_csv(dep_proj,      file.path(project_folder, "deployment.csv"), na = "")
 
+    if (!is.null(max_temp_data) && nrow(max_temp_data) > 0) {
+      max_temp_proj <- max_temp_data %>% filter(Movebank.Project == proj)
+      readr::write_csv(max_temp_proj, file.path(project_folder, "dataMaxTemp.csv"), na = "")
+    }
+
     message("Saved Movebank CSVs for project: ", proj, " -> ", project_folder)
   }
 
@@ -476,6 +534,7 @@ wildcloud_to_movebank <- function(
     species              = NULL,
     life_stage           = NULL,
     animal_id_col        = NULL,
+    location_abbr        = NULL,
     clean_lat_range      = NULL,
     clean_lon_range      = NULL,
     sampling_config      = NULL,
@@ -639,7 +698,7 @@ wildcloud_to_movebank <- function(
     message("[ID] Using user-specified column '", animal_id_col, "' as Animal.ID.")
 
   } else {
-    # ---- per-row cascade: PIT > ring > animal.id > tag ID ----
+    # ---- per-row cascade: PIT > ring > animal.id > structured fallback ----
     # Build each candidate as character, NA if column absent, blank, or literal "NA"
     safe_char <- function(x) {
       x <- as.character(x)
@@ -655,7 +714,85 @@ wildcloud_to_movebank <- function(
     aid_vals  <- if ("animal.id" %in% names(animals)) safe_char(animals$animal.id) else rep(NA_character_, nrow(animals))
     tag_vals  <- if (!is.null(tag_col))  safe_char(animals[[tag_col]])  else rep(NA_character_, nrow(animals))
 
-    animals$Animal.ID <- dplyr::coalesce(pit_vals, ring_vals, aid_vals, tag_vals)
+    # ---- build structured fallback ID: Gspp + YY + NN + Loc + TagID ----
+    # e.g. Nnoc + 25 + 01 + Swiss + 9EC016 -> "Nnoc25_01_Swiss_9EC016"
+    # Counter increments per (species, year) combination for rows needing the fallback.
+
+    # Species abbreviation: first letter of genus + first 3 of species (lowercase)
+    species_abbr <- rep(NA_character_, nrow(animals))
+    if (!is.null(genus_col) && !is.null(species_col)) {
+      g <- safe_char(animals[[genus_col]])
+      s <- safe_char(animals[[species_col]])
+      species_abbr <- ifelse(
+        !is.na(g) & !is.na(s),
+        paste0(toupper(substr(g, 1, 1)), tolower(substr(s, 1, 3))),
+        NA_character_
+      )
+    } else if (!is.null(species_col)) {
+      # Use first 4 characters of species column if that's all we have
+      s <- safe_char(animals[[species_col]])
+      species_abbr <- ifelse(
+        !is.na(s),
+        paste0(toupper(substr(s, 1, 1)), tolower(substr(s, 2, 4))),
+        NA_character_
+      )
+    }
+    species_abbr[is.na(species_abbr)] <- "spp"
+
+    # Year: 2-digit from deploy date
+    year_vals <- rep(NA_character_, nrow(animals))
+    if (!is.null(date_col)) {
+      d_parsed <- suppressWarnings(lubridate::ymd(as.character(animals[[date_col]]),
+                                                  truncated = 2, quiet = TRUE))
+      year_vals <- ifelse(!is.na(d_parsed),
+                          sprintf("%02d", lubridate::year(d_parsed) %% 100),
+                          NA_character_)
+    }
+    year_vals[is.na(year_vals)] <- "00"
+
+    # Location abbreviation: user-supplied via location_abbr argument.
+    # Recommended: 3-6 character code like "Swiss", "Catal", "Flan".
+    # Defaults to "Unk" if not provided.
+    loc_abbr_val <- if (!is.null(location_abbr) && nzchar(trimws(location_abbr))) {
+      gsub("[^A-Za-z0-9]", "", trimws(location_abbr))
+    } else {
+      "Unk"
+    }
+    loc_abbr <- rep(loc_abbr_val, nrow(animals))
+
+    # Per-year-per-species counter — only for rows needing the fallback
+    needs_fallback <- is.na(pit_vals) & is.na(ring_vals) & is.na(aid_vals) & !is.na(tag_vals)
+
+    counter_vals <- rep(NA_character_, nrow(animals))
+    if (any(needs_fallback)) {
+      fb_df <- data.frame(
+        .row = seq_len(nrow(animals)),
+        .sp  = species_abbr,
+        .yr  = year_vals,
+        .fb  = needs_fallback,
+        stringsAsFactors = FALSE
+      )
+      fb_df$.counter <- NA_integer_
+      # Order by row then group by species+year, assign sequential counters
+      for (grp in unique(paste(fb_df$.sp[fb_df$.fb], fb_df$.yr[fb_df$.fb]))) {
+        sp <- strsplit(grp, " ", fixed = TRUE)[[1]][1]
+        yr <- strsplit(grp, " ", fixed = TRUE)[[1]][2]
+        idx <- which(fb_df$.fb & fb_df$.sp == sp & fb_df$.yr == yr)
+        fb_df$.counter[idx] <- seq_along(idx)
+      }
+      counter_vals <- ifelse(!is.na(fb_df$.counter),
+                             sprintf("%02d", fb_df$.counter),
+                             NA_character_)
+    }
+
+    # Assemble structured fallback ID
+    structured_fallback <- ifelse(
+      needs_fallback,
+      paste0(species_abbr, year_vals, "_", counter_vals, "_", loc_abbr, "_", tag_vals),
+      NA_character_
+    )
+
+    animals$Animal.ID <- dplyr::coalesce(pit_vals, ring_vals, aid_vals, structured_fallback)
 
     # Track which source was used per row
     animals$id_source <- dplyr::case_when(
@@ -663,7 +800,7 @@ wildcloud_to_movebank <- function(
       is.na(pit_vals) & !is.na(ring_vals)       ~ "ring",
       is.na(pit_vals) & is.na(ring_vals) &
         !is.na(aid_vals)                        ~ "animal_id_col",
-      !is.na(tag_vals)                          ~ "tag_id_fallback",
+      !is.na(structured_fallback)               ~ "structured_fallback",
       TRUE                                      ~ "missing"
     )
 
@@ -672,14 +809,20 @@ wildcloud_to_movebank <- function(
     message("[ID] Animal.ID sources: ",
             paste(names(src_counts), src_counts, sep = "=", collapse = ", "))
 
-    # Warn about tag_id fallback rows
-    n_fallback <- sum(animals$id_source == "tag_id_fallback")
+    # Warn about structured fallback rows
+    n_fallback <- sum(animals$id_source == "structured_fallback")
     if (n_fallback > 0) {
-      warning(sprintf(
-        "[ID] %d deployment(s) lack PIT/ring/animal.id — using tag ID as Animal.ID. ",
-        n_fallback),
-        "If any of these individuals are retrapped, they will appear as separate animals. ",
-        "Consider adding PIT tag IDs to the reference data.")
+      sample_ids <- head(animals$Animal.ID[animals$id_source == "structured_fallback"], 3)
+      message(sprintf(
+        "[ID] %d deployment(s) use structured fallback ID (e.g. %s). ",
+        n_fallback, paste(sample_ids, collapse = ", ")),
+        "These IDs are deterministic per species+year+location+tag — a retrap ",
+        "with the same tag will produce the same ID, but a retrap with a ",
+        "NEW tag will appear as a separate individual.")
+      if (loc_abbr_val == "Unk") {
+        message("[ID] Tip: pass location_abbr = \"Swiss\" (or similar) ",
+                "to get more meaningful fallback IDs instead of the 'Unk' default.")
+      }
     }
   }
 
@@ -859,8 +1002,14 @@ wildcloud_to_movebank <- function(
   # Some firmware version strings in reference data are internal names that
   # correspond to a known firmware schedule. Map them before the config join.
   firmware_aliases <- c(
-    "spring2025bat" = "30Days",
-    "TenDay"        = "10Day"
+    "spring2025bat"                          = "30Days",
+    "TenDay"                                 = "10Day",
+    # FineScalePressure variants seen in reference data
+    "NanofoxFineScalePressure"               = "FineScalePressure",
+    "NanoFoxFineScalePressure"               = "FineScalePressure",
+    "nanofox_fine_scale_pressure"            = "FineScalePressure",
+    "FineScalePressure30Days"                = "FineScalePressure",
+    "NANOFOX FINE-SCALE PRESSURE 30 DAYS V"  = "FineScalePressure"
   )
   animals_mb$firmware_version <- ifelse(
     animals_mb$firmware_version %in% names(firmware_aliases),
@@ -1333,6 +1482,7 @@ wildcloud_to_movebank <- function(
     mutate(
       .min_temp_range = dplyr::coalesce(
         if ("min_temp_range [°C]" %in% names(.)) as.character(`min_temp_range [°C]`) else NA_character_,
+        if ("Min temperature of last 3 hrs (°C)" %in% names(.)) as.character(`Min temperature of last 3 hrs (°C)`) else NA_character_,
         if ("Min temperature of last 3 hrs (temperature range °C)" %in% names(.)) as.character(`Min temperature of last 3 hrs (temperature range °C)`) else NA_character_
       ),
       # Treat literal "N/A", "NA", "" as true NA
@@ -1346,6 +1496,42 @@ wildcloud_to_movebank <- function(
     transmute(
       `tag ID`,
       `minimum temperature` = .min_temp_range,
+      timestamp             = timestamp_str,
+      `start timestamp`     = time_start_str,
+      `end timestamp`       = time_end_str,
+      `sequence number`     = `Sequence Number`,
+      `Sigfox computed location radius`,
+      `Sigfox computed location source`,
+      `Sigfox computed location status`,
+      `Sigfox LQI`,
+      `Sigfox link quality`,
+      `Sigfox country`,
+      `Sigfox base stations`,
+      `Sigfox payload`,
+      `sensor type` = "Derived"
+    ) %>%
+    left_join(
+      animals_mb %>% dplyr::select(Tag.ID, Movebank.Project, Animal.ID),
+      by = c("tag ID" = "Tag.ID")
+    )
+
+  # ---- Max temp (FineScalePressure firmware only) ----
+  max_temp_data <- movebank_base %>%
+    mutate(
+      .max_temp_range = dplyr::coalesce(
+        if ("max_temp_range [°C]" %in% names(.)) as.character(`max_temp_range [°C]`) else NA_character_,
+        if ("Max temperature of last 3 hrs (°C)" %in% names(.)) as.character(`Max temperature of last 3 hrs (°C)`) else NA_character_
+      ),
+      .max_temp_range = ifelse(
+        is.na(.max_temp_range) | trimws(.max_temp_range) %in% c("", "N/A", "NA", "n/a"),
+        NA_character_,
+        .max_temp_range
+      )
+    ) %>%
+    filter(!is.na(.max_temp_range)) %>%
+    transmute(
+      `tag ID`,
+      `maximum temperature` = .max_temp_range,
       timestamp             = timestamp_str,
       `start timestamp`     = time_start_str,
       `end timestamp`       = time_end_str,
@@ -1497,6 +1683,7 @@ wildcloud_to_movebank <- function(
   # ---- write ----
   write_movebank_upload_csvs(
     loc_data, vedba_data, bar_data, temp_data, min_temp_data, deployment_data,
+    max_temp_data = max_temp_data,
     output_dir = output_dir
   )
 
@@ -1508,6 +1695,7 @@ wildcloud_to_movebank <- function(
     bar_data        = bar_data,
     temp_data       = temp_data,
     min_temp_data   = min_temp_data,
+    max_temp_data   = max_temp_data,
     deployment_data = deployment_data,
     sampling_config = fw_config
   )
@@ -1536,6 +1724,7 @@ if (FALSE) {
     force_tag_model_family = "NanoFox",
     force_firmware_version = "30Days",
     force_vedba_count = 504,
+    location_abbr         = "Swiss",  # used in fallback Animal.ID, e.g. Nnoc25_01_Swiss_9EC016
     movebank_project_name = "ICARUS Bats. Nyctalus leisleri Nyctalus noctula. Thurgau, Switzerland"
   )
 
@@ -1547,6 +1736,7 @@ if (FALSE) {
     force_tag_model_family = "NanoFox",
     force_firmware_version = "30Days",
     force_vedba_count = 504,
+    location_abbr         = "Swiss",
     movebank_project_name = "ICARUS Bats. Nyctalus leisleri Nyctalus noctula. Thurgau, Switzerland",
     correct_drift         = TRUE,
     programmed_interval   = 3 * 3600,       # 3-hour schedule; NULL to infer per tag
@@ -1575,6 +1765,7 @@ if (FALSE) {
     animals_path          = "../../../Dropbox/MPI/Noctule/Data/movebank/Switzerland/swiss_MPIAB_captures.xlsx",
     output_dir            = "../../../Dropbox/MPI/Noctule/Data/movebank/Switzerland/movebank/",
     movebank_project_name = "ICARUS Bats. Nyctalus leisleri Nyctalus noctula. Thurgau, Switzerland",
+    location_abbr         = "Swiss",
     sampling_config       = my_config
   )
 }
