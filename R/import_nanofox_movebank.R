@@ -246,30 +246,30 @@ import_nanofox_movebank <- function(
     # assignments and stretching deployment time windows.
 
     td <- move2::mt_track_data(x)
-    if (!any(vapply(td, vctrs::is_list, logical(1)))) return(x)
+    if (!any(vapply(td, base::is_list, logical(1)))) return(x)
 
     .msg("  Track data has list-columns; resolving multiple deployments per individual.")
 
     # Step 1: collapse columns where all entries are identical across deployments
     td <- td %>%
       dplyr::mutate(dplyr::across(
-        dplyr::where(~vctrs::is_list(.x) &&
+        dplyr::where(~base::is_list(.x) &&
                        all(purrr::map_lgl(.x, function(y) length(unique(y)) == 1L))),
         ~do.call(vctrs::vec_c, purrr::map(.x, utils::head, 1L))
       ))
 
     # Step 2: stringify remaining list-columns (values differ across deployments)
-    if (any(vapply(td, vctrs::is_list, logical(1)))) {
+    if (any(vapply(td, base::is_list, logical(1)))) {
       td <- td %>%
         dplyr::mutate(dplyr::across(
-          dplyr::where(~vctrs::is_list(.x) &&
+          dplyr::where(~base::is_list(.x) &&
                          any(purrr::map_lgl(.x, function(y) length(unique(y)) != 1L))),
           ~unlist(purrr::map(.x, paste, collapse = ","))
         ))
     }
 
     if (isTRUE(verbose)) {
-      list_cols <- names(td)[vapply(td, vctrs::is_list, logical(1))]
+      list_cols <- names(td)[vapply(td, base::is_list, logical(1))]
       if (length(list_cols) == 0)
         .msg("  Track data list-columns resolved.")
       else
