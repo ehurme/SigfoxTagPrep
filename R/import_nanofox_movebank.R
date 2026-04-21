@@ -1187,6 +1187,24 @@ import_nanofox_movebank <- function(
       b_daily <- .safe_try(mt_add_daily_sensor_metrics(b_all = x, b_daily = b_daily,
                                                        tz = tz, day_anchor_hour = 12),
                            "mt_add_daily_sensor_metrics") %||% b_daily
+
+    # ---- diff_date: days elapsed between consecutive daily fixes per deployment ----
+    # For a perfect daily dataset every value is 1.
+    # Values > 1 indicate gaps (missed days); NA at the first fix of each deployment.
+    # Grouped by deployment_id when available (finest grouping), so gaps don't
+    # bleed across deployments for multi-deployment individuals.
+    b_daily$date <- as.Date(b_daily$timestamp)
+    grp_vec <- as.character(b_daily[[move2::mt_track_id_column(b_daily)]])
+    b_daily$diff_date <- ave(
+      as.numeric(b_daily$date),
+      grp_vec,
+      FUN = function(d) c(NA_real_, diff(d))
+    )
+
+    .msg("  diff_date: ", sum(b_daily$diff_date == 1, na.rm = TRUE),
+         " consecutive day pairs, ",
+         sum(b_daily$diff_date > 1, na.rm = TRUE), " gaps (>1 day).")
+
     b_daily
   }
 
