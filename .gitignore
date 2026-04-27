@@ -38,3 +38,4 @@ rsconnect/
 .DS_Store
 .quarto
 migration_hmm.stan
+.positai
