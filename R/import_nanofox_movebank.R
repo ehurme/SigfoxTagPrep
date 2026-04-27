@@ -313,6 +313,15 @@ import_nanofox_movebank <- function(
     #   tag_local_identifier           — which physical tag was on the animal
     #   deployment_id                  — deployment-level grouping key
 
+    # Coerce deployment_id in track data to character before any join so that
+    # mt_as_event_attribute() doesn't fail on int64 vs character type mismatch.
+    td <- tryCatch(move2::mt_track_data(x), error = function(e) NULL)
+    if (!is.null(td) && "deployment_id" %in% names(td) &&
+        !is.character(td$deployment_id)) {
+      td$deployment_id <- as.character(td$deployment_id)
+      x <- tryCatch(move2::mt_set_track_data(x, td), error = function(e) x)
+    }
+
     x <- .safe_try(x %>% mt_as_event_attribute("taxon_canonical_name") %>%
                      mutate(species = taxon_canonical_name),
                    "mt_as_event_attribute(taxon_canonical_name)") %||% x
@@ -326,16 +335,16 @@ import_nanofox_movebank <- function(
   }
 
   .set_tag_type <- function(x, study_id_current = NULL) {
-    allowed <- c("uWasp", "nanofox")
+    allowed <- c("uWasp", "nanofox", "tinyfox")
 
     .classify_model <- function(s) {
       s <- as.character(s)
-      out <- dplyr::case_when(
-        grepl("uWasp|SigfoxGH", s, ignore.case = TRUE) ~ "uWasp",
-        grepl("Nano|NanoFox",  s, ignore.case = TRUE) ~ "nanofox",
+      dplyr::case_when(
+        grepl("uWasp|SigfoxGH",          s, ignore.case = TRUE) ~ "uWasp",
+        grepl("Nano|NanoFox",            s, ignore.case = TRUE) ~ "nanofox",
+        grepl("Tiny|TinyFox|TinyFoxBat", s, ignore.case = TRUE) ~ "tinyfox",
         TRUE ~ NA_character_
       )
-      out
     }
 
     # 1) Prefer existing event-level tag_type if it is already valid.
@@ -1107,9 +1116,9 @@ import_nanofox_movebank <- function(
   .select_daily_daytime_only <- function(x) {
     if (!inherits(x, c("move2", "sf"))) stop("x must be a move2/sf object")
     hr <- lubridate::hour(x$timestamp)
-    flying_window <- hr >= 20 | hr < 4
+    flying_window <- hr >= 21 | hr < 5
     .msg("  [daytime_only] Removing ", sum(flying_window, na.rm = TRUE),
-         " fixes in 20:00-04:00 UTC flight window.")
+         " fixes in 21:00-05:00 UTC flight window.")
     x_day <- x[!flying_window, ]
     if (nrow(x_day) == 0) { warning("[daytime_only] No fixes remain."); return(NULL) }
     if (!exists("mt_thin_daily_solar_noon", mode = "function"))
@@ -1172,7 +1181,7 @@ import_nanofox_movebank <- function(
         .safe_try(mt_thin_daily_solar_noon(x, tz = tz), "mt_thin_daily_solar_noon")
       },
       "daytime_only" = {
-        .msg("Daily method: daytime_only (excludes 20:00-04:00 UTC)")
+        .msg("Daily method: daytime_only (excludes 21:00-05:00 UTC)")
         .safe_try(.select_daily_daytime_only(x), "select_daily_daytime_only")
       },
       "noon_roost" = {
@@ -1282,30 +1291,34 @@ import_nanofox_movebank <- function(
       if (orig_track_col == "deployment_id") {
         b
       } else if ("deployment_id" %in% names(orig_td)) {
-        # ---- Promote deployment_id to event column ----
-        dep_lkp <- stats::setNames(as.character(orig_td$deployment_id),
-                                   as.character(orig_td[[orig_track_col]]))
-        b$deployment_id <- as.character(dep_lkp[as.character(move2::mt_track_id(b))])
+
+        # ---- Coerce track data deployment_id to character immediately ----
+        # This prevents mt_as_event_attribute() join failures caused by
+        # int64 (track data) vs character (event col) type mismatch.
+        orig_td$deployment_id <- as.character(orig_td$deployment_id)
+
+        # ---- Build deployment_id event column from mt_track_id ----
+        # Use mt_track_id(b) rather than b[[orig_track_col]] because the
+        # original track id column may not exist as an event column.
+        track_id_vec <- as.character(move2::mt_track_id(b))
+        dep_lkp      <- stats::setNames(
+          as.character(orig_td$deployment_id),
+          as.character(orig_td[[orig_track_col]])
+        )
+        b$deployment_id <- as.character(dep_lkp[track_id_vec])
 
         # ---- Swap track id attribute (preserves track data intact) ----
         attr(b, "track_id_column") <- "deployment_id"
 
-        # ---- Re-index track data so its key column is deployment_id ----
-        # orig_td has one row per original track (e.g. individual).
-        # We need one row per deployment.  Join on original track id → deployment_id.
+        # ---- Re-index track data so deployment_id is the key column ----
+        # orig_td already has deployment_id (it came from Movebank track data).
+        # We just need to: coerce it to character, move it to position 1,
+        # and drop the old track id column (e.g. individual_local_identifier).
+        # No join required — orig_td is already one row per deployment.
         new_td <- orig_td %>%
-          dplyr::mutate(!!orig_track_col := as.character(.data[[orig_track_col]])) %>%
-          dplyr::left_join(
-            tibble::tibble(
-              ..orig_key = as.character(b[[orig_track_col]]),
-              deployment_id = as.character(b$deployment_id)
-            ) %>% dplyr::distinct(),
-            by = stats::setNames("..orig_key", orig_track_col)
-          ) %>%
-          # Put deployment_id first (move2 uses first column as track key)
+          dplyr::mutate(deployment_id = as.character(deployment_id)) %>%
           dplyr::select(deployment_id, dplyr::everything(),
-                        -dplyr::any_of(orig_track_col)) %>%
-          dplyr::distinct(deployment_id, .keep_all = TRUE)
+                        -dplyr::any_of(setdiff(orig_track_col, "deployment_id")))
 
         b <- move2::mt_set_track_data(b, new_td)
 

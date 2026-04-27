@@ -760,35 +760,13 @@ wildcloud_to_movebank <- function(
     }
     loc_abbr <- rep(loc_abbr_val, nrow(animals))
 
-    # Per-year-per-species counter — only for rows needing the fallback
     needs_fallback <- is.na(pit_vals) & is.na(ring_vals) & is.na(aid_vals) & !is.na(tag_vals)
 
-    counter_vals <- rep(NA_character_, nrow(animals))
-    if (any(needs_fallback)) {
-      fb_df <- data.frame(
-        .row = seq_len(nrow(animals)),
-        .sp  = species_abbr,
-        .yr  = year_vals,
-        .fb  = needs_fallback,
-        stringsAsFactors = FALSE
-      )
-      fb_df$.counter <- NA_integer_
-      # Order by row then group by species+year, assign sequential counters
-      for (grp in unique(paste(fb_df$.sp[fb_df$.fb], fb_df$.yr[fb_df$.fb]))) {
-        sp <- strsplit(grp, " ", fixed = TRUE)[[1]][1]
-        yr <- strsplit(grp, " ", fixed = TRUE)[[1]][2]
-        idx <- which(fb_df$.fb & fb_df$.sp == sp & fb_df$.yr == yr)
-        fb_df$.counter[idx] <- seq_along(idx)
-      }
-      counter_vals <- ifelse(!is.na(fb_df$.counter),
-                             sprintf("%02d", fb_df$.counter),
-                             NA_character_)
-    }
-
-    # Assemble structured fallback ID
+    # Assemble structured fallback ID: Gspp + YY + _ + Loc + _ + TagID
+    # e.g. Nnoc25_Swiss_9EC016
     structured_fallback <- ifelse(
       needs_fallback,
-      paste0(species_abbr, year_vals, "_", counter_vals, "_", loc_abbr, "_", tag_vals),
+      paste0(species_abbr, year_vals, "_", loc_abbr, "_", tag_vals),
       NA_character_
     )
 
@@ -814,11 +792,8 @@ wildcloud_to_movebank <- function(
     if (n_fallback > 0) {
       sample_ids <- head(animals$Animal.ID[animals$id_source == "structured_fallback"], 3)
       message(sprintf(
-        "[ID] %d deployment(s) use structured fallback ID (e.g. %s). ",
-        n_fallback, paste(sample_ids, collapse = ", ")),
-        "These IDs are deterministic per species+year+location+tag — a retrap ",
-        "with the same tag will produce the same ID, but a retrap with a ",
-        "NEW tag will appear as a separate individual.")
+        "[ID] %d deployment(s) use structured fallback ID (e.g. %s).",
+        n_fallback, paste(sample_ids, collapse = ", ")))
       if (loc_abbr_val == "Unk") {
         message("[ID] Tip: pass location_abbr = \"Swiss\" (or similar) ",
                 "to get more meaningful fallback IDs instead of the 'Unk' default.")
@@ -907,6 +882,11 @@ wildcloud_to_movebank <- function(
       firmware_version    = safe_col(fw_col),
       Movebank.Project    = movebank_project_name
     )
+
+  # ---- deployment ID: Animal.ID + Tag.ID ----
+  # Uniquely identifies each deployment (same animal can have multiple tags).
+  # e.g. "00074F6A37_1221C6E" or "Nnoc25_Swiss_9EC016_9EC016"
+  animals_mb$Deployment.ID <- paste0(animals_mb$Animal.ID, "_", animals_mb$Tag.ID)
 
   # ---- standardize values ----
 
@@ -1564,6 +1544,7 @@ wildcloud_to_movebank <- function(
 
   deploy_df <- animals_mb %>%
     transmute(
+      deployment.id        = Deployment.ID,
       tag.id               = Tag.ID,
       animal.taxon         = Species,
       animal.life.stage    = `animal.life.stage`,
@@ -1669,7 +1650,7 @@ wildcloud_to_movebank <- function(
   # Clean up and reorder deploy.off.date next to deploy.on.date
   deployment_data <- deploy_df %>%
     dplyr::select(
-      tag.id, animal.taxon, animal.life.stage, animal.sex, animal.mass,
+      deployment.id, tag.id, animal.taxon, animal.life.stage, animal.sex, animal.mass,
       animal.forearm.length, animal.reproductive.condition,
       deploy.on.date, deploy.off.date,
       animal.id, animal.ring.id, animal.marker.id, animal.id.source,
