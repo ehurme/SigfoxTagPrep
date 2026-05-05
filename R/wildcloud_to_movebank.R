@@ -122,10 +122,10 @@ get_default_sampling_config <- function() {
     #   min temp range 3hr
     "NanoFox",     "30Days",          504,      1.0,    28,    120,   18,      "windowed_sum",      "1s burst @ 28Hz, every 2min, 36min window",
 
-    # FineScalePressure: same VeDBA as 30Days (504 vedba_count).
+    # 30DaysFineScalePressure: same VeDBA as 30Days (504 vedba_count).
     #   Instead of 5 avg temperature windows, reports 5 PRESSURE measurements.
     #   Also reports max AND min temperature over last 3 hours.
-    "NanoFox",     "FineScalePressure", 504,    1.0,    28,    120,   18,      "windowed_sum",      "same VeDBA as 30Days; 5×pressure instead of 5×temp",
+    "NanoFox",     "30DaysFineScalePressure", 504,    1.0,    28,    120,   18,      "windowed_sum",      "same VeDBA as 30Days; 5×pressure instead of 5×temp",
     # DailyVeDBA: 1s bursts at 28 Hz, every 3 min, for 1 day
     "NanoFox",     "DailyVeDBA",      13440,    1.0,    28,    180,   480,     "windowed_sum",      "1s burst @ 28Hz, every 3min, 24hr window",
 
@@ -193,7 +193,7 @@ harmonize_wc_columns <- function(df) {
     # ---- summary sensors (3-hr or other window) ----
     # Min pressure: narrow pattern that will NOT match bin-style "Pressure X min ago"
     "Min pressure of last 3 hrs (mbar)"  = "^Min\\.?\\s*pressure",
-    # Min temperature: matches legacy range-label ">10", new numeric, and FineScalePressure variants
+    # Min temperature: matches legacy range-label ">10", new numeric, and 30DaysFineScalePressure variants
     "Min temperature of last 3 hrs (°C)" =
       "^Min\\.?\\s*temp(erature)?\\s*(of|range|\\()",
     # Max temperature: new in FineScalePressure firmware
@@ -989,11 +989,11 @@ wildcloud_to_movebank <- function(
     "spring2025bat"                          = "30Days",
     "TenDay"                                 = "10Day",
     # FineScalePressure variants seen in reference data
-    "NanofoxFineScalePressure"               = "FineScalePressure",
-    "NanoFoxFineScalePressure"               = "FineScalePressure",
-    "nanofox_fine_scale_pressure"            = "FineScalePressure",
-    "FineScalePressure30Days"                = "FineScalePressure",
-    "NANOFOX FINE-SCALE PRESSURE 30 DAYS V"  = "FineScalePressure"
+    "NanofoxFineScalePressure"               = "30DaysFineScalePressure",
+    "NanoFoxFineScalePressure"               = "30DaysFineScalePressure",
+    "nanofox_fine_scale_pressure"            = "30DaysFineScalePressure",
+    "FineScalePressure30Days"                = "30DaysFineScalePressure",
+    "NANOFOX FINE-SCALE PRESSURE 30 DAYS V"  = "30DaysFineScalePressure"
   )
   animals_mb$firmware_version <- ifelse(
     animals_mb$firmware_version %in% names(firmware_aliases),
@@ -1738,7 +1738,7 @@ if (FALSE) {
     animals_path          = "../../../Dropbox/MPI/Noctule/Data/movebank/Switzerland/swiss_MPIAB_captures.xlsx",
     output_dir            = "../../../Dropbox/MPI/Noctule/Data/movebank/Switzerland/movebank/",
     force_tag_model_family = "NanoFox",
-    force_firmware_version = "30Days",
+    force_firmware_version = "30Days", # "30DaysFSP"
     force_vedba_count = 504,
     location_abbr         = "Swiss",  # used in fallback Animal.ID, e.g. Nnoc25_01_Swiss_9EC016
     movebank_project_name = "ICARUS Bats. Nyctalus leisleri Nyctalus noctula. Thurgau, Switzerland"
