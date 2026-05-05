@@ -312,24 +312,67 @@ import_nanofox_movebank <- function(
     #   sex                            — individual attribute
     #   tag_local_identifier           — which physical tag was on the animal
     #   deployment_id                  — deployment-level grouping key
+    #
+    # All factor/ordered columns are coerced to character to prevent level-set
+    # conflicts when stacking objects from different studies.
 
-    # Coerce deployment_id in track data to character before any join so that
-    # mt_as_event_attribute() doesn't fail on int64 vs character type mismatch.
+    # ---- Coerce track data int64/factor/ordered → character before joins ----
     td <- tryCatch(move2::mt_track_data(x), error = function(e) NULL)
-    if (!is.null(td) && "deployment_id" %in% names(td) &&
-        !is.character(td$deployment_id)) {
-      td$deployment_id <- as.character(td$deployment_id)
-      x <- tryCatch(move2::mt_set_track_data(x, td), error = function(e) x)
+    if (!is.null(td)) {
+      changed <- FALSE
+      for (nm in names(td)) {
+        v <- td[[nm]]
+        if (inherits(v, "integer64") || is.factor(v) || is.ordered(v)) {
+          td[[nm]] <- as.character(v); changed <- TRUE
+        }
+      }
+      if (changed)
+        x <- tryCatch(move2::mt_set_track_data(x, td), error = function(e) x)
     }
 
-    x <- .safe_try(x %>% mt_as_event_attribute("taxon_canonical_name") %>%
-                     mutate(species = taxon_canonical_name),
-                   "mt_as_event_attribute(taxon_canonical_name)") %||% x
-
+    # ---- Promote attributes from track data to event columns ----
     for (attr in c("sex", "model", "attachment_comments",
                    "tag_local_identifier", "deployment_id"))
-      x <- .safe_try(x %>% mt_as_event_attribute(attr),
+      x <- .safe_try(x %>% mt_as_event_attribute(attr, .keep = TRUE),
                      paste0("mt_as_event_attribute(", attr, ")")) %||% x
+
+    # ---- taxon_canonical_name + species: direct track-data lookup ----
+    # mt_as_event_attribute is fragile when factor levels or type mismatches exist
+    # between event and track data columns.  A direct lookup by mt_track_id() is
+    # guaranteed to work regardless of column types.
+    .fill_from_td <- function(x, td_col, event_col) {
+      td <- tryCatch(move2::mt_track_data(x), error = function(e) NULL)
+      if (is.null(td)) return(x)
+      taxon_src <- intersect(c(td_col, "taxon_canonical_name", "species",
+                               "individual_taxon_canonical_name"), names(td))[1]
+      if (is.na(taxon_src)) return(x)
+      id_col <- move2::mt_track_id_column(x)
+      if (!id_col %in% names(td)) return(x)
+      lkp <- stats::setNames(as.character(td[[taxon_src]]),
+                             as.character(td[[id_col]]))
+      vals <- unname(lkp[as.character(move2::mt_track_id(x))])
+      # Only fill if result is better (non-NA) than what is there already
+      if (!event_col %in% names(x) || all(is.na(x[[event_col]])))
+        x[[event_col]] <- vals
+      else {
+        missing <- is.na(x[[event_col]])
+        x[[event_col]][missing] <- vals[missing]
+      }
+      x
+    }
+
+    x <- .fill_from_td(x, "taxon_canonical_name", "taxon_canonical_name")
+    x <- .fill_from_td(x, "taxon_canonical_name", "species")
+    x$taxon_canonical_name <- as.character(x$taxon_canonical_name)
+    x$species              <- as.character(x$species)
+
+    # ---- Coerce all factor/ordered event columns → character ----
+    geom_col <- if (inherits(x, "sf")) attr(x, "sf_column") else character(0)
+    for (nm in setdiff(names(x), geom_col)) {
+      v <- x[[nm]]
+      if (is.factor(v) || is.ordered(v))
+        x[[nm]] <- as.character(v)
+    }
 
     x
   }
@@ -1402,13 +1445,24 @@ import_nanofox_movebank <- function(
       b_daily2 <- add_prev_latlon(b_daily2)
     }
 
-    # Temporal covariates on all three objects
+    # Temporal covariates + final cleanup on all three objects
     for (obj_name in c("b", "b_loc", "b_daily2")) {
       obj <- get(obj_name)
       if (!is.null(obj) && nrow(obj) > 0) {
-        obj$year   <- factor(lubridate::year(obj$timestamp))
-        obj$yday   <- factor(lubridate::yday(obj$timestamp))
+        obj$year   <- as.character(lubridate::year(obj$timestamp))
+        obj$yday   <- as.character(lubridate::yday(obj$timestamp))
         obj$season <- ifelse(lubridate::month(obj$timestamp) > 7, "Fall", "Spring")
+        # Guarantee species and taxon_canonical_name on every output object.
+        # .make_location_metrics filters rows but preserves event columns;
+        # re-apply the direct lookup in case any filtering discarded the value.
+        obj <- .fill_from_td(obj, "taxon_canonical_name", "taxon_canonical_name")
+        obj <- .fill_from_td(obj, "taxon_canonical_name", "species")
+        obj$taxon_canonical_name <- as.character(obj$taxon_canonical_name)
+        obj$species              <- as.character(obj$species)
+        # Coerce factors/ordered → character for merge safety
+        obj <- .normalise_cols(obj)
+        # Drop all-NA columns
+        obj <- .drop_all_na_cols(obj)
         assign(obj_name, obj)
       }
     }
@@ -1434,6 +1488,29 @@ import_nanofox_movebank <- function(
         obj[[col]] <- as.numeric(obj[[col]])
     }
     obj
+  }
+
+  # ---------------------------------------------------------------------------
+  # .drop_all_na_cols() — remove columns where every value (non-geometry) is NA
+  #
+  # Keeps geometry and move2 metadata intact. Applied to all three output objects
+  # (full, location, daily) per study and after merging so analysts never see
+  # columns that are entirely empty.
+  # ---------------------------------------------------------------------------
+  .drop_all_na_cols <- function(x) {
+    if (is.null(x) || nrow(x) == 0) return(x)
+    geom_col <- if (inherits(x, "sf")) attr(x, "sf_column") else character(0)
+    keep <- vapply(names(x), function(nm) {
+      if (nm %in% geom_col) return(TRUE)          # always keep geometry
+      v <- x[[nm]]
+      if (inherits(v, "sfc")) return(TRUE)         # always keep sfc columns
+      !all(is.na(v))
+    }, logical(1))
+    dropped <- names(x)[!keep]
+    if (length(dropped) > 0)
+      .msg("  Dropping ", length(dropped), " all-NA column(s): ",
+           paste(dropped, collapse = ", "))
+    x[, keep, drop = FALSE]
   }
 
   # ---------------------------------------------------------------------------
@@ -1587,6 +1664,18 @@ import_nanofox_movebank <- function(
   full_merged  <- if (isTRUE(merge_studies)) merge_stack(lapply(res_list, `[[`, "full"))     else lapply(res_list, `[[`, "full")
   loc_merged   <- if (isTRUE(merge_studies)) merge_stack(lapply(res_list, `[[`, "location")) else lapply(res_list, `[[`, "location")
   daily_merged <- if (isTRUE(merge_studies)) merge_stack(lapply(res_list, `[[`, "daily"))    else lapply(res_list, `[[`, "daily")
+
+  # ---------------------------------------------------------------------------
+  # Post-merge: drop all-NA columns from merged outputs
+  # ---------------------------------------------------------------------------
+  if (isTRUE(merge_studies)) {
+    if (!is.null(full_merged)  && nrow(full_merged)  > 0)
+      full_merged  <- .drop_all_na_cols(full_merged)
+    if (!is.null(loc_merged)   && nrow(loc_merged)   > 0)
+      loc_merged   <- .drop_all_na_cols(loc_merged)
+    if (!is.null(daily_merged) && nrow(daily_merged) > 0)
+      daily_merged <- .drop_all_na_cols(daily_merged)
+  }
 
   # ---------------------------------------------------------------------------
   # Summaries

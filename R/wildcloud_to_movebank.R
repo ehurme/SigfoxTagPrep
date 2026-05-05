@@ -349,7 +349,7 @@ wc_wide_to_mb_long <- function(df) {
   ))
 
   df <- df %>%
-    mutate(
+    dplyr::mutate(
       `timestamp SF transmission` = parse_wc_time_utc(`Time (UTC)`)
     ) %>%
     split_position_wc()
@@ -377,21 +377,21 @@ wc_wide_to_mb_long <- function(df) {
   )
 
   base <- df[, base_cols, drop = FALSE] %>%
-    mutate(.row_id = dplyr::row_number())
+    dplyr::mutate(.row_id = dplyr::row_number())
 
   build_36min_long <- function(value_cols, value_name) {
     if (length(value_cols) == 0) return(NULL)
 
     df %>%
-      mutate(.row_id = dplyr::row_number()) %>%
+      dplyr::mutate(.row_id = dplyr::row_number()) %>%
       dplyr::select(.row_id, all_of(value_cols)) %>%
-      left_join(base, by = ".row_id") %>%
+      dplyr::left_join(base, by = ".row_id") %>%
       tidyr::pivot_longer(
         cols = all_of(value_cols),
         names_to = "metric",
         values_to = value_name
       ) %>%
-      mutate(
+      dplyr::mutate(
         minutes_ago = suppressWarnings(as.numeric(stringr::str_extract(metric, "\\d+"))),
         .end = `timestamp SF transmission` - as.difftime(minutes_ago, units = "mins"),
         `Time end`   = .end,
@@ -410,7 +410,7 @@ wc_wide_to_mb_long <- function(df) {
   if (!is.null(pres_bin_long)) pres_bin_long$`pressure [mbar]` <- suppressWarnings(as.numeric(pres_bin_long$`pressure [mbar]`))
 
   three_hr_base <- base %>%
-    mutate(
+    dplyr::mutate(
       `Time start` = `timestamp SF transmission` - as.difftime(180, units = "mins"),
       `Time end`   = `timestamp SF transmission`
     )
@@ -419,7 +419,7 @@ wc_wide_to_mb_long <- function(df) {
   pres_long <- NULL
   if (!is.null(min_pres_col)) {
     pres_long <- three_hr_base %>%
-      mutate(`pressure [mbar]` = suppressWarnings(as.numeric(df[[min_pres_col]]))) %>%
+      dplyr::mutate(`pressure [mbar]` = suppressWarnings(as.numeric(df[[min_pres_col]]))) %>%
       dplyr::select(-.row_id)
   }
 
@@ -427,7 +427,7 @@ wc_wide_to_mb_long <- function(df) {
   min_temp_long <- NULL
   if (!is.null(min_temp_col)) {
     min_temp_long <- three_hr_base %>%
-      mutate(`min_temp_range [°C]` = as.character(df[[min_temp_col]])) %>%
+      dplyr::mutate(`min_temp_range [°C]` = as.character(df[[min_temp_col]])) %>%
       dplyr::select(-.row_id)
   }
 
@@ -435,12 +435,12 @@ wc_wide_to_mb_long <- function(df) {
   max_temp_long <- NULL
   if (!is.null(max_temp_col)) {
     max_temp_long <- three_hr_base %>%
-      mutate(`max_temp_range [°C]` = as.character(df[[max_temp_col]])) %>%
+      dplyr::mutate(`max_temp_range [°C]` = as.character(df[[max_temp_col]])) %>%
       dplyr::select(-.row_id)
   }
 
   loc_rows <- base %>%
-    mutate(
+    dplyr::mutate(
       `Time start` = `timestamp SF transmission`,
       `Time end`   = `timestamp SF transmission`,
       mb_record_type = "location"
@@ -449,12 +449,12 @@ wc_wide_to_mb_long <- function(df) {
 
   out <- dplyr::bind_rows(
     loc_rows,
-    if (!is.null(vedba_long))    vedba_long    %>% mutate(mb_record_type = "vedba")          %>% dplyr::select(-.row_id),
-    if (!is.null(temp_long))     temp_long     %>% mutate(mb_record_type = "temperature")    %>% dplyr::select(-.row_id),
-    if (!is.null(pres_bin_long)) pres_bin_long %>% mutate(mb_record_type = "pressure_bin")   %>% dplyr::select(-.row_id),
-    if (!is.null(pres_long))     pres_long     %>% mutate(mb_record_type = "pressure"),
-    if (!is.null(min_temp_long)) min_temp_long %>% mutate(mb_record_type = "min_temp_range"),
-    if (!is.null(max_temp_long)) max_temp_long %>% mutate(mb_record_type = "max_temp_range")
+    if (!is.null(vedba_long))    vedba_long    %>% dplyr::mutate(mb_record_type = "vedba")          %>% dplyr::select(-.row_id),
+    if (!is.null(temp_long))     temp_long     %>% dplyr::mutate(mb_record_type = "temperature")    %>% dplyr::select(-.row_id),
+    if (!is.null(pres_bin_long)) pres_bin_long %>% dplyr::mutate(mb_record_type = "pressure_bin")   %>% dplyr::select(-.row_id),
+    if (!is.null(pres_long))     pres_long     %>% dplyr::mutate(mb_record_type = "pressure"),
+    if (!is.null(min_temp_long)) min_temp_long %>% dplyr::mutate(mb_record_type = "min_temp_range"),
+    if (!is.null(max_temp_long)) max_temp_long %>% dplyr::mutate(mb_record_type = "max_temp_range")
   ) %>%
     dplyr::distinct(
       Device, `timestamp SF transmission`, `Time start`, `Time end`,
@@ -493,13 +493,13 @@ write_movebank_upload_csvs <- function(
     project_folder <- file.path(output_dir, "Projects", safe_proj_name)
     if (!fs::dir_exists(project_folder)) fs::dir_create(project_folder, recurse = TRUE)
 
-    loc_proj      <- loc_data      %>% filter(Movebank.Project == proj)
-    vedba_proj    <- vedba_data    %>% filter(Movebank.Project == proj)
-    bar_proj      <- bar_data      %>% filter(Movebank.Project == proj)
-    temp_proj     <- temp_data     %>% filter(Movebank.Project == proj)
-    min_temp_proj <- min_temp_data %>% filter(Movebank.Project == proj)
+    loc_proj      <- loc_data      %>% dplyr::filter(Movebank.Project == proj)
+    vedba_proj    <- vedba_data    %>% dplyr::filter(Movebank.Project == proj)
+    bar_proj      <- bar_data      %>% dplyr::filter(Movebank.Project == proj)
+    temp_proj     <- temp_data     %>% dplyr::filter(Movebank.Project == proj)
+    min_temp_proj <- min_temp_data %>% dplyr::filter(Movebank.Project == proj)
     dep_proj      <- deployment_data %>%
-      filter(Movebank.Project == proj) %>%
+      dplyr::filter(Movebank.Project == proj) %>%
       dplyr::select(-Movebank.Project)
 
     readr::write_csv(loc_proj,      file.path(project_folder, "data.csv"), na = "")
@@ -510,7 +510,7 @@ write_movebank_upload_csvs <- function(
     readr::write_csv(dep_proj,      file.path(project_folder, "deployment.csv"), na = "")
 
     if (!is.null(max_temp_data) && nrow(max_temp_data) > 0) {
-      max_temp_proj <- max_temp_data %>% filter(Movebank.Project == proj)
+      max_temp_proj <- max_temp_data %>% dplyr::filter(Movebank.Project == proj)
       readr::write_csv(max_temp_proj, file.path(project_folder, "dataMaxTemp.csv"), na = "")
     }
 
@@ -812,11 +812,11 @@ wildcloud_to_movebank <- function(
   # Report retraps: same animal with multiple tag deployments
   if (!is.null(tag_col)) {
     id_tag_map <- animals %>%
-      filter(!is.na(Animal.ID), Animal.ID != "") %>%
-      distinct(Animal.ID, .data[[tag_col]])
+      dplyr::filter(!is.na(Animal.ID), Animal.ID != "") %>%
+      dplyr::distinct(Animal.ID, .data[[tag_col]])
     multi_tag <- id_tag_map %>%
-      count(Animal.ID) %>%
-      filter(n > 1)
+      dplyr::count(Animal.ID) %>%
+      dplyr::filter(n > 1)
     if (nrow(multi_tag) > 0) {
       message(sprintf("[ID] %d individual(s) have multiple tag deployments (retraps):",
                       nrow(multi_tag)))
@@ -866,7 +866,7 @@ wildcloud_to_movebank <- function(
   }
 
   animals_mb <- animals %>%
-    mutate(
+    dplyr::mutate(
       Tag.ID              = .data[[tag_col]],
       Species             = species_vals,
       `animal.life.stage` = if (!is.null(life_stage)) life_stage else safe_col(stage_col),
@@ -883,10 +883,14 @@ wildcloud_to_movebank <- function(
       Movebank.Project    = movebank_project_name
     )
 
-  # ---- deployment ID: Animal.ID + Tag.ID ----
-  # Uniquely identifies each deployment (same animal can have multiple tags).
-  # e.g. "00074F6A37_1221C6E" or "Nnoc25_Swiss_9EC016_9EC016"
-  animals_mb$Deployment.ID <- paste0(animals_mb$Animal.ID, "_", animals_mb$Tag.ID)
+  # ---- deployment ID ----
+  # For animals with PIT/ring: Animal.ID + "_" + Tag.ID (e.g. "00074F6A37_1221C6E")
+  # For fallback IDs (where tag ID is already embedded in Animal.ID): just Animal.ID
+  animals_mb$Deployment.ID <- ifelse(
+    animals_mb$id_source %in% c("pit_tag", "ring"),
+    paste0(animals_mb$Animal.ID, "_", animals_mb$Tag.ID),
+    animals_mb$Animal.ID
+  )
 
   # ---- standardize values ----
 
@@ -1005,10 +1009,10 @@ wildcloud_to_movebank <- function(
 
   tag_fw_lookup <- animals_mb %>%
     dplyr::select(Tag.ID, tag_model_family, firmware_version) %>%
-    distinct() %>%
-    left_join(
+    dplyr::distinct() %>%
+    dplyr::left_join(
       fw_config %>%
-        filter(software_version != "all") %>%
+        dplyr::filter(software_version != "all") %>%
         dplyr::select(
           tag_model, software_version, vedba_count,
           burst_duration_s, burst_rate_hz,
@@ -1019,7 +1023,7 @@ wildcloud_to_movebank <- function(
     )
 
   model_defaults <- fw_config %>%
-    filter(software_version == "all") %>%
+    dplyr::filter(software_version == "all") %>%
     dplyr::select(
       tag_model,
       vedba_count_default = vedba_count,
@@ -1031,8 +1035,8 @@ wildcloud_to_movebank <- function(
     )
 
   tag_fw_lookup <- tag_fw_lookup %>%
-    left_join(model_defaults, by = c("tag_model_family" = "tag_model")) %>%
-    mutate(
+    dplyr::left_join(model_defaults, by = c("tag_model_family" = "tag_model")) %>%
+    dplyr::mutate(
       vedba_count         = dplyr::coalesce(vedba_count, vedba_count_default),
       burst_duration_s    = dplyr::coalesce(burst_duration_s, burst_duration_s_default),
       burst_rate_hz       = dplyr::coalesce(burst_rate_hz, burst_rate_hz_default),
@@ -1047,7 +1051,7 @@ wildcloud_to_movebank <- function(
     )
 
   animals_mb <- animals_mb %>%
-    left_join(tag_fw_lookup, by = c("Tag.ID", "tag_model_family", "firmware_version"))
+    dplyr::left_join(tag_fw_lookup, by = c("Tag.ID", "tag_model_family", "firmware_version"))
 
   if (!is.null(force_vedba_count)) {
     animals_mb$vedba_count <- force_vedba_count
@@ -1055,8 +1059,8 @@ wildcloud_to_movebank <- function(
 
   message("[firmware] Sampling config per model/firmware:")
   fw_summary <- animals_mb %>%
-    group_by(tag_model_family, firmware_version) %>%
-    summarise(
+    dplyr::group_by(tag_model_family, firmware_version) %>%
+    dplyr::summarise(
       n_tags = n(),
       vedba_count = first(vedba_count),
       .groups = "drop"
@@ -1101,7 +1105,7 @@ wildcloud_to_movebank <- function(
 
   # ---- normalize core columns ----
   if ("Time (UTC)" %in% names(movebank_df) && !"timestamp SF transmission" %in% names(movebank_df)) {
-    movebank_df <- movebank_df %>% mutate(`timestamp SF transmission` = parse_wc_time_utc(`Time (UTC)`))
+    movebank_df <- movebank_df %>% dplyr::mutate(`timestamp SF transmission` = parse_wc_time_utc(`Time (UTC)`))
   }
   if ("Position" %in% names(movebank_df) && !("latitude [°]" %in% names(movebank_df))) {
     movebank_df <- split_position_wc(movebank_df)
@@ -1126,7 +1130,7 @@ wildcloud_to_movebank <- function(
     lon_max <- if (!is.null(clean_lon_range)) max(clean_lon_range, na.rm = TRUE) else  Inf
 
     movebank_df <- movebank_df %>%
-      mutate(
+      dplyr::mutate(
         keep_row = ifelse(
           !is.na(`latitude [°]`) & !is.na(`longitude [°]`),
           `latitude [°]` >= lat_min & `latitude [°]` <= lat_max &
@@ -1134,7 +1138,7 @@ wildcloud_to_movebank <- function(
           TRUE
         )
       ) %>%
-      filter(keep_row) %>%
+      dplyr::filter(keep_row) %>%
       dplyr::select(-keep_row)
   }
 
@@ -1160,47 +1164,47 @@ wildcloud_to_movebank <- function(
 
     # ---- 1. Build transmission-level table (one row per Device × receipt) ----
     tx_level <- movebank_df %>%
-      filter(!is.na(`timestamp SF transmission`)) %>%
-      distinct(Device, `timestamp SF transmission`) %>%
-      arrange(Device, `timestamp SF transmission`)
+      dplyr::filter(!is.na(`timestamp SF transmission`)) %>%
+      dplyr::distinct(Device, `timestamp SF transmission`) %>%
+      dplyr::arrange(Device, `timestamp SF transmission`)
 
     # correct_time_drift needs start/end columns to compute window_duration_s.
     # At the transmission level the nominal window spans the full programmed
     # interval ending at receipt time.
     if (!is.null(programmed_interval)) {
       tx_level <- tx_level %>%
-        mutate(
+        dplyr::mutate(
           `Time end`   = `timestamp SF transmission`,
           `Time start` = `timestamp SF transmission` - as.difftime(programmed_interval, units = "secs")
         )
     } else {
       # If inferring, use the lag to the previous transmission as the window
       tx_level <- tx_level %>%
-        group_by(Device) %>%
-        mutate(
+        dplyr::group_by(Device) %>%
+        dplyr::mutate(
           `Time end`   = `timestamp SF transmission`,
           `Time start` = dplyr::coalesce(
-            lag(`timestamp SF transmission`),
+            dplyr::lag(`timestamp SF transmission`),
             `timestamp SF transmission`
           )
         ) %>%
-        ungroup()
+        dplyr::ungroup()
     }
 
     # ---- 2. Optionally attach mean temperature per transmission ----
     if (!is.null(drift_temp_col) && drift_temp_col %in% names(movebank_df)) {
       temp_summary <- movebank_df %>%
-        filter(!is.na(.data[[drift_temp_col]])) %>%
-        group_by(Device, `timestamp SF transmission`) %>%
-        summarise(!!drift_temp_col := mean(.data[[drift_temp_col]], na.rm = TRUE),
-                  .groups = "drop")
-      tx_level <- left_join(tx_level, temp_summary,
-                            by = c("Device", "timestamp SF transmission"))
+        dplyr::filter(!is.na(.data[[drift_temp_col]])) %>%
+        dplyr::group_by(Device, `timestamp SF transmission`) %>%
+        dplyr::summarise(!!drift_temp_col := mean(.data[[drift_temp_col]], na.rm = TRUE),
+                         .groups = "drop")
+      tx_level <- dplyr::left_join(tx_level, temp_summary,
+                                   by = c("Device", "timestamp SF transmission"))
     }
 
     n_tx <- nrow(tx_level)
     message(sprintf("[pipeline] %d unique transmissions across %d tags.",
-                    n_tx, n_distinct(tx_level$Device)))
+                    n_tx, dplyr::n_distinct(tx_level$Device)))
 
     # ---- 3. Run drift correction at transmission level ----
     if (n_tx > 0) {
@@ -1225,9 +1229,9 @@ wildcloud_to_movebank <- function(
                       drift_predicted, drift_source)
 
       movebank_df <- movebank_df %>%
-        left_join(drift_lookup,
-                  by = c("Device", "timestamp SF transmission")) %>%
-        mutate(drift_predicted = dplyr::coalesce(drift_predicted, 0))
+        dplyr::left_join(drift_lookup,
+                         by = c("Device", "timestamp SF transmission")) %>%
+        dplyr::mutate(drift_predicted = dplyr::coalesce(drift_predicted, 0))
 
       # ---- 5. Scale window offsets from receipt time ----
       # Each row's Time start / Time end were computed relative to the
@@ -1235,7 +1239,7 @@ wildcloud_to_movebank <- function(
       # (drift > 0) means more real time elapsed than the tag counted,
       # so offsets grow by (1 + drift).
       movebank_df <- movebank_df %>%
-        mutate(
+        dplyr::mutate(
           .offset_end_s   = as.numeric(difftime(`timestamp SF transmission`,
                                                 `Time end`, units = "secs")),
           .offset_start_s = as.numeric(difftime(`timestamp SF transmission`,
@@ -1278,7 +1282,7 @@ wildcloud_to_movebank <- function(
 
   # ---- base fields for derived Movebank columns ----
   movebank_base <- movebank_df %>%
-    mutate(
+    dplyr::mutate(
       `tag ID` = Device,
       `Sigfox computed location radius` =
         if ("Radius (m) (Source/Status)" %in% names(.))
@@ -1305,8 +1309,8 @@ wildcloud_to_movebank <- function(
 
   # ---- locations ----
   loc_data <- movebank_base %>%
-    filter(!is.na(`latitude [°]`), !is.na(`longitude [°]`)) %>%
-    transmute(
+    dplyr::filter(!is.na(`latitude [°]`), !is.na(`longitude [°]`)) %>%
+    dplyr::transmute(
       `tag ID`,
       `location lat`  = `latitude [°]`,
       `location long` = `longitude [°]`,
@@ -1324,7 +1328,7 @@ wildcloud_to_movebank <- function(
       `sensor type` = "sigfox-geolocation"
     ) %>%
     dplyr::left_join(
-      animals_mb %>% dplyr::select(Tag.ID, Movebank.Project, Animal.ID),
+      animals_mb %>% dplyr::select(Tag.ID, Movebank.Project, Animal.ID, Deployment.ID),
       by = c(`tag ID` = "Tag.ID")
     )
 
@@ -1336,8 +1340,8 @@ wildcloud_to_movebank <- function(
   #     is the DIFFERENCE between consecutive days' totals, divided by
   #     vedba_count (1440 bursts/day) for per-burst average
   vedba_data <- movebank_base %>%
-    filter(!is.na(`VeDBA [m/s²]`)) %>%
-    transmute(
+    dplyr::filter(!is.na(`VeDBA [m/s²]`)) %>%
+    dplyr::transmute(
       `tag ID`,
       `VeDBA sum`       = `VeDBA [m/s²]`,
       timestamp         = timestamp_str,
@@ -1354,14 +1358,14 @@ wildcloud_to_movebank <- function(
       `Sigfox payload`,
       `sensor type` = "acceleration"
     ) %>%
-    left_join(
-      animals_mb %>% dplyr::select(Tag.ID, Movebank.Project, Animal.ID,
+    dplyr::left_join(
+      animals_mb %>% dplyr::select(Tag.ID, Movebank.Project, Animal.ID, Deployment.ID,
                                    tag_model_family, firmware_version,
                                    vedba_count, burst_duration_s, burst_rate_hz,
                                    sampling_interval_s, sampling_count, vedba_type),
       by = c("tag ID" = "Tag.ID")
     ) %>%
-    mutate(
+    dplyr::mutate(
       `VeDBA avg` = ifelse(
         !is.na(vedba_count) & vedba_count > 0 & vedba_type == "windowed_sum",
         `VeDBA sum` / vedba_count,
@@ -1377,7 +1381,7 @@ wildcloud_to_movebank <- function(
       "[VeDBA] %d rows from cumulative-daily tags (TinyFoxBatt). VeDBA avg requires ",
       n_cumulative),
       "differencing consecutive transmissions — not computed automatically. ",
-      "Use the VeDBA sum column with lag() for daily VeDBA."
+      "Use the VeDBA sum column with dplyr::lag() for daily VeDBA."
     )
   }
 
@@ -1390,8 +1394,8 @@ wildcloud_to_movebank <- function(
                     n_vedba, n_avg_ok, 100 * n_avg_ok / n_vedba))
     if (n_avg_miss > 0) {
       miss_models <- vedba_data %>%
-        filter(is.na(`VeDBA avg`)) %>%
-        distinct(tag_model_family, firmware_version)
+        dplyr::filter(is.na(`VeDBA avg`)) %>%
+        dplyr::distinct(tag_model_family, firmware_version)
       warning(sprintf(
         "[VeDBA] %d rows have NA VeDBA avg (unknown vedba_count). ", n_avg_miss),
         "Affected model/firmware: ",
@@ -1403,14 +1407,14 @@ wildcloud_to_movebank <- function(
 
   # ---- Pressure ----
   bar_data <- movebank_base %>%
-    mutate(
+    dplyr::mutate(
       .pressure_mbar = dplyr::coalesce(
         if ("pressure [mbar]" %in% names(.)) `pressure [mbar]` else NA_real_,
         if ("Min pressure of last 3 hrs (mbar)" %in% names(.)) suppressWarnings(as.numeric(`Min pressure of last 3 hrs (mbar)`)) else NA_real_
       )
     ) %>%
-    filter(!is.na(.pressure_mbar)) %>%
-    transmute(
+    dplyr::filter(!is.na(.pressure_mbar)) %>%
+    dplyr::transmute(
       `tag ID`,
       `barometric pressure` = .pressure_mbar,
       timestamp             = timestamp_str,
@@ -1427,15 +1431,15 @@ wildcloud_to_movebank <- function(
       `Sigfox payload`,
       `sensor type` = "barometer"
     ) %>%
-    left_join(
-      animals_mb %>% dplyr::select(Tag.ID, Movebank.Project, Animal.ID),
+    dplyr::left_join(
+      animals_mb %>% dplyr::select(Tag.ID, Movebank.Project, Animal.ID, Deployment.ID),
       by = c("tag ID" = "Tag.ID")
     )
 
   # ---- Temperature (36-min bins) ----
   temp_data <- movebank_base %>%
-    filter(!is.na(`temperature [°C]`)) %>%
-    transmute(
+    dplyr::filter(!is.na(`temperature [°C]`)) %>%
+    dplyr::transmute(
       `tag ID`,
       `external temperature` = `temperature [°C]`,
       timestamp              = timestamp_str,
@@ -1452,14 +1456,14 @@ wildcloud_to_movebank <- function(
       `Sigfox payload`,
       `sensor type` = "accessory-measurements"
     ) %>%
-    left_join(
-      animals_mb %>% dplyr::select(Tag.ID, Movebank.Project, Animal.ID),
+    dplyr::left_join(
+      animals_mb %>% dplyr::select(Tag.ID, Movebank.Project, Animal.ID, Deployment.ID),
       by = c("tag ID" = "Tag.ID")
     )
 
   # ---- Min temp (range label) ----
   min_temp_data <- movebank_base %>%
-    mutate(
+    dplyr::mutate(
       .min_temp_range = dplyr::coalesce(
         if ("min_temp_range [°C]" %in% names(.)) as.character(`min_temp_range [°C]`) else NA_character_,
         if ("Min temperature of last 3 hrs (°C)" %in% names(.)) as.character(`Min temperature of last 3 hrs (°C)`) else NA_character_,
@@ -1472,8 +1476,8 @@ wildcloud_to_movebank <- function(
         .min_temp_range
       )
     ) %>%
-    filter(!is.na(.min_temp_range)) %>%
-    transmute(
+    dplyr::filter(!is.na(.min_temp_range)) %>%
+    dplyr::transmute(
       `tag ID`,
       `minimum temperature` = .min_temp_range,
       timestamp             = timestamp_str,
@@ -1490,14 +1494,14 @@ wildcloud_to_movebank <- function(
       `Sigfox payload`,
       `sensor type` = "Derived"
     ) %>%
-    left_join(
-      animals_mb %>% dplyr::select(Tag.ID, Movebank.Project, Animal.ID),
+    dplyr::left_join(
+      animals_mb %>% dplyr::select(Tag.ID, Movebank.Project, Animal.ID, Deployment.ID),
       by = c("tag ID" = "Tag.ID")
     )
 
   # ---- Max temp (FineScalePressure firmware only) ----
   max_temp_data <- movebank_base %>%
-    mutate(
+    dplyr::mutate(
       .max_temp_range = dplyr::coalesce(
         if ("max_temp_range [°C]" %in% names(.)) as.character(`max_temp_range [°C]`) else NA_character_,
         if ("Max temperature of last 3 hrs (°C)" %in% names(.)) as.character(`Max temperature of last 3 hrs (°C)`) else NA_character_
@@ -1508,8 +1512,8 @@ wildcloud_to_movebank <- function(
         .max_temp_range
       )
     ) %>%
-    filter(!is.na(.max_temp_range)) %>%
-    transmute(
+    dplyr::filter(!is.na(.max_temp_range)) %>%
+    dplyr::transmute(
       `tag ID`,
       `maximum temperature` = .max_temp_range,
       timestamp             = timestamp_str,
@@ -1526,8 +1530,8 @@ wildcloud_to_movebank <- function(
       `Sigfox payload`,
       `sensor type` = "Derived"
     ) %>%
-    left_join(
-      animals_mb %>% dplyr::select(Tag.ID, Movebank.Project, Animal.ID),
+    dplyr::left_join(
+      animals_mb %>% dplyr::select(Tag.ID, Movebank.Project, Animal.ID, Deployment.ID),
       by = c("tag ID" = "Tag.ID")
     )
 
@@ -1543,7 +1547,7 @@ wildcloud_to_movebank <- function(
   # The final (or only) deployment of each tag gets no deploy.off.date.
 
   deploy_df <- animals_mb %>%
-    transmute(
+    dplyr::transmute(
       deployment.id        = Deployment.ID,
       tag.id               = Tag.ID,
       animal.taxon         = Species,
@@ -1589,12 +1593,12 @@ wildcloud_to_movebank <- function(
   # not a real new deployment — the tag was never moved to a different animal.
   # Keep only the first (earliest) deployment per tag+animal combination.
   deploy_df <- deploy_df %>%
-    arrange(tag.id, .deploy_on_ts) %>%
-    group_by(tag.id, animal.id) %>%
-    mutate(.deploy_rank = row_number()) %>%
-    ungroup()
+    dplyr::arrange(tag.id, .deploy_on_ts) %>%
+    dplyr::group_by(tag.id, animal.id) %>%
+    dplyr::mutate(.deploy_rank = dplyr::row_number()) %>%
+    dplyr::ungroup()
 
-  retrap_dupes <- deploy_df %>% filter(.deploy_rank > 1)
+  retrap_dupes <- deploy_df %>% dplyr::filter(.deploy_rank > 1)
   if (nrow(retrap_dupes) > 0) {
     message(sprintf(
       "[deploy] Removed %d duplicate deployment(s) (same tag + same individual retrap):",
@@ -1609,32 +1613,63 @@ wildcloud_to_movebank <- function(
   }
 
   deploy_df <- deploy_df %>%
-    filter(.deploy_rank == 1) %>%
+    dplyr::filter(.deploy_rank == 1) %>%
     dplyr::select(-.deploy_rank)
 
-  # ---- compute deploy.off.date for remaining overlapping tag deployments ----
-  # When the same tag is redeployed on a DIFFERENT individual, the previous
-  # deployment must end before the next one begins. Set deploy.off.date to
-  # 1 second before the next deploy.on.date for that tag.
+  # ---- compute deploy.off.date ----
+  # Two cases:
+  # 1. Tag redeployed on different individual: off = 1 second before next deploy
+  # 2. Final/only deployment: off = last location timestamp + 1 day
+
+  # First, compute last-location timestamp per tag from loc_data
+  last_loc <- loc_data %>%
+    dplyr::filter(!is.na(timestamp)) %>%
+    dplyr::group_by(`tag ID`) %>%
+    dplyr::summarise(
+      .last_loc_ts = max(lubridate::ymd_hms(timestamp, quiet = TRUE), na.rm = TRUE),
+      .groups = "drop"
+    )
+
   deploy_df <- deploy_df %>%
-    arrange(tag.id, .deploy_on_ts) %>%
-    group_by(tag.id) %>%
-    mutate(
-      .next_deploy_on = lead(.deploy_on_ts),
+    dplyr::left_join(last_loc, by = c("tag.id" = "tag ID"))
+
+  # Case 1: redeployed tags — off = 1s before next deploy
+  deploy_df <- deploy_df %>%
+    dplyr::arrange(tag.id, .deploy_on_ts) %>%
+    dplyr::group_by(tag.id) %>%
+    dplyr::mutate(
+      .next_deploy_on = dplyr::lead(.deploy_on_ts),
       deploy.off.date = ifelse(
         !is.na(.next_deploy_on),
         format(.next_deploy_on - 1, "%Y-%m-%d %H:%M:%S"),
         NA_character_
       )
     ) %>%
-    ungroup()
+    dplyr::ungroup()
 
-  # Report overlapping deployments
+  # Case 2: final/only deployments — off = last location + 1 day
+  deploy_df <- deploy_df %>%
+    dplyr::mutate(
+      deploy.off.date = ifelse(
+        is.na(deploy.off.date) & !is.na(.last_loc_ts),
+        format(.last_loc_ts + lubridate::days(1), "%Y-%m-%d %H:%M:%S"),
+        deploy.off.date
+      )
+    )
+
+  # Report
+  n_redeployed <- sum(!is.na(deploy_df$.next_deploy_on))
+  n_last_loc   <- sum(is.na(deploy_df$.next_deploy_on) & !is.na(deploy_df$.last_loc_ts))
+  n_no_off     <- sum(is.na(deploy_df$deploy.off.date))
+  message(sprintf(
+    "[deploy] deploy.off.date: %d from redeployment, %d from last location + 1 day, %d still missing.",
+    n_redeployed, n_last_loc, n_no_off))
+
   overlaps <- deploy_df %>%
-    filter(!is.na(deploy.off.date))
+    dplyr::filter(!is.na(.next_deploy_on))
   if (nrow(overlaps) > 0) {
     message(sprintf(
-      "[deploy] %d tag redeployment(s) on different individuals — deploy.off.date set:",
+      "[deploy] %d tag redeployment(s) on different individuals:",
       nrow(overlaps)))
     for (i in seq_len(min(nrow(overlaps), 10))) {
       r <- overlaps[i, ]
