@@ -122,7 +122,7 @@ get_default_sampling_config <- function() {
     #   min temp range 3hr
     "NanoFox",     "30Days",          504,      1.0,    28,    120,   18,      "windowed_sum",      "1s burst @ 28Hz, every 2min, 36min window",
 
-    # 30DaysFineScalePressure: same VeDBA as 30Days (504 vedba_count).
+    # FineScalePressure: same VeDBA as 30Days (504 vedba_count).
     #   Instead of 5 avg temperature windows, reports 5 PRESSURE measurements.
     #   Also reports max AND min temperature over last 3 hours.
     "NanoFox",     "30DaysFineScalePressure", 504,    1.0,    28,    120,   18,      "windowed_sum",      "same VeDBA as 30Days; 5×pressure instead of 5×temp",
@@ -193,7 +193,7 @@ harmonize_wc_columns <- function(df) {
     # ---- summary sensors (3-hr or other window) ----
     # Min pressure: narrow pattern that will NOT match bin-style "Pressure X min ago"
     "Min pressure of last 3 hrs (mbar)"  = "^Min\\.?\\s*pressure",
-    # Min temperature: matches legacy range-label ">10", new numeric, and 30DaysFineScalePressure variants
+    # Min temperature: matches legacy range-label ">10", new numeric, and FineScalePressure variants
     "Min temperature of last 3 hrs (°C)" =
       "^Min\\.?\\s*temp(erature)?\\s*(of|range|\\()",
     # Max temperature: new in FineScalePressure firmware
@@ -473,7 +473,8 @@ wc_wide_to_mb_long <- function(df) {
 
 write_movebank_upload_csvs <- function(
     loc_data, vedba_data, bar_data, temp_data, min_temp_data, deployment_data,
-    max_temp_data = NULL,
+    max_temp_data        = NULL,
+    min_temp_numeric_data = NULL,
     output_dir
 ) {
   suppressPackageStartupMessages({
@@ -512,6 +513,11 @@ write_movebank_upload_csvs <- function(
     if (!is.null(max_temp_data) && nrow(max_temp_data) > 0) {
       max_temp_proj <- max_temp_data %>% dplyr::filter(Movebank.Project == proj)
       readr::write_csv(max_temp_proj, file.path(project_folder, "dataMaxTemp.csv"), na = "")
+    }
+
+    if (!is.null(min_temp_numeric_data) && nrow(min_temp_numeric_data) > 0) {
+      min_temp_num_proj <- min_temp_numeric_data %>% dplyr::filter(Movebank.Project == proj)
+      readr::write_csv(min_temp_num_proj, file.path(project_folder, "dataMinTempC.csv"), na = "")
     }
 
     message("Saved Movebank CSVs for project: ", proj, " -> ", project_folder)
@@ -1461,15 +1467,19 @@ wildcloud_to_movebank <- function(
       by = c("tag ID" = "Tag.ID")
     )
 
-  # ---- Min temp (range label) ----
-  min_temp_data <- movebank_base %>%
+  # ---- Min temp — firmware-aware split ----
+  # 30Days firmware:            categorical range label  (">10", ">5 / <=10")
+  # 30DaysFineScalePressure:    numeric °C               (9, 11, 14)
+  # Both are stored in min_temp_range [°C] after expansion; we separate them
+  # by joining firmware_version from animals_mb and routing accordingly.
+
+  min_temp_base <- movebank_base %>%
     dplyr::mutate(
       .min_temp_range = dplyr::coalesce(
         if ("min_temp_range [°C]" %in% names(.)) as.character(`min_temp_range [°C]`) else NA_character_,
         if ("Min temperature of last 3 hrs (°C)" %in% names(.)) as.character(`Min temperature of last 3 hrs (°C)`) else NA_character_,
         if ("Min temperature of last 3 hrs (temperature range °C)" %in% names(.)) as.character(`Min temperature of last 3 hrs (temperature range °C)`) else NA_character_
       ),
-      # Treat literal "N/A", "NA", "" as true NA
       .min_temp_range = ifelse(
         is.na(.min_temp_range) | trimws(.min_temp_range) %in% c("", "N/A", "NA", "n/a"),
         NA_character_,
@@ -1477,6 +1487,24 @@ wildcloud_to_movebank <- function(
       )
     ) %>%
     dplyr::filter(!is.na(.min_temp_range)) %>%
+    dplyr::left_join(
+      animals_mb %>% dplyr::select(Tag.ID, Movebank.Project, Animal.ID,
+                                   Deployment.ID, firmware_version),
+      by = c("tag ID" = "Tag.ID")
+    )
+
+  # Shared transmute helper columns
+  min_temp_cols_shared <- c(
+    "tag ID", ".min_temp_range", "timestamp_str", "time_start_str", "time_end_str",
+    "Sequence Number", "Sigfox computed location radius", "Sigfox computed location source",
+    "Sigfox computed location status", "Sigfox LQI", "Sigfox link quality",
+    "Sigfox country", "Sigfox base stations", "Sigfox payload",
+    "Movebank.Project", "Animal.ID", "Deployment.ID"
+  )
+
+  # 30Days: categorical labels → dataMinTemp.csv (existing Movebank field)
+  min_temp_data <- min_temp_base %>%
+    dplyr::filter(firmware_version != "30DaysFineScalePressure" | is.na(firmware_version)) %>%
     dplyr::transmute(
       `tag ID`,
       `minimum temperature` = .min_temp_range,
@@ -1492,12 +1520,40 @@ wildcloud_to_movebank <- function(
       `Sigfox country`,
       `Sigfox base stations`,
       `Sigfox payload`,
-      `sensor type` = "Derived"
-    ) %>%
-    dplyr::left_join(
-      animals_mb %>% dplyr::select(Tag.ID, Movebank.Project, Animal.ID, Deployment.ID),
-      by = c("tag ID" = "Tag.ID")
+      `sensor type` = "Derived",
+      Movebank.Project, Animal.ID, Deployment.ID
     )
+
+  # 30DaysFSP: numeric °C → dataMinTempC.csv (separate file, numeric column)
+  min_temp_numeric_data <- min_temp_base %>%
+    dplyr::filter(firmware_version == "30DaysFineScalePressure") %>%
+    dplyr::transmute(
+      `tag ID`,
+      `minimum temperature [°C]` = suppressWarnings(as.numeric(.min_temp_range)),
+      timestamp             = timestamp_str,
+      `start timestamp`     = time_start_str,
+      `end timestamp`       = time_end_str,
+      `sequence number`     = `Sequence Number`,
+      `Sigfox computed location radius`,
+      `Sigfox computed location source`,
+      `Sigfox computed location status`,
+      `Sigfox LQI`,
+      `Sigfox link quality`,
+      `Sigfox country`,
+      `Sigfox base stations`,
+      `Sigfox payload`,
+      `sensor type` = "accessory-measurements",
+      Movebank.Project, Animal.ID, Deployment.ID
+    ) %>%
+    dplyr::filter(!is.na(`minimum temperature [°C]`))
+
+  n_cat <- nrow(min_temp_data)
+  n_num <- nrow(min_temp_numeric_data)
+  if (n_cat > 0 || n_num > 0) {
+    message(sprintf("[min temp] %d categorical (30Days) rows -> dataMinTemp.csv; ",
+                    n_cat),
+            sprintf("%d numeric (FSP) rows -> dataMinTempC.csv", n_num))
+  }
 
   # ---- Max temp (FineScalePressure firmware only) ----
   max_temp_data <- movebank_base %>%
@@ -1699,21 +1755,23 @@ wildcloud_to_movebank <- function(
   # ---- write ----
   write_movebank_upload_csvs(
     loc_data, vedba_data, bar_data, temp_data, min_temp_data, deployment_data,
-    max_temp_data = max_temp_data,
+    max_temp_data         = max_temp_data,
+    min_temp_numeric_data = min_temp_numeric_data,
     output_dir = output_dir
   )
 
   result <- list(
-    movebank_df     = movebank_df,
-    animals_mb      = animals_mb,
-    loc_data        = loc_data,
-    vedba_data      = vedba_data,
-    bar_data        = bar_data,
-    temp_data       = temp_data,
-    min_temp_data   = min_temp_data,
-    max_temp_data   = max_temp_data,
-    deployment_data = deployment_data,
-    sampling_config = fw_config
+    movebank_df           = movebank_df,
+    animals_mb            = animals_mb,
+    loc_data              = loc_data,
+    vedba_data            = vedba_data,
+    bar_data              = bar_data,
+    temp_data             = temp_data,
+    min_temp_data         = min_temp_data,
+    min_temp_numeric_data = min_temp_numeric_data,
+    max_temp_data         = max_temp_data,
+    deployment_data       = deployment_data,
+    sampling_config       = fw_config
   )
 
   # Attach drift model to output if correction was applied
@@ -1738,7 +1796,7 @@ if (FALSE) {
     animals_path          = "../../../Dropbox/MPI/Noctule/Data/movebank/Switzerland/swiss_MPIAB_captures.xlsx",
     output_dir            = "../../../Dropbox/MPI/Noctule/Data/movebank/Switzerland/movebank/",
     force_tag_model_family = "NanoFox",
-    force_firmware_version = "30Days", # "30DaysFSP"
+    force_firmware_version = "30Days",
     force_vedba_count = 504,
     location_abbr         = "Swiss",  # used in fallback Animal.ID, e.g. Nnoc25_01_Swiss_9EC016
     movebank_project_name = "ICARUS Bats. Nyctalus leisleri Nyctalus noctula. Thurgau, Switzerland"
