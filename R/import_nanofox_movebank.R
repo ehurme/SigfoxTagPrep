@@ -515,12 +515,12 @@ import_nanofox_movebank <- function(
   #     on every location row. Convert it directly — no grouping, no joining.
   #     Each row carries its own pressure value.
   #
-  #   NanoFox (separate-row schema): min_3h_pressure [mbar] is joined onto
+  #   NanoFox (separate-row schema): barometric_pressure [mbar] is joined onto
   #     location rows by add_min_pressure_to_locations() before this function.
   #     Convert it directly in the same way.
   #
   # Priority when both columns exist (mixed-tag study):
-  #   NanoFox min_3h_pressure > TinyFox tinyfox_pressure_min_last_24h
+  #   NanoFox barometric_pressure > TinyFox tinyfox_pressure_min_last_24h
   #
   # Writes altitude_m [m] to x. Never overwrites an existing non-NA value.
   # ---------------------------------------------------------------------------
@@ -531,14 +531,14 @@ import_nanofox_movebank <- function(
     if (!"altitude_m" %in% names(x)) x$altitude_m <- NA_real_
     existing <- !is.na(as.numeric(x$altitude_m))
 
-    # NanoFox: min_3h_pressure (joined from barometer sensor rows)
-    if ("min_3h_pressure" %in% names(x)) {
-      fill <- !existing & !is.na(as.numeric(x$min_3h_pressure))
+    # NanoFox: barometric_pressure (joined from barometer sensor rows)
+    if ("barometric_pressure" %in% names(x)) {
+      fill <- !existing & !is.na(as.numeric(x$barometric_pressure))
       if (any(fill, na.rm = TRUE)) {
-        x$altitude_m[fill] <- pressure_to_alt(x$min_3h_pressure[fill])
+        x$altitude_m[fill] <- pressure_to_alt(x$barometric_pressure[fill])
         existing <- existing | fill
         .msg("  altitude_m: ", sum(fill, na.rm = TRUE),
-             " NanoFox rows filled from min_3h_pressure.")
+             " NanoFox rows filled from barometric_pressure.")
       }
     }
 
@@ -1373,7 +1373,7 @@ import_nanofox_movebank <- function(
     b <- .add_temperature_to_locations(b)
 
     # Convert pressure to altitude for all tag types.
-    # NanoFox: min_3h_pressure is joined by add_min_pressure_to_locations() above.
+    # NanoFox: barometric_pressure is joined by add_min_pressure_to_locations() above.
     # TinyFox: tinyfox_pressure_min_last_24h is a flat column on location rows.
     # Both are handled by a single direct hypsometric conversion — no sourced
     # script dependency, no window grouping, no row-ordering issues.

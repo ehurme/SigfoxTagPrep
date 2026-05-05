@@ -6,6 +6,7 @@
 library(data.table)
 library(tidyverse)
 library(geosphere)  # distHaversine
+library(ggforce)    # facet_wrap_paginate
 
 # ─────────────────────────────────────────────────────────────
 # MAIN FUNCTION
@@ -23,9 +24,10 @@ wildcloud_quicklook <- function(
     plot         = TRUE,         # master switch
     plot_daily   = TRUE,         # P1 daily distance + P2 daily VeDBA
     plot_raw     = TRUE,         # P3 speed / P5 VeDBA / P6 altitude / P4 timeline
-    plot_temp = TRUE,         # P7 temperature (subset of raw)
+    plot_temp    = TRUE,         # P7 temperature (subset of raw)
     free_y_raw   = TRUE,         # TRUE = each facet has its own y scale in raw plots
     # FALSE = shared y axis across all tag facets
+    facets_per_page = 20,        # max facets per page; >20 devices splits into pages
     plot_dir     = NULL          # if set, save PNGs here
 ) {
 
@@ -73,8 +75,8 @@ wildcloud_quicklook <- function(
   }
 
   # Detect optional sensor column groups
-  vedba_cols    <- grep("(?i)vedba",            names(dt), value = TRUE, perl = TRUE)
-  pressure_cols <- grep("(?i)pressure",         names(dt), value = TRUE, perl = TRUE)
+  vedba_cols    <- grep("(?i)vedba",               names(dt), value = TRUE, perl = TRUE)
+  pressure_cols <- grep("(?i)pressure",            names(dt), value = TRUE, perl = TRUE)
   temp_min_col  <- grep("(?i)min.*temp|temp.*min", names(dt), value = TRUE, perl = TRUE)
   temp_max_col  <- grep("(?i)max.*temp|temp.*max", names(dt), value = TRUE, perl = TRUE)
 
@@ -204,12 +206,13 @@ wildcloud_quicklook <- function(
   plots <- if (plot) make_diagnostic_plots(
     dt, has_vedba, has_pressure, has_temp,
     vedba_cols, pressure_cols, temp_min_col, temp_max_col,
-    gap_hours    = gap_hours,
-    plot_daily   = plot_daily,
-    plot_raw     = plot_raw,
-    plot_temp = plot_temp,
-    free_y_raw   = free_y_raw,
-    plot_dir     = plot_dir
+    gap_hours       = gap_hours,
+    plot_daily      = plot_daily,
+    plot_raw        = plot_raw,
+    plot_temp       = plot_temp,
+    free_y_raw      = free_y_raw,
+    facets_per_page = facets_per_page,
+    plot_dir        = plot_dir
   ) else NULL
 
   # ── 12. Return ────────────────────────────────────────────
@@ -245,18 +248,22 @@ parse_wildcloud_datetime <- function(x, tz = "UTC") {
 make_diagnostic_plots <- function(
     dt, has_vedba, has_pressure, has_temp,
     vedba_cols, pressure_cols, temp_min_col, temp_max_col,
-    gap_hours    = 3,
-    plot_daily   = TRUE,   # daily distance + daily VeDBA
-    plot_raw     = TRUE,   # speed / raw VeDBA / altitude / timeline
-    plot_temp = TRUE,   # temperature (requires plot_raw = TRUE to save)
-    free_y_raw   = TRUE,   # free vs fixed y across facets in raw plots
-    plot_dir     = NULL
+    gap_hours       = 3,
+    plot_daily      = TRUE,
+    plot_raw        = TRUE,
+    plot_temp       = TRUE,
+    free_y_raw      = TRUE,
+    facets_per_page = 20,
+    plot_dir        = NULL
 ) {
 
   library(suncalc)
+  library(ggforce)
 
-  # ── y scale string for facet_wrap ────────────────────────
   y_scales <- if (free_y_raw) "free_y" else "fixed"
+  n_devices <- dplyr::n_distinct(dt$device)
+  n_pages   <- ceiling(n_devices / facets_per_page)
+  ncol_fac  <- min(4L, facets_per_page)
 
   theme_bat <- theme_minimal(base_size = 11) +
     theme(
@@ -276,30 +283,24 @@ make_diagnostic_plots <- function(
   }
 
   # ── Segment ID ───────────────────────────────────────────
-  # Increments within each device whenever the gap between consecutive
-  # obs_time values exceeds gap_hours; geom_path then lifts the pen.
   add_segment_id <- function(d, time_col = "obs_time", gap_h = gap_hours) {
     setorderv(d, c("device", time_col))
-    d[, lag_t    := shift(get(time_col), 1L), by = device]
-    d[, elapsed  := as.numeric(difftime(get(time_col), lag_t, units = "hours"))]
-    d[, segment  := cumsum(is.na(lag_t) | elapsed > gap_h), by = device]
+    d[, lag_t   := shift(get(time_col), 1L), by = device]
+    d[, elapsed := as.numeric(difftime(get(time_col), lag_t, units = "hours"))]
+    d[, segment := cumsum(is.na(lag_t) | elapsed > gap_h), by = device]
     d[, c("lag_t", "elapsed") := NULL]
     d
   }
 
   # ── Sunrise / sunset rectangles ───────────────────────────
-  # Uses the median valid-fix location across all devices as a single reference
-  # point, then queries suncalc for every date in the data window.
   make_sun_rects <- function(dt_full, t_min, t_max, tz = "UTC") {
     device_locs <- dt_full[coord_ok == TRUE,
                            .(lat = median(latitude,  na.rm = TRUE),
                              lon = median(longitude, na.rm = TRUE)),
                            by = device]
     if (nrow(device_locs) == 0) return(NULL)
-
     avg_lat <- mean(device_locs$lat, na.rm = TRUE)
     avg_lon <- mean(device_locs$lon, na.rm = TRUE)
-
     dates <- seq(as.Date(t_min, tz = tz) - 1,
                  as.Date(t_max, tz = tz) + 1, by = "day")
     sun <- as.data.table(getSunlightTimes(
@@ -314,7 +315,6 @@ make_diagnostic_plots <- function(
     as.data.frame(rects[xmax > xmin])
   }
 
-  # Compute night rects once; reuse across all plots
   t_min <- min(dt$datetime, na.rm = TRUE)
   t_max <- max(dt$datetime, na.rm = TRUE)
   night_rects <- make_sun_rects(dt, t_min, t_max)
@@ -326,10 +326,37 @@ make_diagnostic_plots <- function(
               inherit.aes = FALSE, fill = "grey20", alpha = 0.15)
   }
 
+  # ── Paginated facet helper ────────────────────────────────
+  # Builds a named list of ggplots, one per page.
+  # base_plot: a ggplot object that already has all layers EXCEPT facet_wrap.
+  # data:      the data.frame used to build the plot (for n_pages calculation).
+  # label:     used to name list entries, e.g. "raw_vedba_p1", "raw_vedba_p2".
+  # extra_theme: optional theme additions (e.g. legend.position = "right").
+  make_pages <- function(base_plot, label, extra_theme = NULL) {
+    page_list <- vector("list", n_pages)
+    for (pg in seq_len(n_pages)) {
+      p <- base_plot +
+        facet_wrap_paginate(
+          ~device,
+          scales   = y_scales,
+          ncol     = ncol_fac,
+          nrow     = ceiling(facets_per_page / ncol_fac),
+          page     = pg
+        )
+      if (!is.null(extra_theme)) p <- p + extra_theme
+      page_list[[pg]] <- p
+    }
+    names(page_list) <- if (n_pages == 1)
+      label
+    else
+      paste0(label, "_p", seq_len(n_pages))
+    page_list
+  }
+
   plots <- list()
 
   # ═══════════════════════════════════════════════════════════
-  # DAILY PLOTS (plot_daily = TRUE)
+  # DAILY PLOTS — one line per device, no faceting needed
   # ═══════════════════════════════════════════════════════════
   if (plot_daily) {
 
@@ -342,7 +369,8 @@ make_diagnostic_plots <- function(
     plots$daily_distance <-
       ggplot(dist_daily, aes(obs_time, total_dist_km, col = device)) +
       night_layer(night_rects) +
-      geom_path() +
+      geom_path(alpha = 0.5) +
+      geom_point(size = 1.5) +
       x_datetime +
       labs(title = "Daily distance travelled per tag",
            x = NULL, y = "Distance (km)") +
@@ -358,7 +386,8 @@ make_diagnostic_plots <- function(
       plots$daily_vedba <-
         ggplot(vedba_daily, aes(obs_time, mean_vedba, col = device)) +
         night_layer(night_rects) +
-        geom_path() +
+        geom_path(alpha = 0.5) +
+        geom_point(size = 1.5) +
         x_datetime +
         labs(title = "Mean daily VeDBA activity per tag",
              x = NULL, y = "Mean VeDBA sum (m/s\u00b2)") +
@@ -368,7 +397,7 @@ make_diagnostic_plots <- function(
   } # end plot_daily
 
   # ═══════════════════════════════════════════════════════════
-  # RAW PLOTS (plot_raw = TRUE)
+  # RAW PLOTS — faceted per device, paginated if > facets_per_page
   # ═══════════════════════════════════════════════════════════
   if (plot_raw) {
 
@@ -377,17 +406,20 @@ make_diagnostic_plots <- function(
     spd[, obs_time := datetime]
     spd <- add_segment_id(spd, time_col = "obs_time")
 
-    plots$speed_over_time <-
+    p3_base <-
       ggplot(spd, aes(obs_time, speed_ms, col = device,
                       group = interaction(device, segment))) +
       night_layer(night_rects) +
-      geom_path() +
+      geom_path(alpha = 0.35, linewidth = 0.5) +
+      geom_point(size = 0.5, alpha = 0.7) +
       x_datetime +
       labs(title = "Step speed per tag over time",
            y = "Speed (m/s)", x = NULL) +
       theme_bat
 
-    # ── P4: Transmission timeline ───────────────────────────
+    plots <- c(plots, make_pages(p3_base, "speed_over_time"))
+
+    # ── P4: Transmission timeline — device on y, no faceting ─
     plots$transmission_timeline <-
       ggplot(dt, aes(datetime, device, colour = coord_ok)) +
       night_layer(night_rects) +
@@ -415,18 +447,19 @@ make_diagnostic_plots <- function(
       vedba_long <- vedba_long[, .SD[1L], by = .(device, obs_time)]
       vedba_long <- add_segment_id(vedba_long)
 
-      plots$raw_vedba <-
+      p5_base <-
         ggplot(vedba_long, aes(obs_time, vedba, col = device,
                                group = interaction(device, segment))) +
         night_layer(night_rects) +
-        geom_path(alpha = 0.8, linewidth = 0.5) +
-        geom_point(size = 0.4, alpha = 0.6) +
-        facet_wrap(~device, scales = y_scales, ncol = 4) +
+        geom_path(alpha = 0.35, linewidth = 0.5) +
+        geom_point(size = 0.5, alpha = 0.7) +
         x_datetime +
         labs(title = sprintf("Raw VeDBA per tag — time-corrected  [y: %s]",
                              ifelse(free_y_raw, "free per tag", "shared")),
              x = NULL, y = "VeDBA (m/s\u00b2)") +
         theme_bat
+
+      plots <- c(plots, make_pages(p5_base, "raw_vedba"))
     }
 
     # ── P6: Altitude from pressure — time-corrected, segmented
@@ -443,21 +476,22 @@ make_diagnostic_plots <- function(
       pres_long[, altitude_m := pressure_to_altitude_m(pressure_mbar)]
       pres_long <- add_segment_id(pres_long)
 
-      plots$raw_altitude <-
+      p6_base <-
         ggplot(pres_long, aes(obs_time, altitude_m, col = device,
                               group = interaction(device, segment))) +
         night_layer(night_rects) +
-        geom_path(alpha = 0.8, linewidth = 0.5) +
-        geom_point(size = 0.4, alpha = 0.6) +
-        facet_wrap(~device, scales = y_scales, ncol = 4) +
+        geom_path(alpha = 0.35, linewidth = 0.5) +
+        geom_point(size = 0.5, alpha = 0.7) +
         x_datetime +
         labs(title = sprintf("Altitude ASL per tag (ISA)  [y: %s]",
                              ifelse(free_y_raw, "free per tag", "shared")),
              x = NULL, y = "Altitude (m ASL)") +
         theme_bat
+
+      plots <- c(plots, make_pages(p6_base, "raw_altitude"))
     }
 
-    # ── P7: Temperature — only when plot_temp = TRUE ─────
+    # ── P7: Temperature ──────────────────────────────────────
     if (plot_temp && has_temp &&
         (length(temp_min_col) > 0 || length(temp_max_col) > 0)) {
 
@@ -478,36 +512,34 @@ make_diagnostic_plots <- function(
       temp_long[, obs_time := datetime]
       temp_long <- add_segment_id(temp_long)
 
-      plots$raw_temperature <-
+      p7_base <-
         ggplot(temp_long, aes(obs_time, temp_c, col = metric,
                               group = interaction(device, metric, segment))) +
         night_layer(night_rects) +
-        geom_path(alpha = 0.8, linewidth = 0.5) +
-        geom_point(size = 0.4, alpha = 0.6) +
-        facet_wrap(~device, scales = y_scales, ncol = 4) +
+        geom_path(alpha = 0.35, linewidth = 0.5) +
+        geom_point(size = 0.5, alpha = 0.7) +
         x_datetime +
         scale_colour_manual(values = c("Min" = "steelblue", "Max" = "#e07b39"),
                             name = NULL) +
         labs(title = sprintf("Min & max temperature per tag  [y: %s]",
                              ifelse(free_y_raw, "free per tag", "shared")),
              x = NULL, y = "Temperature (\u00b0C)") +
-        theme_bat +
-        theme(legend.position = "right")
+        theme_bat
+
+      plots <- c(plots, make_pages(p7_base, "raw_temperature",
+                                   extra_theme = theme(legend.position = "right")))
     }
 
   } # end plot_raw
 
   # ── P8: Map with country outlines ────────────────────────
   valid_fixes <- dt[coord_ok == TRUE]
-
   if (nrow(valid_fixes) > 0) {
-    # Bounding box with padding
-    pad <- 1.5
+    pad  <- 1.5
     xlim <- c(min(valid_fixes$longitude, na.rm = TRUE) - pad,
               max(valid_fixes$longitude, na.rm = TRUE) + pad)
     ylim <- c(min(valid_fixes$latitude,  na.rm = TRUE) - pad,
               max(valid_fixes$latitude,  na.rm = TRUE) + pad)
-
     world <- map_data("world")
 
     plots$map <-
@@ -516,9 +548,8 @@ make_diagnostic_plots <- function(
                    aes(x = long, y = lat, group = group),
                    fill = "grey90", colour = "white", linewidth = 0.2) +
       geom_path(data = valid_fixes,
-                aes(x = longitude, y = latitude,
-                    col = device, group = device),
-                alpha = 0.5, linewidth = 0.4) +
+                aes(x = longitude, y = latitude, col = device, group = device),
+                alpha = 0.4, linewidth = 0.4) +
       geom_point(data = valid_fixes,
                  aes(x = longitude, y = latitude, col = device),
                  size = 0.8, alpha = 0.7) +
@@ -554,12 +585,13 @@ make_diagnostic_plots <- function(
 run <- TRUE
 if (run) {
   wildcloud_quicklook(
-    "../../../Downloads/29_04_2026_records (1).csv",
-    start_time   = "2026-04-09",
-    plot_daily   = TRUE,
-    plot_raw     = TRUE,
-    plot_temp    = TRUE,
-    free_y_raw   = FALSE,
-    plot_dir     = "../../../Dropbox/MPI/Noctule/Plots/WildCloud"
+    "../../../Downloads/Swiss_nanofoxFSP_04_05_2026_records.csv",
+    start_time      = "2026-04-09",
+    plot_daily      = TRUE,
+    plot_raw        = TRUE,
+    plot_temp       = TRUE,
+    free_y_raw      = FALSE,
+    facets_per_page = 20,
+    plot_dir        = "../../../Dropbox/MPI/Noctule/Plots/Spring26/Swiss/Quicklook/"
   )
 }
