@@ -71,6 +71,37 @@ import_nanofox_movebank <- function(
     NULL
   }
 
+  # ---------------------------------------------------------------------------
+  # .fill_from_td() — fill an event column from track data by direct lookup
+  #
+  # Safer than mt_as_event_attribute() for species/taxon because it uses
+  # mt_track_id() directly and tolerates factor/int64 type mismatches.
+  # Non-destructive: only fills NA positions; never overwrites existing values.
+  # td_col   : column name to look for in track data (searched in priority order)
+  # event_col: column to create/fill on the event data
+  # ---------------------------------------------------------------------------
+  .fill_from_td <- function(x, td_col, event_col) {
+    td <- tryCatch(move2::mt_track_data(x), error = function(e) NULL)
+    if (is.null(td)) return(x)
+    taxon_src <- intersect(
+      c(td_col, "taxon_canonical_name", "species", "individual_taxon_canonical_name"),
+      names(td)
+    )[1]
+    if (is.na(taxon_src)) return(x)
+    id_col <- move2::mt_track_id_column(x)
+    if (!id_col %in% names(td)) return(x)
+    lkp  <- stats::setNames(as.character(td[[taxon_src]]),
+                            as.character(td[[id_col]]))
+    vals <- unname(lkp[as.character(move2::mt_track_id(x))])
+    if (!event_col %in% names(x) || all(is.na(x[[event_col]]))) {
+      x[[event_col]] <- vals
+    } else {
+      miss <- is.na(x[[event_col]])
+      x[[event_col]][miss] <- vals[miss]
+    }
+    x
+  }
+
   # Enforce strict time ordering per track (required by mt_speed / mt_distance).
   .dedupe_timestamps <- function(x) {
     # The move2 track id column (e.g. individual_local_identifier) determines
@@ -250,25 +281,26 @@ import_nanofox_movebank <- function(
     )
     if (is.null(new_rows)) return(x)
 
-    # Combine: start rows first, then original rows; re-sort by track + timestamp
-    combined <- dplyr::bind_rows(new_rows, x) %>%
+    # Combine original + start rows without calling mt_as_move2().
+    # mt_as_move2 would rebuild track data from event rows and error if any
+    # start-row deployment_id isn't in the minimal rebuilt track data.
+    # Instead: strip move2 class, bind as plain sf, re-sort, re-attach class + track data.
+    orig_td_start <- tryCatch(move2::mt_track_data(x), error = function(e) NULL)
+    x_plain <- sf::st_as_sf(x)
+    class(x_plain) <- class(x_plain)[!class(x_plain) %in% "move2"]
+
+    combined <- dplyr::bind_rows(new_rows, x_plain) %>%
       dplyr::arrange(.data[[track_col]], .data$timestamp)
 
-    # Re-cast to move2 preserving track id and CRS
-    out <- tryCatch(
-      move2::mt_as_move2(combined,
-                         track_id_column = track_col,
-                         time_column     = "timestamp",
-                         crs             = sf::st_crs(x)
-      ),
-      error = function(e) {
-        .msg("  .add_start: mt_as_move2 failed (", conditionMessage(e), "); returning unsorted.")
-        combined
-      }
-    )
+    class(combined) <- c("move2", class(combined))
+    attr(combined, "track_id_column") <- track_col
+    attr(combined, "time_column")     <- "timestamp"
+    if (!is.null(orig_td_start))
+      combined <- tryCatch(move2::mt_set_track_data(combined, orig_td_start),
+                           error = function(e) combined)
 
     .msg("  .add_start: inserted ", n_inserted, " deployment start rows.")
-    out
+    combined
   }
 
   add_prev_latlon <- function(x, lat_name = "lat_prev", lon_name = "lon_prev") {
@@ -308,10 +340,13 @@ import_nanofox_movebank <- function(
     # Promote track-level metadata to event columns so they survive filtering,
     # merging, and subsetting (e.g. .make_location_metrics filters to location rows).
     # These are the columns most commonly needed for analysis:
-    #   species / taxon_canonical_name — biological identity
-    #   sex                            — individual attribute
-    #   tag_local_identifier           — which physical tag was on the animal
-    #   deployment_id                  — deployment-level grouping key
+    #   species           — biological identity (via .fill_from_td)
+    #   sex               — individual attribute
+    #   model             — tag hardware model string
+    #   tag_firmware      — firmware version on the tag
+    #   tag_local_identifier — which physical tag was on the animal
+    #   deployment_id     — deployment-level grouping key
+    # NOT promoted: tag_type (removed from outputs), taxon_canonical_name (redundant).
     #
     # All factor/ordered columns are coerced to character to prevent level-set
     # conflicts when stacking objects from different studies.
@@ -331,40 +366,14 @@ import_nanofox_movebank <- function(
     }
 
     # ---- Promote attributes from track data to event columns ----
-    for (attr in c("sex", "model", "attachment_comments",
+    for (attr in c("sex", "model", "tag_firmware", "attachment_comments",
                    "tag_local_identifier", "deployment_id"))
       x <- .safe_try(x %>% mt_as_event_attribute(attr, .keep = TRUE),
                      paste0("mt_as_event_attribute(", attr, ")")) %||% x
 
-    # ---- taxon_canonical_name + species: direct track-data lookup ----
-    # mt_as_event_attribute is fragile when factor levels or type mismatches exist
-    # between event and track data columns.  A direct lookup by mt_track_id() is
-    # guaranteed to work regardless of column types.
-    .fill_from_td <- function(x, td_col, event_col) {
-      td <- tryCatch(move2::mt_track_data(x), error = function(e) NULL)
-      if (is.null(td)) return(x)
-      taxon_src <- intersect(c(td_col, "taxon_canonical_name", "species",
-                               "individual_taxon_canonical_name"), names(td))[1]
-      if (is.na(taxon_src)) return(x)
-      id_col <- move2::mt_track_id_column(x)
-      if (!id_col %in% names(td)) return(x)
-      lkp <- stats::setNames(as.character(td[[taxon_src]]),
-                             as.character(td[[id_col]]))
-      vals <- unname(lkp[as.character(move2::mt_track_id(x))])
-      # Only fill if result is better (non-NA) than what is there already
-      if (!event_col %in% names(x) || all(is.na(x[[event_col]])))
-        x[[event_col]] <- vals
-      else {
-        missing <- is.na(x[[event_col]])
-        x[[event_col]][missing] <- vals[missing]
-      }
-      x
-    }
-
-    x <- .fill_from_td(x, "taxon_canonical_name", "taxon_canonical_name")
+    # ---- species: direct track-data lookup (robust to type mismatches) ----
     x <- .fill_from_td(x, "taxon_canonical_name", "species")
-    x$taxon_canonical_name <- as.character(x$taxon_canonical_name)
-    x$species              <- as.character(x$species)
+    x$species <- as.character(x$species)
 
     # ---- Coerce all factor/ordered event columns → character ----
     geom_col <- if (inherits(x, "sf")) attr(x, "sf_column") else character(0)
@@ -558,12 +567,12 @@ import_nanofox_movebank <- function(
   #     on every location row. Convert it directly — no grouping, no joining.
   #     Each row carries its own pressure value.
   #
-  #   NanoFox (separate-row schema): barometric_pressure [mbar] is joined onto
+  #   NanoFox (separate-row schema): min_3h_pressure [mbar] is joined onto
   #     location rows by add_min_pressure_to_locations() before this function.
   #     Convert it directly in the same way.
   #
   # Priority when both columns exist (mixed-tag study):
-  #   NanoFox barometric_pressure > TinyFox tinyfox_pressure_min_last_24h
+  #   NanoFox min_3h_pressure > TinyFox tinyfox_pressure_min_last_24h
   #
   # Writes altitude_m [m] to x. Never overwrites an existing non-NA value.
   # ---------------------------------------------------------------------------
@@ -574,25 +583,36 @@ import_nanofox_movebank <- function(
     if (!"altitude_m" %in% names(x)) x$altitude_m <- NA_real_
     existing <- !is.na(as.numeric(x$altitude_m))
 
-    # NanoFox: barometric_pressure (joined from barometer sensor rows)
+    # barometric_pressure (NanoFox multi-sensor schema, joined from sensor rows)
     if ("barometric_pressure" %in% names(x)) {
       fill <- !existing & !is.na(as.numeric(x$barometric_pressure))
       if (any(fill, na.rm = TRUE)) {
         x$altitude_m[fill] <- pressure_to_alt(x$barometric_pressure[fill])
         existing <- existing | fill
         .msg("  altitude_m: ", sum(fill, na.rm = TRUE),
-             " NanoFox rows filled from barometric_pressure.")
+             " rows filled from barometric_pressure.")
       }
     }
 
-    # TinyFox: tinyfox_pressure_min_last_24h (flat column on location rows)
+    # min_3h_pressure (NanoFox legacy column name)
+    if ("min_3h_pressure" %in% names(x)) {
+      fill <- !existing & !is.na(as.numeric(x$min_3h_pressure))
+      if (any(fill, na.rm = TRUE)) {
+        x$altitude_m[fill] <- pressure_to_alt(x$min_3h_pressure[fill])
+        existing <- existing | fill
+        .msg("  altitude_m: ", sum(fill, na.rm = TRUE),
+             " rows filled from min_3h_pressure.")
+      }
+    }
+
+    # tinyfox_pressure_min_last_24h (TinyFox flat column on location rows)
     if ("tinyfox_pressure_min_last_24h" %in% names(x)) {
       fill <- !existing & !is.na(as.numeric(x$tinyfox_pressure_min_last_24h))
       if (any(fill, na.rm = TRUE)) {
         x$altitude_m[fill] <- pressure_to_alt(x$tinyfox_pressure_min_last_24h[fill])
         existing <- existing | fill
         .msg("  altitude_m: ", sum(fill, na.rm = TRUE),
-             " TinyFox rows filled from tinyfox_pressure_min_last_24h.")
+             " rows filled from tinyfox_pressure_min_last_24h.")
       }
     }
 
@@ -948,13 +968,16 @@ import_nanofox_movebank <- function(
     combined <- dplyr::bind_rows(x_out, new_rows_sf) %>%
       dplyr::arrange(individual_local_identifier, timestamp)
 
-    # Re-establish move2 class (bind_rows strips it)
-    combined <- move2::mt_as_move2(
-      combined,
-      track_id_column   = "individual_local_identifier",
-      time_column       = "timestamp",
-      crs               = sf::st_crs(x)
-    )
+    # Re-establish move2 class using the same track id as the input object.
+    # Do NOT hardcode individual_local_identifier — the input is keyed to deployment_id.
+    orig_track_col_expand <- move2::mt_track_id_column(x)
+    orig_td_expand        <- tryCatch(move2::mt_track_data(x), error = function(e) NULL)
+    class(combined) <- c("move2", class(combined))
+    attr(combined, "track_id_column") <- orig_track_col_expand
+    attr(combined, "time_column")     <- "timestamp"
+    if (!is.null(orig_td_expand))
+      combined <- tryCatch(move2::mt_set_track_data(combined, orig_td_expand),
+                           error = function(e) combined)
 
     n_new <- nrow(combined) - nrow(x)
     .msg("  .expand_tinyfox_rows: added ", n_new, " sensor rows. ",
@@ -1284,6 +1307,129 @@ import_nanofox_movebank <- function(
   # ---------------------------------------------------------------------------
   # Per-study download + processing
   # ---------------------------------------------------------------------------
+  # ---------------------------------------------------------------------------
+  # Column utilities (used by download_one_study, merge_stack, and output loop)
+  # ---------------------------------------------------------------------------
+
+
+  # ---------------------------------------------------------------------------
+  # Column utilities — defined before download_one_study so all downstream
+  # code (expand_tinyfox, output loop, merge_stack) can call them freely.
+  # ---------------------------------------------------------------------------
+
+  # ---------------------------------------------------------------------------
+  # Column utilities — defined before download_one_study so all downstream
+  # code (expand_tinyfox, output loop, merge_stack) can call them freely.
+  # ---------------------------------------------------------------------------
+
+
+  # ---------------------------------------------------------------------------
+  # Merge studies
+  # ---------------------------------------------------------------------------
+  # Strip units from a move2/sf object before stacking so that columns that
+  # carry units in one study but not another (or carry different units) don't
+  # cause bind_rows to error.  Units metadata is recorded as an attribute on
+  # each column so it can be reattached if needed; stripping to double is safe
+  # because the physical meaning is preserved by the column name.
+  .strip_units_cols <- function(obj) {
+    if (is.null(obj) || !is.data.frame(obj)) return(obj)
+    for (col in names(obj)) {
+      if (inherits(obj[[col]], "units"))
+        obj[[col]] <- as.numeric(obj[[col]])
+    }
+    obj
+  }
+  .na_like <- function(src, n) {
+    if (inherits(src, "POSIXct"))
+      return(as.POSIXct(rep(NA_real_, n), origin = "1970-01-01", tz = "UTC"))
+    if (is.double(src))    return(rep(NA_real_,      n))
+    if (is.integer(src))   return(rep(NA_integer_,   n))
+    if (is.character(src)) return(rep(NA_character_,  n))
+    if (is.logical(src))   return(rep(NA,             n))
+    rep(NA_character_, n)   # safe fallback
+  }
+
+  # ---------------------------------------------------------------------------
+  # Column type normalisation for cross-study binding
+  # ---------------------------------------------------------------------------
+  # Converts an sf/tibble to a maximally bind-safe form:
+  #   - units columns → plain numeric
+  #   - ordered/factor columns → character (avoids level-set conflicts)
+  #   - int64 (bit64) columns → character (avoids integer overflow in bind)
+  # Geometry column is left untouched.
+  .normalise_cols <- function(x) {
+    geom_col <- if (inherits(x, "sf")) attr(x, "sf_column") else NULL
+    for (nm in names(x)) {
+      if (!is.null(geom_col) && nm == geom_col) next
+      v <- x[[nm]]
+      if (inherits(v, "units"))              { x[[nm]] <- as.numeric(v);    next }
+      if (is.ordered(v) || is.factor(v))     { x[[nm]] <- as.character(v);  next }
+      if (inherits(v, "integer64"))          { x[[nm]] <- as.character(v);  next }
+    }
+    x
+  }
+
+  # ---------------------------------------------------------------------------
+  # .drop_all_na_cols() — remove columns where every value (non-geometry) is NA
+  #
+  # Keeps geometry and move2 metadata intact. Applied to all three output objects
+  # (full, location, daily) per study and after merging so analysts never see
+  # columns that are entirely empty.
+  # ---------------------------------------------------------------------------
+  .drop_all_na_cols <- function(x) {
+    if (is.null(x) || nrow(x) == 0) return(x)
+    geom_col <- if (inherits(x, "sf")) attr(x, "sf_column") else character(0)
+    keep <- vapply(names(x), function(nm) {
+      if (nm %in% geom_col) return(TRUE)          # always keep geometry
+      v <- x[[nm]]
+      if (inherits(v, "sfc")) return(TRUE)         # always keep sfc columns
+      !all(is.na(v))
+    }, logical(1))
+    dropped <- names(x)[!keep]
+    if (length(dropped) > 0)
+      .msg("  Dropping ", length(dropped), " all-NA column(s): ",
+           paste(dropped, collapse = ", "))
+    x[, keep, drop = FALSE]
+  }
+
+  # ---------------------------------------------------------------------------
+  # .normalise_one() — normalise a single move2 object before stacking
+  #
+  # Prepares a move2 object for mt_stack() by:
+  #   1. Ensuring it is keyed to deployment_id
+  #   2. Normalising event column types (units→numeric, ordered/factor→character,
+  #      integer64→character) so bind_rows across studies doesn't see type clashes
+  #   3. Normalising track data column types the same way so mt_stack track-data
+  #      merge doesn't see clashes (e.g. capture_location <dbl> vs <chr>)
+  # ---------------------------------------------------------------------------
+  .normalise_one <- function(x) {
+    # Ensure keyed to deployment_id
+    if (move2::mt_track_id_column(x) != "deployment_id" &&
+        "deployment_id" %in% names(x)) {
+      x$deployment_id <- as.character(x$deployment_id)
+      attr(x, "track_id_column") <- "deployment_id"
+    }
+
+    # Normalise event columns
+    x <- .normalise_cols(x)
+
+    # Normalise track data columns
+    td <- tryCatch(move2::mt_track_data(x), error = function(e) NULL)
+    if (!is.null(td)) {
+      changed <- FALSE
+      for (nm in names(td)) {
+        v <- td[[nm]]
+        if (inherits(v, "units"))          { td[[nm]] <- as.numeric(v);   changed <- TRUE }
+        else if (is.ordered(v))            { td[[nm]] <- as.character(v); changed <- TRUE }
+        else if (is.factor(v))             { td[[nm]] <- as.character(v); changed <- TRUE }
+        else if (inherits(v, "integer64")) { td[[nm]] <- as.character(v); changed <- TRUE }
+        # Leave sfc geometry columns intact — that is the whole point
+      }
+      if (changed)
+        x <- tryCatch(move2::mt_set_track_data(x, td), error = function(e) x)
+    }
+    x
+  }
   download_one_study <- function(id) {
     .msg("Downloading study: ", id)
     si         <- move2::movebank_download_study_info(study_id = id)
@@ -1330,8 +1476,14 @@ import_nanofox_movebank <- function(
           all(is.na(b$individual_local_identifier)))
         b$individual_local_identifier <- as.character(move2::mt_track_id(b))
 
-      # ---- If already keyed to deployment_id, nothing more to do ----
+      # ---- If already keyed to deployment_id, coerce to character for join safety ----
       if (orig_track_col == "deployment_id") {
+        if ("deployment_id" %in% names(b))
+          b$deployment_id <- as.character(b$deployment_id)
+        if ("deployment_id" %in% names(orig_td) && !is.character(orig_td$deployment_id)) {
+          orig_td$deployment_id <- as.character(orig_td$deployment_id)
+          b <- tryCatch(move2::mt_set_track_data(b, orig_td), error = function(e) b)
+        }
         b
       } else if ("deployment_id" %in% names(orig_td)) {
 
@@ -1416,7 +1568,7 @@ import_nanofox_movebank <- function(
     b <- .add_temperature_to_locations(b)
 
     # Convert pressure to altitude for all tag types.
-    # NanoFox: barometric_pressure is joined by add_min_pressure_to_locations() above.
+    # NanoFox: min_3h_pressure is joined by add_min_pressure_to_locations() above.
     # TinyFox: tinyfox_pressure_min_last_24h is a flat column on location rows.
     # Both are handled by a single direct hypsometric conversion — no sourced
     # script dependency, no window grouping, no row-ordering issues.
@@ -1452,13 +1604,15 @@ import_nanofox_movebank <- function(
         obj$year   <- as.character(lubridate::year(obj$timestamp))
         obj$yday   <- as.character(lubridate::yday(obj$timestamp))
         obj$season <- ifelse(lubridate::month(obj$timestamp) > 7, "Fall", "Spring")
-        # Guarantee species and taxon_canonical_name on every output object.
-        # .make_location_metrics filters rows but preserves event columns;
-        # re-apply the direct lookup in case any filtering discarded the value.
-        obj <- .fill_from_td(obj, "taxon_canonical_name", "taxon_canonical_name")
+        # Guarantee species on every output object (re-apply after row filtering).
         obj <- .fill_from_td(obj, "taxon_canonical_name", "species")
-        obj$taxon_canonical_name <- as.character(obj$taxon_canonical_name)
-        obj$species              <- as.character(obj$species)
+        obj$species <- as.character(obj$species)
+        # Remove internal columns not needed in outputs:
+        #   tag_type             — internal inference label
+        #   taxon_canonical_name — redundant with species
+        drop_cols <- intersect(names(obj), c("tag_type", "taxon_canonical_name"))
+        if (length(drop_cols) > 0)
+          obj <- obj[, !names(obj) %in% drop_cols, drop = FALSE]
         # Coerce factors/ordered → character for merge safety
         obj <- .normalise_cols(obj)
         # Drop all-NA columns
@@ -1473,116 +1627,8 @@ import_nanofox_movebank <- function(
   res_list        <- lapply(study_id, download_one_study)
   names(res_list) <- as.character(study_id)
 
-  # ---------------------------------------------------------------------------
-  # Merge studies
-  # ---------------------------------------------------------------------------
-  # Strip units from a move2/sf object before stacking so that columns that
-  # carry units in one study but not another (or carry different units) don't
-  # cause bind_rows to error.  Units metadata is recorded as an attribute on
-  # each column so it can be reattached if needed; stripping to double is safe
-  # because the physical meaning is preserved by the column name.
-  .strip_units_cols <- function(obj) {
-    if (is.null(obj) || !is.data.frame(obj)) return(obj)
-    for (col in names(obj)) {
-      if (inherits(obj[[col]], "units"))
-        obj[[col]] <- as.numeric(obj[[col]])
-    }
-    obj
-  }
-
-  # ---------------------------------------------------------------------------
-  # .drop_all_na_cols() — remove columns where every value (non-geometry) is NA
-  #
-  # Keeps geometry and move2 metadata intact. Applied to all three output objects
-  # (full, location, daily) per study and after merging so analysts never see
-  # columns that are entirely empty.
-  # ---------------------------------------------------------------------------
-  .drop_all_na_cols <- function(x) {
-    if (is.null(x) || nrow(x) == 0) return(x)
-    geom_col <- if (inherits(x, "sf")) attr(x, "sf_column") else character(0)
-    keep <- vapply(names(x), function(nm) {
-      if (nm %in% geom_col) return(TRUE)          # always keep geometry
-      v <- x[[nm]]
-      if (inherits(v, "sfc")) return(TRUE)         # always keep sfc columns
-      !all(is.na(v))
-    }, logical(1))
-    dropped <- names(x)[!keep]
-    if (length(dropped) > 0)
-      .msg("  Dropping ", length(dropped), " all-NA column(s): ",
-           paste(dropped, collapse = ", "))
-    x[, keep, drop = FALSE]
-  }
-
-  # ---------------------------------------------------------------------------
-  # Column type normalisation for cross-study binding
-  # ---------------------------------------------------------------------------
-  # Converts an sf/tibble to a maximally bind-safe form:
-  #   - units columns → plain numeric
-  #   - ordered/factor columns → character (avoids level-set conflicts)
-  #   - int64 (bit64) columns → character (avoids integer overflow in bind)
-  # Geometry column is left untouched.
-  .normalise_cols <- function(x) {
-    geom_col <- if (inherits(x, "sf")) attr(x, "sf_column") else NULL
-    for (nm in names(x)) {
-      if (!is.null(geom_col) && nm == geom_col) next
-      v <- x[[nm]]
-      if (inherits(v, "units"))              { x[[nm]] <- as.numeric(v);    next }
-      if (is.ordered(v) || is.factor(v))     { x[[nm]] <- as.character(v);  next }
-      if (inherits(v, "integer64"))          { x[[nm]] <- as.character(v);  next }
-    }
-    x
-  }
-
   # Create a typed NA vector that matches `src` in class so bind_rows
   # doesn't see a logical vs POSIXct / numeric / character clash.
-  .na_like <- function(src, n) {
-    if (inherits(src, "POSIXct"))
-      return(as.POSIXct(rep(NA_real_, n), origin = "1970-01-01", tz = "UTC"))
-    if (is.double(src))    return(rep(NA_real_,      n))
-    if (is.integer(src))   return(rep(NA_integer_,   n))
-    if (is.character(src)) return(rep(NA_character_,  n))
-    if (is.logical(src))   return(rep(NA,             n))
-    rep(NA_character_, n)   # safe fallback
-  }
-
-  # ---------------------------------------------------------------------------
-  # .normalise_one() — normalise a single move2 object before stacking
-  #
-  # Prepares a move2 object for mt_stack() by:
-  #   1. Ensuring it is keyed to deployment_id
-  #   2. Normalising event column types (units→numeric, ordered/factor→character,
-  #      integer64→character) so bind_rows across studies doesn't see type clashes
-  #   3. Normalising track data column types the same way so mt_stack track-data
-  #      merge doesn't see clashes (e.g. capture_location <dbl> vs <chr>)
-  # ---------------------------------------------------------------------------
-  .normalise_one <- function(x) {
-    # Ensure keyed to deployment_id
-    if (move2::mt_track_id_column(x) != "deployment_id" &&
-        "deployment_id" %in% names(x)) {
-      x$deployment_id <- as.character(x$deployment_id)
-      attr(x, "track_id_column") <- "deployment_id"
-    }
-
-    # Normalise event columns
-    x <- .normalise_cols(x)
-
-    # Normalise track data columns
-    td <- tryCatch(move2::mt_track_data(x), error = function(e) NULL)
-    if (!is.null(td)) {
-      changed <- FALSE
-      for (nm in names(td)) {
-        v <- td[[nm]]
-        if (inherits(v, "units"))          { td[[nm]] <- as.numeric(v);   changed <- TRUE }
-        else if (is.ordered(v))            { td[[nm]] <- as.character(v); changed <- TRUE }
-        else if (is.factor(v))             { td[[nm]] <- as.character(v); changed <- TRUE }
-        else if (inherits(v, "integer64")) { td[[nm]] <- as.character(v); changed <- TRUE }
-        # Leave sfc geometry columns intact — that is the whole point
-      }
-      if (changed)
-        x <- tryCatch(move2::mt_set_track_data(x, td), error = function(e) x)
-    }
-    x
-  }
 
   merge_stack <- function(objs) {
     objs <- Filter(Negate(is.null), objs)
