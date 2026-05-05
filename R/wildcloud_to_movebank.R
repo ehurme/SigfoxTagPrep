@@ -89,7 +89,7 @@ extract_max_rssi <- function(bs_string) {
 
 get_default_sampling_config <- function() {
   tibble::tribble(
-    ~tag_model,    ~software_version,                        ~vedba_count, ~burst_duration_s, ~burst_rate_hz, ~sampling_interval_s, ~sampling_count, ~vedba_type,             ~notes,
+    ~tag_model,    ~software_version,                ~vedba_count, ~burst_duration_s, ~burst_rate_hz, ~sampling_interval_s, ~sampling_count, ~vedba_type,          ~sensor_schema,        ~notes,
 
     # =========================================================================
     # TinyFoxBatt (ICARUS TinyFox)
@@ -101,14 +101,15 @@ get_default_sampling_config <- function() {
     # difference). VeDBA resolution: 3.9 mg. Sensor noise floor: ~195 mg/burst.
     # Also transmits: activity % (proportion of 1440 samples > 1560 mg),
     # min/max temperature of last 24 hours.
-    "TinyFox",     "V13",             1440,     1.0,    28,    60,    1440,    "cumulative_daily",  "1s burst @ 28Hz, every 60s, 1440/day",
-    "TinyFox",     "V13P",            1440,     1.0,    28,    60,    1440,    "cumulative_daily",  "1s burst @ 28Hz, every 60s, 1440/day",
-    "TinyFox",     "V14P",            1440,     1.0,    28,    60,    1440,    "cumulative_daily",  "1s burst @ 28Hz, every 60s, 1440/day",
-    "TinyFox",     "TV1",             1440,     1.0,    28,    60,    1440,    "cumulative_daily",  "1s burst @ 28Hz, every 60s, 1440/day",
-    "TinyFox",     "BBV6",            1440,     1.0,    28,    60,    1440,    "cumulative_daily",  "1s burst @ 28Hz, every 60s, 1440/day",
-    "TinyFox",     "BBX5",            1440,     1.0,    28,    60,    1440,    "cumulative_daily",  "1s burst @ 28Hz, every 60s, 1440/day",
+    # sensor_schema: 5 x VeDBA (cumulative), min/max temp 24hr, min pressure 3hr
+    "TinyFox",    "V13",                     1440,  1.0,  28,  60,   1440,  "cumulative_daily",  "tinyfox",   "1s burst @ 28Hz, every 60s, 1440/day",
+    "TinyFox",    "V13P",                    1440,  1.0,  28,  60,   1440,  "cumulative_daily",  "tinyfox",   "1s burst @ 28Hz, every 60s, 1440/day",
+    "TinyFox",    "V14P",                    1440,  1.0,  28,  60,   1440,  "cumulative_daily",  "tinyfox",   "1s burst @ 28Hz, every 60s, 1440/day",
+    "TinyFox",    "TV1",                     1440,  1.0,  28,  60,   1440,  "cumulative_daily",  "tinyfox",   "1s burst @ 28Hz, every 60s, 1440/day",
+    "TinyFox",    "BBV6",                    1440,  1.0,  28,  60,   1440,  "cumulative_daily",  "tinyfox",   "1s burst @ 28Hz, every 60s, 1440/day",
+    "TinyFox",    "BBX5",                    1440,  1.0,  28,  60,   1440,  "cumulative_daily",  "tinyfox",   "1s burst @ 28Hz, every 60s, 1440/day",
     # Fallback for any unlisted TinyFox firmware
-    "TinyFox",     "all",             1440,     1.0,    28,    60,    1440,    "cumulative_daily",  "1s burst @ 28Hz, every 60s, 1440/day",
+    "TinyFox",    "all",                     1440,  1.0,  28,  60,   1440,  "cumulative_daily",  "tinyfox",   "1s burst @ 28Hz, every 60s, 1440/day",
 
     # =========================================================================
     # NanoFox
@@ -118,28 +119,34 @@ get_default_sampling_config <- function() {
     #
     # 30Days: 1s bursts at 28 Hz, every 2 min, for 36 min per window
     #   vedba_count = 36min / 2min = 18 bursts per window → 18 × 28 = 504 samples
-    #   Reports: 5 × VeDBA windows, 5 × avg temp windows, min pressure 3hr,
-    #   min temp range 3hr
-    "NanoFox",     "30Days",          504,      1.0,    28,    120,   18,      "windowed_sum",      "1s burst @ 28Hz, every 2min, 36min window",
+    #   sensor_schema: 5 × VeDBA bins, 5 × avg temp bins, min pressure 3hr,
+    #                  min temp range label 3hr (categorical: ">10", ">5 / <=10")
+    "NanoFox",    "30Days",                   504,  1.0,  28,  120,  18,    "windowed_sum",      "nanofox_30days",          "1s burst @ 28Hz, every 2min, 36min window",
 
-    # FineScalePressure: same VeDBA as 30Days (504 vedba_count).
-    #   Instead of 5 avg temperature windows, reports 5 PRESSURE measurements.
-    #   Also reports max AND min temperature over last 3 hours.
-    "NanoFox",     "30DaysFineScalePressure", 504,    1.0,    28,    120,   18,      "windowed_sum",      "same VeDBA as 30Days; 5×pressure instead of 5×temp",
+    # 30DaysFineScalePressure: same VeDBA schedule as 30Days (vedba_count = 504).
+    #   KEY DIFFERENCES from 30Days:
+    #   - 5 × instantaneous PRESSURE readings at 0/36/72/108/144 min ago
+    #     (replaces the 5 × avg temperature bins)
+    #   - Numeric MIN temperature (°C) over last 3 hours (not a range label)
+    #   - Numeric MAX temperature (°C) over last 3 hours (new — not in 30Days)
+    #   sensor_schema: 5 × VeDBA bins, 5 × pressure bins (36min),
+    #                  numeric min temp 3hr, numeric max temp 3hr
+    "NanoFox",    "30DaysFineScalePressure",  504,  1.0,  28,  120,  18,    "windowed_sum",      "nanofox_fsp",             "1s burst @ 28Hz, every 2min, 36min window; pressure bins replace temp bins",
+
     # DailyVeDBA: 1s bursts at 28 Hz, every 3 min, for 1 day
-    "NanoFox",     "DailyVeDBA",      13440,    1.0,    28,    180,   480,     "windowed_sum",      "1s burst @ 28Hz, every 3min, 24hr window",
+    "NanoFox",    "DailyVeDBA",             13440,  1.0,  28,  180,  480,   "windowed_sum",      "nanofox_30days",          "1s burst @ 28Hz, every 3min, 24hr window",
 
     # 10Day: 1s bursts at 28 Hz, every 2 min, for 12 min
-    "NanoFox",     "10Day",           168,      1.0,    28,    120,   6,       "windowed_sum",      "1s burst @ 28Hz, every 2min, 12min window",
+    "NanoFox",    "10Day",                   168,   1.0,  28,  120,  6,     "windowed_sum",      "nanofox_30days",          "1s burst @ 28Hz, every 2min, 12min window",
 
     # BBX5 NanoFox — assumed 30Days schedule until confirmed
-    "NanoFox",     "BBX5",            504,      1.0,    28,    120,   18,      "windowed_sum",      "assumed same as 30Days — verify",
+    "NanoFox",    "BBX5",                    504,   1.0,  28,  120,  18,    "windowed_sum",      "nanofox_30days",          "assumed same as 30Days — verify",
 
     # =========================================================================
     # TinyFoxTwo
     # =========================================================================
     # 1s bursts at 28 Hz, every 1 min, for 60 min per window
-    "TinyFoxTwo",  "TINYFOXTWO BLACKBIRDS V", 1680, 1.0, 28,  60,    60,      "windowed_sum",      "1s burst @ 28Hz, every 1min, 60min window"
+    "TinyFoxTwo", "TINYFOXTWO BLACKBIRDS V", 1680,  1.0,  28,  60,   60,    "windowed_sum",      "tinyfox_two",             "1s burst @ 28Hz, every 1min, 60min window"
   )
 }
 
@@ -1022,7 +1029,7 @@ wildcloud_to_movebank <- function(
         dplyr::select(
           tag_model, software_version, vedba_count,
           burst_duration_s, burst_rate_hz,
-          sampling_interval_s, sampling_count, vedba_type
+          sampling_interval_s, sampling_count, vedba_type, sensor_schema
         ),
       by = c("tag_model_family" = "tag_model",
              "firmware_version" = "software_version")
@@ -1037,7 +1044,8 @@ wildcloud_to_movebank <- function(
       burst_rate_hz_default = burst_rate_hz,
       sampling_interval_s_default = sampling_interval_s,
       sampling_count_default = sampling_count,
-      vedba_type_default = vedba_type
+      vedba_type_default = vedba_type,
+      sensor_schema_default = sensor_schema
     )
 
   tag_fw_lookup <- tag_fw_lookup %>%
@@ -1048,12 +1056,13 @@ wildcloud_to_movebank <- function(
       burst_rate_hz       = dplyr::coalesce(burst_rate_hz, burst_rate_hz_default),
       sampling_interval_s = dplyr::coalesce(sampling_interval_s, sampling_interval_s_default),
       sampling_count      = dplyr::coalesce(sampling_count, sampling_count_default),
-      vedba_type          = dplyr::coalesce(vedba_type, vedba_type_default)
+      vedba_type          = dplyr::coalesce(vedba_type, vedba_type_default),
+      sensor_schema       = dplyr::coalesce(sensor_schema, sensor_schema_default)
     ) %>%
     dplyr::select(
       Tag.ID, tag_model_family, firmware_version,
       vedba_count, burst_duration_s, burst_rate_hz,
-      sampling_interval_s, sampling_count, vedba_type
+      sampling_interval_s, sampling_count, vedba_type, sensor_schema
     )
 
   animals_mb <- animals_mb %>%
@@ -1068,15 +1077,18 @@ wildcloud_to_movebank <- function(
     dplyr::group_by(tag_model_family, firmware_version) %>%
     dplyr::summarise(
       n_tags = n(),
-      vedba_count = first(vedba_count),
+      vedba_count   = first(vedba_count),
+      sensor_schema = first(sensor_schema),
       .groups = "drop"
     )
 
   for (i in seq_len(nrow(fw_summary))) {
     r <- fw_summary[i, ]
     message(sprintf(
-      "      %s / %s : %d tag(s), vedba_count = %s",
-      r$tag_model_family, r$firmware_version, r$n_tags, as.character(r$vedba_count)
+      "      %s / %s : %d tag(s), vedba_count = %s, schema = %s",
+      r$tag_model_family, r$firmware_version, r$n_tags,
+      as.character(r$vedba_count),
+      ifelse(is.na(r$sensor_schema), "unknown", r$sensor_schema)
     ))
   }
 
@@ -1625,6 +1637,7 @@ wildcloud_to_movebank <- function(
       tag.attachment.detail = `tag.attachment.raw`,
       vedba.count          = vedba_count,
       vedba.type           = vedba_type,
+      sensor.schema        = sensor_schema,
       burst.duration.s     = burst_duration_s,
       burst.rate.hz        = burst_rate_hz,
       sampling.interval.s  = sampling_interval_s,
@@ -1747,7 +1760,7 @@ wildcloud_to_movebank <- function(
       animal.id, animal.ring.id, animal.marker.id, animal.id.source,
       tag.model, tag.model.family, tag.firmware,
       tag.mass, tag.attachment.type, tag.attachment.detail,
-      vedba.count, vedba.type,
+      vedba.count, vedba.type, sensor.schema,
       burst.duration.s, burst.rate.hz, sampling.interval.s, sampling.count,
       Deploy.On.Latitude, Deploy.On.Longitude, Movebank.Project
     )
@@ -1830,9 +1843,10 @@ if (FALSE) {
   # Note: firmware aliases like "spring2025bat" -> "30Days" are applied
   # automatically before the config lookup.
   my_config <- tibble::tribble(
-    ~tag_model,  ~software_version,  ~vedba_count, ~burst_duration_s, ~burst_rate_hz, ~sampling_interval_s, ~sampling_count, ~vedba_type,          ~notes,
-    "NanoFox",   "30Days",            504,          1.0,               28,             120,                  18,              "windowed_sum",       "1s burst @ 28Hz, every 2min, 36min window",
-    "TinyFox",   "all",               1440,         1.0,               28,             60,                   1440,            "cumulative_daily",   "1s burst @ 28Hz, every 60s"
+    ~tag_model,  ~software_version,           ~vedba_count, ~burst_duration_s, ~burst_rate_hz, ~sampling_interval_s, ~sampling_count, ~vedba_type,         ~sensor_schema,     ~notes,
+    "NanoFox",   "30Days",                     504,          1.0,               28,             120,                  18,              "windowed_sum",       "nanofox_30days",   "1s burst @ 28Hz, every 2min, 36min window",
+    "NanoFox",   "30DaysFineScalePressure",     504,          1.0,               28,             120,                  18,              "windowed_sum",       "nanofox_fsp",      "1s burst @ 28Hz; pressure bins replace temp bins",
+    "TinyFox",   "all",                         1440,         1.0,               28,             60,                   1440,            "cumulative_daily",   "tinyfox",          "1s burst @ 28Hz, every 60s"
   )
   result <- wildcloud_to_movebank(
     wc_path               = "../../../Dropbox/MPI/Noctule/Data/movebank/Switzerland/wildcloud/",
