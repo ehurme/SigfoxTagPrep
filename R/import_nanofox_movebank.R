@@ -1,8 +1,8 @@
 import_nanofox_movebank <- function(
     study_id,
     tag_type = NULL,
-    sensor_external_ids = c("acceleration", "accessory-measurements", "barometer", "sigfox-geolocation"),
-    sensor_labels       = c("VeDBA", "avg.temp", "min.baro.pressure", "location"),
+    sensor_external_ids = c("acceleration", "accessory-measurements", "barometer", "sigfox-geolocation", "derived"),
+    sensor_labels       = c("VeDBA", "avg.temp", "min.baro.pressure", "location", "min.temp"),
     merge_studies = TRUE,
     track_combine = "merge",
     compute_vedba_sum = TRUE,
@@ -14,7 +14,6 @@ import_nanofox_movebank <- function(
     compute_cum_dist = TRUE,
     verbose = TRUE,
     script_mt_add_start         = "../SigfoxTagPrep/R/mt_add_start.R",
-    script_add_vedba_temp       = "../SigfoxTagPrep/R/add_vedba_temp_to_locations.R",
     script_add_min_pressure     = "../SigfoxTagPrep/R/add_min_pressure_to_locations.R",
     script_mt_previous          = "../SigfoxTagPrep/R/mt_previous.R",
     script_calc_displacement    = "../SigfoxTagPrep/R/calc_displacement.R",
@@ -576,8 +575,30 @@ import_nanofox_movebank <- function(
   #
   # Writes altitude_m [m] to x. Never overwrites an existing non-NA value.
   # ---------------------------------------------------------------------------
-  .add_altitude_from_pressure_col <- function(x, P0 = 1013.25) {
+  .add_altitude_from_pressure_col <- function(x, P0 = 1013.25,
+                                              p_min = 396, p_max = 1100) {
+    # p_min / p_max: valid pressure range in mbar.
+    #   Values outside this range are sensor errors and are set to NA before
+    #   conversion so they never produce altitude_m values.
+    #   Default range 500–1100 mbar corresponds to ~5600m–sea level altitude.
+    #   The known error value 395 mbar falls well below p_min and is caught here.
     pressure_to_alt <- function(P) 44330 * (1 - (as.numeric(P) / P0)^(1 / 5.255))
+
+    .mask_pressure <- function(col_name) {
+      if (!col_name %in% names(x)) return(invisible(NULL))
+      raw <- as.numeric(x[[col_name]])
+      bad <- !is.na(raw) & (raw < p_min | raw > p_max)
+      if (any(bad, na.rm = TRUE)) {
+        x[[col_name]][bad] <<- NA_real_
+        .msg("  pressure: ", sum(bad, na.rm = TRUE),
+             " error value(s) in ", col_name,
+             " set to NA (outside ", p_min, "–", p_max, " mbar).")
+      }
+    }
+    for (pc in c("barometric_pressure", "min_3h_pressure",
+                 "tinyfox_pressure_min_last_24h")) {
+      .mask_pressure(pc)
+    }
 
     # Initialise altitude_m if absent
     if (!"altitude_m" %in% names(x)) x$altitude_m <- NA_real_
@@ -622,116 +643,6 @@ import_nanofox_movebank <- function(
   }
 
 
-  # ---------------------------------------------------------------------------
-  # .add_temperature_to_locations()
-  #
-  # Ensures temperature columns are present on location rows for both tag types.
-  # Produces three unified columns (never overwrites existing non-NA values):
-  #
-  #   temperature_min  [°C]  – minimum temperature over the reporting window
-  #   temperature_max  [°C]  – maximum temperature over the reporting window
-  #   avg_temp         [°C]  – mean of min+max (TinyFox) or per-window average
-  #                            (NanoFox, from external_temperature joined by
-  #                            add_vedba_temp_to_locations())
-  #
-  # TinyFox (flat schema):
-  #   tinyfox_temperature_min_last_24h and tinyfox_temperature_max_last_24h are
-  #   columns on every location row. Copied directly; no join required.
-  #
-  # NanoFox (separate-row schema):
-  #   Temperature is stored in separate accessory-measurement sensor rows with
-  #   sensor_type == "avg.temp" and value column "external_temperature".
-  #   add_vedba_temp_to_locations() (sourced script) should have already joined
-  #   these onto location rows. If it did, external_temperature is present.
-  #   If it failed, we do a nearest-timestamp join here as a fallback.
-  # ---------------------------------------------------------------------------
-  .add_temperature_to_locations <- function(x) {
-
-    # ---- TinyFox flat columns ----
-    has_tmin <- "tinyfox_temperature_min_last_24h" %in% names(x)
-    has_tmax <- "tinyfox_temperature_max_last_24h" %in% names(x)
-
-    if (has_tmin || has_tmax) {
-      if (!"temperature_min" %in% names(x)) x$temperature_min <- NA_real_
-      if (!"temperature_max" %in% names(x)) x$temperature_max <- NA_real_
-      if (!"avg_temp"        %in% names(x)) x$avg_temp        <- NA_real_
-
-      if (has_tmin) {
-        fill <- is.na(x$temperature_min) & !is.na(as.numeric(x$tinyfox_temperature_min_last_24h))
-        x$temperature_min[fill] <- as.numeric(x$tinyfox_temperature_min_last_24h[fill])
-      }
-      if (has_tmax) {
-        fill <- is.na(x$temperature_max) & !is.na(as.numeric(x$tinyfox_temperature_max_last_24h))
-        x$temperature_max[fill] <- as.numeric(x$tinyfox_temperature_max_last_24h[fill])
-      }
-
-      # avg_temp from mid-range where both min and max are available
-      fill_avg <- is.na(x$avg_temp) &
-        !is.na(x$temperature_min) & !is.na(x$temperature_max)
-      x$avg_temp[fill_avg] <- (x$temperature_min[fill_avg] + x$temperature_max[fill_avg]) / 2
-
-      # avg_temp from whichever single value is available
-      fill_min_only <- is.na(x$avg_temp) & !is.na(x$temperature_min)
-      x$avg_temp[fill_min_only] <- x$temperature_min[fill_min_only]
-      fill_max_only <- is.na(x$avg_temp) & !is.na(x$temperature_max)
-      x$avg_temp[fill_max_only] <- x$temperature_max[fill_max_only]
-
-      n_filled <- sum(!is.na(x$avg_temp), na.rm = TRUE)
-      .msg("  temperature: ", n_filled, " TinyFox location rows have avg_temp.")
-    }
-
-    # ---- NanoFox: external_temperature already on location rows (from sourced script) ----
-    if ("external_temperature" %in% names(x)) {
-      if (!"avg_temp" %in% names(x)) x$avg_temp <- NA_real_
-      fill <- is.na(x$avg_temp) & !is.na(as.numeric(x$external_temperature))
-      if (any(fill, na.rm = TRUE)) {
-        x$avg_temp[fill] <- as.numeric(x$external_temperature[fill])
-        .msg("  temperature: ", sum(fill, na.rm = TRUE),
-             " NanoFox location rows filled avg_temp from external_temperature.")
-      }
-    }
-
-    # ---- NanoFox fallback: join from avg.temp sensor rows if still missing ----
-    # If add_vedba_temp_to_locations() failed, sensor_type=="avg.temp" rows carry
-    # external_temperature. Join the temporally nearest reading per individual.
-    if ("sensor_type" %in% names(x) &&
-        any(x$sensor_type == "avg.temp", na.rm = TRUE)) {
-
-      if (!"avg_temp" %in% names(x)) x$avg_temp <- NA_real_
-
-      loc_idx  <- which(x$sensor_type == "location" & is.na(x$avg_temp))
-      temp_idx <- which(x$sensor_type == "avg.temp" &
-                          !is.na(as.numeric(x$external_temperature)))
-
-      if (length(loc_idx) > 0 && length(temp_idx) > 0) {
-        loc_df  <- tibble::tibble(
-          .loc_row   = loc_idx,
-          individual = as.character(x$individual_local_identifier[loc_idx]),
-          timestamp  = x$timestamp[loc_idx]
-        )
-        temp_df <- tibble::tibble(
-          individual   = as.character(x$individual_local_identifier[temp_idx]),
-          temp_ts      = x$timestamp[temp_idx],
-          ext_temp_val = as.numeric(x$external_temperature[temp_idx])
-        )
-        joined <- loc_df %>%
-          dplyr::left_join(temp_df, by = "individual",
-                           relationship = "many-to-many") %>%
-          dplyr::mutate(dt = abs(as.numeric(difftime(timestamp, temp_ts, units = "secs")))) %>%
-          dplyr::group_by(.loc_row) %>%
-          dplyr::slice_min(dt, n = 1, with_ties = FALSE) %>%
-          dplyr::ungroup()
-
-        x$avg_temp[joined$.loc_row] <- joined$ext_temp_val
-        .msg("  temperature: ", nrow(joined),
-             " NanoFox location rows filled avg_temp via nearest-sensor join.")
-      }
-    }
-
-    x
-  }
-
-  # ---------------------------------------------------------------------------
   # .expand_tinyfox_rows()
   #
   # TinyFox downloads store all sensor data as extra columns on location rows.
@@ -1113,9 +1024,6 @@ import_nanofox_movebank <- function(
 
     # ---- Altitude from pressure ----
     b_loc <- .add_altitude_from_pressure_col(b_loc)
-
-    # ---- Temperature ----
-    b_loc <- .add_temperature_to_locations(b_loc)
 
     # ---- Delta altitude — grouped by deployment_id ----
     b_loc <- .safe_try(.add_delta_altitude(b_loc), "add_delta_altitude") %||% b_loc
@@ -1557,15 +1465,12 @@ import_nanofox_movebank <- function(
       .msg("  .add_start failed: ", conditionMessage(e)); b
     })
 
-    .source_local(script_add_vedba_temp)
-    b <- .safe_try(add_vedba_temp_to_locations(df = b),   "add_vedba_temp_to_locations")   %||% b
 
     .source_local(script_add_min_pressure)
     b <- .safe_try(add_min_pressure_to_locations(df = b), "add_min_pressure_to_locations") %||% b
 
     # Populate temperature_min, temperature_max, avg_temp on location rows for
     # all tag types (TinyFox flat columns + NanoFox sensor-row join fallback).
-    b <- .add_temperature_to_locations(b)
 
     # Convert pressure to altitude for all tag types.
     # NanoFox: min_3h_pressure is joined by add_min_pressure_to_locations() above.
@@ -1613,6 +1518,22 @@ import_nanofox_movebank <- function(
         drop_cols <- intersect(names(obj), c("tag_type", "taxon_canonical_name"))
         if (length(drop_cols) > 0)
           obj <- obj[, !names(obj) %in% drop_cols, drop = FALSE]
+
+        # ---- tag_tech_spec → min_temp_c + min_temp_group ----
+        # tag_tech_spec carries ordinal minimum-temperature bins from the
+        # "derived" / "min.temp" sensor: "<=0", ">0 / <=5", ">5 / <=10", ">10".
+        # Rename to min_temp_c (the raw text label) and add min_temp_group,
+        # an ordered factor with levels in ascending temperature order so that
+        # model.matrix(), lm(), and ggplot2 all treat it as ordinal automatically.
+        if ("tag_tech_spec" %in% names(obj)) {
+          obj$min_temp_c <- as.character(obj$tag_tech_spec)
+          obj$min_temp_group <- factor(
+            obj$min_temp_c,
+            levels  = c("<=0", ">0 / <=5", ">5 / <=10", ">10"),
+            ordered = TRUE
+          )
+          obj <- obj[, !names(obj) %in% "tag_tech_spec", drop = FALSE]
+        }
         # Coerce factors/ordered → character for merge safety
         obj <- .normalise_cols(obj)
         # Drop all-NA columns
