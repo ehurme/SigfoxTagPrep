@@ -158,8 +158,23 @@ match_tag_model <- function(model_str) {
     grepl("tinyfox\\s*batt|tinyfoxbatt", model_str)            ~ "TinyFox",
     grepl("tinyfox|tiny\\s*fox", model_str)                    ~ "TinyFox",
     grepl("nanofox|nano\\s*fox", model_str)                    ~ "NanoFox",
+    grepl("uwasp|u\\s*wasp|micro\\s*wasp", model_str)         ~ "uWasp",
     grepl("sigfox\\s*gh|georg|unikonstanz", model_str)         ~ "SigfoxGH",
     TRUE                                                       ~ NA_character_
+  )
+}
+
+# Regularize raw tag model strings to canonical display names.
+# Maps any spelling/case variant to the standard product name used in exports.
+regularize_tag_model <- function(model_str) {
+  family <- match_tag_model(model_str)
+  dplyr::case_when(
+    family == "TinyFox"    ~ "TinyFoxBatt",
+    family == "TinyFoxTwo" ~ "TinyFoxTwo",
+    family == "NanoFox"    ~ "NanoFox",
+    family == "uWasp"      ~ "uWasp",
+    family == "SigfoxGH"   ~ "SigfoxGH",
+    TRUE                   ~ as.character(model_str)  # unknown — pass through unchanged
   )
 }
 
@@ -542,14 +557,19 @@ write_movebank_upload_csvs <- function(
     readr::write_csv(min_temp_proj, file.path(project_folder, "dataMinTempText.csv"), na = "")
     readr::write_csv(dep_proj,      file.path(project_folder, "deployment.csv"), na = "")
 
-    if (!is.null(max_temp_data) && nrow(max_temp_data) > 0) {
-      max_temp_proj <- max_temp_data %>% dplyr::filter(Movebank.Project == proj)
-      readr::write_csv(max_temp_proj, file.path(project_folder, "dataMaxTemp.csv"), na = "")
-    }
+    # ---- dataMinMaxTemp.csv: merge numeric min temp (FSP) and max temp ----
+    min_num_proj <- if (!is.null(min_temp_numeric_data) && nrow(min_temp_numeric_data) > 0)
+      min_temp_numeric_data %>% dplyr::filter(Movebank.Project == proj)
+    else
+      NULL
+    max_proj <- if (!is.null(max_temp_data) && nrow(max_temp_data) > 0)
+      max_temp_data %>% dplyr::filter(Movebank.Project == proj)
+    else
+      NULL
 
-    if (!is.null(min_temp_numeric_data) && nrow(min_temp_numeric_data) > 0) {
-      min_temp_num_proj <- min_temp_numeric_data %>% dplyr::filter(Movebank.Project == proj)
-      readr::write_csv(min_temp_num_proj, file.path(project_folder, "dataMinTemp.csv"), na = "")
+    if (!is.null(min_num_proj) || !is.null(max_proj)) {
+      min_max_proj <- dplyr::bind_rows(min_num_proj, max_proj)
+      readr::write_csv(min_max_proj, file.path(project_folder, "dataMinMaxTemp.csv"), na = "")
     }
 
     message("Saved Movebank CSVs for project: ", proj, " -> ", project_folder)
@@ -683,19 +703,21 @@ wildcloud_to_movebank <- function(
                                        "capture.date", "deployment.date",
                                        "deployondate", "capturedate",
                                        "deploymentdate"))
-  deploy_time_col <- detect_col(animals, c("tag deployment time", "capture time",
-                                           "capture.time", "deploy.on.time",
-                                           "tagdeploymenttime", "capturetime",
-                                           "deployontime"))
+  deploy_time_col <- detect_col(animals, c("deployment time", "tag deployment time",
+                                           "capture time", "capture.time",
+                                           "deploy.on.time", "tagdeploymenttime",
+                                           "capturetime", "deployontime",
+                                           "deploymenttime"))
   sex_col     <- detect_col(animals, c("animal.sex", "sex", "animalsex"))
   fa_col      <- detect_col(animals, c("FA 1", "forearm", "forearm.length",
                                        "fa1", "fa", "forearmlength"))
   attach_col  <- detect_col(animals, c("tag attachment", "tag.attachment",
                                        "tag_attachment", "tagattachment",
                                        "attachment.type", "attachmenttype"))
-  repro_col   <- detect_col(animals, c("reproductive state", "reproductive.state",
-                                       "reproductive_state", "reproductivestate",
-                                       "repro.state"))
+  repro_col   <- detect_col(animals, c("productive state", "reproductive state",
+                                       "reproductive.state", "reproductive_state",
+                                       "reproductivestate", "productivestate",
+                                       "repro.state", "reprostate"))
   tag_wt_col  <- detect_col(animals, c("tag weight", "tag.weight", "tag_weight",
                                        "tagweight", "tag.mass", "tagmass"))
   model_col   <- detect_col(animals, c("tag model", "tag.model", "tag_model",
@@ -703,6 +725,14 @@ wildcloud_to_movebank <- function(
   fw_col      <- detect_col(animals, c("firmware version", "firmware.version",
                                        "firmware_version", "firmwareversion",
                                        "software.version", "software_version"))
+  # Animal_ID: pre-filled animal identifier — used as third cascade priority
+  # after PIT and ring. Detect "Animal_ID", "animal.id", "AnimalID", etc.
+  aid_col     <- detect_col(animals, c("Animal_ID", "animal.id", "animal_id",
+                                       "animalid", "AnimalID"))
+  # Per-row movebank project: overrides movebank_project_name when populated
+  proj_col    <- detect_col(animals, c("movebank project", "movebank.project",
+                                       "movebank_project", "movebankproject",
+                                       "lovebank project", "lovebankproject"))
 
   message("[ref] Detected columns — ",
           "species: ", ifelse(is.null(species_col), "none", species_col), ", ",
@@ -718,7 +748,9 @@ wildcloud_to_movebank <- function(
           "deploy date: ", ifelse(is.null(date_col), "none", date_col), ", ",
           "deploy time: ", ifelse(is.null(deploy_time_col), "none", deploy_time_col), ", ",
           "tag model: ", ifelse(is.null(model_col), "none", model_col), ", ",
-          "firmware: ", ifelse(is.null(fw_col), "none", fw_col))
+          "firmware: ", ifelse(is.null(fw_col), "none", fw_col), ", ",
+          "animal id: ", ifelse(is.null(aid_col), "none", aid_col), ", ",
+          "project: ", ifelse(is.null(proj_col), "none", proj_col))
 
   # Report detected columns
   message("[ID] Detected columns — ",
@@ -749,7 +781,7 @@ wildcloud_to_movebank <- function(
 
     pit_vals  <- if (!is.null(pit_col))  safe_char(animals[[pit_col]])  else rep(NA_character_, nrow(animals))
     ring_vals <- if (!is.null(ring_col)) safe_char(animals[[ring_col]]) else rep(NA_character_, nrow(animals))
-    aid_vals  <- if ("animal.id" %in% names(animals)) safe_char(animals$animal.id) else rep(NA_character_, nrow(animals))
+    aid_vals  <- if (!is.null(aid_col))  safe_char(animals[[aid_col]])  else rep(NA_character_, nrow(animals))
     tag_vals  <- if (!is.null(tag_col))  safe_char(animals[[tag_col]])  else rep(NA_character_, nrow(animals))
 
     # ---- build structured fallback ID: Gspp + YY + NN + Loc + TagID ----
@@ -916,9 +948,15 @@ wildcloud_to_movebank <- function(
       `tag.mass.g`        = safe_col(tag_wt_col, "numeric"),
       Deploy.On.Latitude  = safe_col(lat_col, "numeric"),
       Deploy.On.Longitude = safe_col(lon_col, "numeric"),
-      tag_model_raw       = safe_col(model_col),
+      tag_model_raw       = regularize_tag_model(safe_col(model_col)),
       firmware_version    = safe_col(fw_col),
-      Movebank.Project    = movebank_project_name
+      Movebank.Project    = if (!is.null(proj_col)) {
+        # Per-row project: use sheet value where populated, fall back to argument
+        proj_raw <- safe_col(proj_col)
+        ifelse(!is.na(proj_raw) & nzchar(proj_raw), proj_raw, movebank_project_name)
+      } else {
+        movebank_project_name
+      }
     )
 
   # ---- deployment ID ----
@@ -1599,7 +1637,7 @@ wildcloud_to_movebank <- function(
   n_cat <- nrow(min_temp_data)
   n_num <- nrow(min_temp_numeric_data)
   message(sprintf(
-    "[min temp] %d categorical rows (30Days) -> dataMinTemp.csv; %d numeric rows (FSP) -> dataMinTempC.csv",
+    "[min temp] %d categorical rows (30Days) -> dataMinTempText.csv; %d numeric rows (FSP) -> dataMinMaxTemp.csv",
     n_cat, n_num))
   if (n_num == 0 && any(animals_mb$firmware_version == "30DaysFineScalePressure", na.rm = TRUE)) {
     message("[min temp] FSP tags detected in reference data but no numeric min temp rows found. ",
