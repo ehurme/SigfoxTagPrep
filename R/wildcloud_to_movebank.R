@@ -1002,6 +1002,8 @@ wildcloud_to_movebank <- function(
     "spring2025bat"                          = "30Days",
     "TenDay"                                 = "10Day",
     # FineScalePressure variants seen in reference data
+    "FineScalePressure"                      = "30DaysFineScalePressure",
+    "nanofoxFineScalePressure"               = "30DaysFineScalePressure",
     "NanofoxFineScalePressure"               = "30DaysFineScalePressure",
     "NanoFoxFineScalePressure"               = "30DaysFineScalePressure",
     "nanofox_fine_scale_pressure"            = "30DaysFineScalePressure",
@@ -1501,22 +1503,20 @@ wildcloud_to_movebank <- function(
     dplyr::filter(!is.na(.min_temp_range)) %>%
     dplyr::left_join(
       animals_mb %>% dplyr::select(Tag.ID, Movebank.Project, Animal.ID,
-                                   Deployment.ID, firmware_version),
+                                   Deployment.ID, firmware_version, sensor_schema),
       by = c("tag ID" = "Tag.ID")
     )
 
-  # Shared transmute helper columns
-  min_temp_cols_shared <- c(
-    "tag ID", ".min_temp_range", "timestamp_str", "time_start_str", "time_end_str",
-    "Sequence Number", "Sigfox computed location radius", "Sigfox computed location source",
-    "Sigfox computed location status", "Sigfox LQI", "Sigfox link quality",
-    "Sigfox country", "Sigfox base stations", "Sigfox payload",
-    "Movebank.Project", "Animal.ID", "Deployment.ID"
-  )
+  # Diagnostic: report firmware split found in min temp rows
+  fw_in_mintemp <- sort(unique(min_temp_base$firmware_version))
+  message(sprintf("[min temp] %d rows found. Firmware versions present: %s",
+                  nrow(min_temp_base),
+                  if (length(fw_in_mintemp) == 0) "none"
+                  else paste(fw_in_mintemp, collapse = ", ")))
 
-  # 30Days: categorical labels → dataMinTemp.csv (existing Movebank field)
+  # Route by sensor_schema: "nanofox_fsp" gets numeric min temp; all others get categorical
   min_temp_data <- min_temp_base %>%
-    dplyr::filter(firmware_version != "30DaysFineScalePressure" | is.na(firmware_version)) %>%
+    dplyr::filter(is.na(sensor_schema) | sensor_schema != "nanofox_fsp") %>%
     dplyr::transmute(
       `tag ID`,
       `minimum temperature` = .min_temp_range,
@@ -1536,9 +1536,9 @@ wildcloud_to_movebank <- function(
       Movebank.Project, Animal.ID, Deployment.ID
     )
 
-  # 30DaysFSP: numeric °C → dataMinTempC.csv (separate file, numeric column)
+  # FSP: numeric °C → dataMinTempC.csv
   min_temp_numeric_data <- min_temp_base %>%
-    dplyr::filter(firmware_version == "30DaysFineScalePressure") %>%
+    dplyr::filter(!is.na(sensor_schema) & sensor_schema == "nanofox_fsp") %>%
     dplyr::transmute(
       `tag ID`,
       `minimum temperature [°C]` = suppressWarnings(as.numeric(.min_temp_range)),
@@ -1561,10 +1561,12 @@ wildcloud_to_movebank <- function(
 
   n_cat <- nrow(min_temp_data)
   n_num <- nrow(min_temp_numeric_data)
-  if (n_cat > 0 || n_num > 0) {
-    message(sprintf("[min temp] %d categorical (30Days) rows -> dataMinTemp.csv; ",
-                    n_cat),
-            sprintf("%d numeric (FSP) rows -> dataMinTempC.csv", n_num))
+  message(sprintf(
+    "[min temp] %d categorical rows (30Days) -> dataMinTemp.csv; %d numeric rows (FSP) -> dataMinTempC.csv",
+    n_cat, n_num))
+  if (n_num == 0 && any(animals_mb$firmware_version == "30DaysFineScalePressure", na.rm = TRUE)) {
+    message("[min temp] FSP tags detected in reference data but no numeric min temp rows found. ",
+            "Check that FSP WildCloud CSVs are present in wc_path.")
   }
 
   # ---- Max temp (FineScalePressure firmware only) ----
@@ -1840,8 +1842,9 @@ if (FALSE) {
   # Check result$sampling_config to see the default table.
   # The function matches tag_model + software_version from the reference data.
   # Rows with software_version = "all" are used as model-level fallbacks.
-  # Note: firmware aliases like "spring2025bat" -> "30Days" are applied
-  # automatically before the config lookup.
+  # Note: firmware aliases are applied automatically before the config lookup:
+  #   "spring2025bat"  -> "30Days"                (NanoFox 30Days schema)
+  #   "TenDay"         -> "10Day"
   my_config <- tibble::tribble(
     ~tag_model,  ~software_version,           ~vedba_count, ~burst_duration_s, ~burst_rate_hz, ~sampling_interval_s, ~sampling_count, ~vedba_type,         ~sensor_schema,     ~notes,
     "NanoFox",   "30Days",                     504,          1.0,               28,             120,                  18,              "windowed_sum",       "nanofox_30days",   "1s burst @ 28Hz, every 2min, 36min window",
