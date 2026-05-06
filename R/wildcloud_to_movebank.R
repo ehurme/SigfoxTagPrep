@@ -1,5 +1,5 @@
 # Wildcloud to Movebank ----
-# Updated: 2026-05-06
+# Updated: 2026-03-25
 # Edward Hurme
 
 # Summary:
@@ -407,10 +407,35 @@ wc_wide_to_mb_long <- function(df) {
       dplyr::select(-metric, -minutes_ago, -.end)
   }
 
+  # Instantaneous (point-in-time) builder — used for FSP pressure bins.
+  # Each reading is a snapshot at a single moment, not a window average.
+  # Time start = Time end = the moment of measurement.
+  # The 0-min-ago reading aligns exactly with the transmission timestamp.
+  build_instantaneous_long <- function(value_cols, value_name) {
+    if (length(value_cols) == 0) return(NULL)
+
+    df %>%
+      dplyr::mutate(.row_id = dplyr::row_number()) %>%
+      dplyr::select(.row_id, all_of(value_cols)) %>%
+      dplyr::left_join(base, by = ".row_id") %>%
+      tidyr::pivot_longer(
+        cols = all_of(value_cols),
+        names_to = "metric",
+        values_to = value_name
+      ) %>%
+      dplyr::mutate(
+        minutes_ago = suppressWarnings(as.numeric(stringr::str_extract(metric, "\\d+"))),
+        .point = `timestamp SF transmission` - as.difftime(minutes_ago, units = "mins"),
+        `Time end`   = .point,
+        `Time start` = .point   # instantaneous: start == end
+      ) %>%
+      dplyr::select(-metric, -minutes_ago, -.point)
+  }
+
   vedba_long    <- build_36min_long(vedba_cols,    "VeDBA [m/s²]")
   temp_long     <- build_36min_long(temp_cols,     "temperature [°C]")
-  # FineScalePressure: 5 instantaneous pressure readings (36-min bins)
-  pres_bin_long <- build_36min_long(pres_bin_cols, "pressure [mbar]")
+  # FSP pressure: 5 instantaneous readings — Time start = Time end
+  pres_bin_long <- build_instantaneous_long(pres_bin_cols, "pressure [mbar]")
 
   if (!is.null(vedba_long))    vedba_long$`VeDBA [m/s²]`    <- suppressWarnings(as.numeric(vedba_long$`VeDBA [m/s²]`))
   if (!is.null(temp_long))     temp_long$`temperature [°C]` <- suppressWarnings(as.numeric(temp_long$`temperature [°C]`))
@@ -514,7 +539,7 @@ write_movebank_upload_csvs <- function(
     readr::write_csv(vedba_proj,    file.path(project_folder, "dataVeDBA.csv"), na = "")
     readr::write_csv(bar_proj,      file.path(project_folder, "dataBar.csv"), na = "")
     readr::write_csv(temp_proj,     file.path(project_folder, "dataTemp.csv"), na = "")
-    readr::write_csv(min_temp_proj, file.path(project_folder, "dataMinTemp.csv"), na = "")
+    readr::write_csv(min_temp_proj, file.path(project_folder, "dataMinTempText.csv"), na = "")
     readr::write_csv(dep_proj,      file.path(project_folder, "deployment.csv"), na = "")
 
     if (!is.null(max_temp_data) && nrow(max_temp_data) > 0) {
@@ -524,7 +549,7 @@ write_movebank_upload_csvs <- function(
 
     if (!is.null(min_temp_numeric_data) && nrow(min_temp_numeric_data) > 0) {
       min_temp_num_proj <- min_temp_numeric_data %>% dplyr::filter(Movebank.Project == proj)
-      readr::write_csv(min_temp_num_proj, file.path(project_folder, "dataMinTempC.csv"), na = "")
+      readr::write_csv(min_temp_num_proj, file.path(project_folder, "dataMinTemp.csv"), na = "")
     }
 
     message("Saved Movebank CSVs for project: ", proj, " -> ", project_folder)
