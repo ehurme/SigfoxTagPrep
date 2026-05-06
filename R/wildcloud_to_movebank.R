@@ -1,5 +1,5 @@
 # Wildcloud to Movebank ----
-# Updated: 2026-03-25
+# Updated: 2026-05-06
 # Edward Hurme
 
 # Summary:
@@ -1386,11 +1386,23 @@ wildcloud_to_movebank <- function(
       by = c("tag ID" = "Tag.ID")
     ) %>%
     dplyr::mutate(
-      `VeDBA avg` = ifelse(
+      `VeDBA avg`           = ifelse(
         !is.na(vedba_count) & vedba_count > 0 & vedba_type == "windowed_sum",
         `VeDBA sum` / vedba_count,
         NA_real_
       )
+    ) %>%
+    # Reorder so sampling metadata and VeDBA avg sit together after VeDBA sum
+    dplyr::select(
+      `tag ID`, `VeDBA sum`, `VeDBA avg`,
+      vedba_count, burst_duration_s, burst_rate_hz,
+      sampling_interval_s, sampling_count, vedba_type,
+      timestamp, `start timestamp`, `end timestamp`, `sequence number`,
+      `Sigfox computed location radius`, `Sigfox computed location source`,
+      `Sigfox computed location status`, `Sigfox LQI`, `Sigfox link quality`,
+      `Sigfox country`, `Sigfox base stations`, `Sigfox payload`,
+      `sensor type`, Movebank.Project, Animal.ID, Deployment.ID,
+      tag_model_family, firmware_version
     )
 
   # For cumulative_daily tags, VeDBA avg requires differencing consecutive
