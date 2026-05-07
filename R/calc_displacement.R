@@ -1,3 +1,23 @@
+#' Calculate displacement from origin for each fix in a move2 object
+#'
+#' For each track, computes cumulative displacement from the first fix (or a
+#' fix flagged as \code{comments == "start"}), as well as net squared
+#' displacement (NSD) and the change in displacement between consecutive fixes.
+#'
+#' @param x A \code{move2} object with \code{comments} and \code{geometry} columns.
+#' @param units Character; output distance units. Either \code{"km"} (default)
+#'   or \code{"m"}.
+#' @return The input \code{move2} object with four new columns:
+#' \describe{
+#'   \item{\code{displacement}}{Distance from the deployment origin (km or m).}
+#'   \item{\code{nsd}}{Net squared displacement in m\eqn{^2}.}
+#'   \item{\code{d_displacement}}{Change in displacement from the previous fix
+#'     (km or m). Positive = moving away, negative = returning.}
+#'   \item{\code{d_displacement2}}{Squared change in displacement (km\eqn{^2}
+#'     or m\eqn{^2}).}
+#' }
+#' @importFrom sf st_geometry st_is_empty st_distance
+#' @importFrom move2 mt_track_id
 calc_displacement <- function(x, units = "km") {
   require(dplyr)
   require(sf)

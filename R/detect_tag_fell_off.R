@@ -1,4 +1,40 @@
-# Detect tag fall-off events for multiple tag types
+#' Detect tag fall-off events for multiple tag types
+#'
+#' Determines whether a tag has likely fallen off an animal by identifying the
+#' last point at which the animal was active and marking all subsequent fixes as
+#' a potential detachment event. Supports TinyFox, NanoFox, and uWasp tags.
+#'
+#' @param df A data frame or move2 object.
+#' @param method Character; tag type, one of \code{"tinyfox"}, \code{"nanofox"},
+#'   or \code{"uwasp"}.
+#' @param tag_col Column name for the individual/tag identifier. Default
+#'   \code{"individual_local_identifier"}.
+#' @param time_col Column name for timestamps. Default \code{"timestamp"}.
+#' @param vedba_col Column name for VeDBA or activity rate (TinyFox and NanoFox).
+#'   Default \code{"vpm"}.
+#' @param activity_col Column name for percent activity (TinyFox only). Default
+#'   \code{"tinyfox_activity_percent_last_24h"}.
+#' @param dist_col Column name for inter-fix distance (NanoFox and uWasp).
+#'   Default \code{"dist_prev"}.
+#' @param temp_col Column name for temperature (NanoFox only, used to detect
+#'   thermal stasis). Default \code{"temperature"}.
+#' @param vedba_threshold Numeric; VeDBA below this value is considered inactive.
+#'   Default corresponds to a motionless TinyFox tag.
+#' @param activity_threshold Numeric; activity percent threshold. Default \code{0}.
+#' @param dist_threshold Numeric; minimum inter-fix distance (same units as
+#'   \code{dist_col}) to be considered active. Default \code{25}.
+#' @param dtemp_threshold Numeric; minimum absolute temperature change (°C)
+#'   between successive fixes considered active (NanoFox only). Default \code{0.5}.
+#' @param min_inactive_run Integer; minimum consecutive inactive rows required
+#'   after the last active row to declare fall-off. Default \code{3}.
+#' @param keep_last_row_if_all_na Logical; if the final row has all-NA key
+#'   metrics, do not flag it as fell-off. Default \code{TRUE}.
+#' @param verbose Logical; print per-tag messages. Default \code{FALSE}.
+#' @return The input data frame with an additional logical column
+#'   \code{tag_fell_off}. \code{TRUE} indicates fixes after the last active
+#'   point and a sustained inactive period.
+#' @seealso \code{\link{tag_fell_off_tinyfox}}, \code{\link{tag_fell_off_nanofox}},
+#'   \code{\link{tag_fell_off_uwasp}}
 detect_tag_fell_off <- function(
     df,
     method = c("tinyfox", "nanofox", "uwasp"),
@@ -166,6 +202,9 @@ detect_tag_fell_off <- function(
 
 # ---- convenience wrappers ----
 
+#' @rdname detect_tag_fell_off
+#' @description \code{tag_fell_off_tinyfox()} is a convenience wrapper for
+#'   \code{detect_tag_fell_off(method = "tinyfox")}.
 tag_fell_off_tinyfox <- function(
     df,
     vedba_threshold = 280800 * 3.9 / 1000 / (60 * 24),
@@ -181,6 +220,9 @@ tag_fell_off_tinyfox <- function(
   )
 }
 
+#' @rdname detect_tag_fell_off
+#' @description \code{tag_fell_off_nanofox()} is a convenience wrapper for
+#'   \code{detect_tag_fell_off(method = "nanofox")}.
 tag_fell_off_nanofox <- function(
     df,
     dist_threshold = 25,
@@ -204,6 +246,9 @@ tag_fell_off_nanofox <- function(
   )
 }
 
+#' @rdname detect_tag_fell_off
+#' @description \code{tag_fell_off_uwasp()} is a convenience wrapper for
+#'   \code{detect_tag_fell_off(method = "uwasp")}.
 tag_fell_off_uwasp <- function(
     df,
     dist_threshold = 25,
@@ -219,10 +264,10 @@ tag_fell_off_uwasp <- function(
   )
 }
 
-load("../../../Dropbox/MPI/Noctule/Data/rdata/move_icarus_bats.robj")
-bats_loc %>% filter(tag_type == "uWasp") %>% tag_fell_off_uwasp()
-library(mapview)
-bat_tracks <- mt_track_lines(bats_loc)
-mapview(bat_tracks, zcol = "individual_local_identifier", legend = FALSE)
+# load("../../../Dropbox/MPI/Noctule/Data/rdata/move_icarus_bats.robj")
+# bats_loc %>% filter(tag_type == "uWasp") %>% tag_fell_off_uwasp()
+# library(mapview)
+# bat_tracks <- mt_track_lines(bats_loc)
+# mapview(bat_tracks, zcol = "individual_local_identifier", legend = FALSE)
 
 

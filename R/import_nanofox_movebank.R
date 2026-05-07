@@ -1,3 +1,63 @@
+#' Download and process bat tracking data from Movebank
+#'
+#' A high-level pipeline that downloads one or more Movebank studies containing
+#' NanoFox, TinyFox, or uWasp tag data, computes movement metrics, converts
+#' pressure to altitude, and produces three outputs per study: the full
+#' multi-sensor object, a location-only object with speed/distance/bearing, and
+#' a daily thinned dataset.
+#'
+#' @param study_id Integer or character vector of Movebank study IDs.
+#' @param tag_type Character or named list. When tag type cannot be inferred
+#'   automatically from tag metadata, supply it here: a single string for all
+#'   studies, or a named list (e.g. \code{list("12345" = "nanofox")}) for
+#'   specific studies. Allowed values: \code{"uWasp"}, \code{"nanofox"},
+#'   \code{"tinyfox"}.
+#' @param sensor_external_ids Character vector of Movebank sensor external IDs
+#'   to download. Default covers acceleration, accessory measurements,
+#'   barometer, sigfox-geolocation, and derived sensors.
+#' @param sensor_labels Character vector (same length as \code{sensor_external_ids})
+#'   of human-readable labels used as \code{sensor_type} values in the output.
+#' @param merge_studies Logical; if \code{TRUE} (default), stack all downloaded
+#'   studies into single merged objects. If \code{FALSE}, return a list per study.
+#' @param track_combine Character; strategy for merging track data across studies
+#'   in \code{\link[move2]{mt_stack}}. Default \code{"merge"}.
+#' @param compute_vedba_sum Logical; compute summed VeDBA per location row via
+#'   \code{\link{add_vedba_temp_to_locations}}. Default \code{TRUE}.
+#' @param vedba_col Column name of VeDBA values in sensor rows. Default
+#'   \code{"vedba"}.
+#' @param vedba_sum_name Column name for the resulting sum. Default
+#'   \code{"vedba_sum"}.
+#' @param run_elevation Logical; retrieve ground elevation via \pkg{elevatr}.
+#'   Default \code{TRUE}.
+#' @param run_daily_metrics Logical; compute daily solar-noon thinned dataset.
+#'   Default \code{TRUE}.
+#' @param daily_method Character; method for selecting the daily representative
+#'   fix: \code{"solar_noon"} (default), \code{"daytime_only"}, or
+#'   \code{"noon_roost"}.
+#' @param compute_cum_dist Logical; compute cumulative distance per track.
+#'   Default \code{TRUE}.
+#' @param verbose Logical; print progress messages. Default \code{TRUE}.
+#' @param script_mt_add_start,script_add_min_pressure,script_mt_previous,
+#'   script_calc_displacement,script_pressure_to_altitude,script_daily,
+#'   script_daily_sensor Paths to helper R scripts. Defaults assume the
+#'   \pkg{SigfoxTagPrep} repo is one directory above the working directory.
+#' @param tz Time zone string. Default \code{"UTC"}.
+#' @return A list with elements:
+#' \describe{
+#'   \item{\code{sensors_table}}{Full Movebank sensor type table.}
+#'   \item{\code{sensors_selected}}{Subset of sensors actually requested.}
+#'   \item{\code{studies}}{Per-study list (each with \code{full}, \code{location},
+#'     \code{daily}).}
+#'   \item{\code{full}}{Merged full multi-sensor move2 object (or list).}
+#'   \item{\code{location}}{Merged location-only move2 object (or list).}
+#'   \item{\code{daily}}{Merged daily move2 object (or list).}
+#' }
+#' @examples
+#' \dontrun{
+#'   out <- import_nanofox_movebank(study_id = 123456789)
+#'   bats_loc   <- out$location
+#'   bats_daily <- out$daily
+#' }
 import_nanofox_movebank <- function(
     study_id,
     tag_type = NULL,

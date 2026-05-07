@@ -1,3 +1,18 @@
+#' Join minimum 3-hour barometric pressure onto location rows
+#'
+#' Aggregates minimum barometric pressure from sensor rows
+#' (\code{sensor_type == "min.baro.pressure"}) per track/timestamp and joins
+#' the result back onto location rows as a new column \code{min_3h_pressure}.
+#' Designed for NanoFox multi-sensor Movebank downloads.
+#'
+#' @param df A data frame or move2 object with columns \code{sensor_type} and
+#'   \code{barometric_pressure}, as downloaded from Movebank.
+#' @param track_col Unquoted name of the track/individual identifier column.
+#'   Default: \code{individual_local_identifier}.
+#' @param time_col Unquoted name of the timestamp column. Default: \code{timestamp}.
+#' @return The input data frame with an additional column \code{min_3h_pressure}
+#'   (numeric, hPa) populated only on rows where \code{sensor_type == "location"}.
+#' @seealso \code{\link{pressure_to_altitude_m}}, \code{\link{add_altitude_from_pressure}}
 add_min_pressure_to_locations <- function(df,
                                           track_col = individual_local_identifier,
                                           time_col  = timestamp) {

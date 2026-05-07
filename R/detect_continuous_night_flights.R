@@ -1,7 +1,63 @@
-# Detect continuous nocturnal flight bouts on migratory nights ----
-# 2026-03-12
-# Edward Hurme
-
+#' Detect continuous nocturnal flight bouts on migratory nights
+#'
+#' Identifies uninterrupted sequences of nighttime fixes on nights classified as
+#' migratory. Returns per-bout summaries, the individual fixes belonging to each
+#' bout, and a per-night summary.
+#'
+#' @param loc_data A data frame or move2 object of location fixes. Must contain
+#'   columns for individual ID, timestamp, and tag type.
+#' @param daily_data Optional data frame of daily summaries containing a
+#'   migration indicator column (\code{migration_col}). If \code{NULL},
+#'   \code{migration_col} must be present in \code{loc_data}.
+#' @param id_col Character; column name for individual/track identifier. Default
+#'   \code{"individual_local_identifier"}.
+#' @param time_col Character; column name for timestamps. Default
+#'   \code{"timestamp"}.
+#' @param tag_type_col Character; column name for tag type. Default
+#'   \code{"tag_type"}.
+#' @param migration_col Character; column name of the binary migration indicator
+#'   (1 = migratory night, 0 = non-migratory). Default \code{"migration_night"}.
+#' @param night_id_col Character or \code{NULL}; column already encoding a night
+#'   identifier. If \code{NULL}, night dates are assigned from timestamps.
+#' @param date_col_daily Character or \code{NULL}; date column in
+#'   \code{daily_data} to use for joining with location data.
+#' @param nighttime_col Character or \code{NULL}; pre-computed logical column
+#'   indicating whether a fix is at night.
+#' @param sunset_col Character or \code{NULL}; column of sunset times for
+#'   night determination.
+#' @param sunrise_col Character or \code{NULL}; column of sunrise times for
+#'   night determination.
+#' @param expected_intervals_min Named numeric vector of expected fix intervals
+#'   (minutes) per tag type. Defaults to
+#'   \code{c(nanofox = 180, uWasp = 60, tinyfox = 30)}.
+#' @param tolerance_mult Numeric; gap between fixes is allowed up to this
+#'   multiple of the expected interval before splitting a bout. Default
+#'   \code{1.5}.
+#' @param min_fixes Integer; minimum number of fixes in a valid bout. Default
+#'   \code{3}.
+#' @param min_duration_h Numeric; minimum duration in hours for a valid bout.
+#'   Default \code{1}.
+#' @param keep_longest_bout_per_night Logical; if \code{TRUE}, retain only the
+#'   longest bout per night per individual. Default \code{FALSE}.
+#' @param tz Time zone string. Default \code{"UTC"}.
+#' @return A list with three elements:
+#' \describe{
+#'   \item{\code{bouts}}{A tibble with one row per continuous flight bout.}
+#'   \item{\code{points}}{A tibble of individual fixes belonging to retained bouts.}
+#'   \item{\code{night_summary}}{A tibble with per-night summaries.}
+#' }
+#' @examples
+#' \dontrun{
+#'   res <- detect_continuous_night_flights(
+#'     loc_data       = bats_loc,
+#'     daily_data     = b_daily,
+#'     migration_col  = "migration_night",
+#'     nighttime_col  = "night",
+#'     date_col_daily = "date",
+#'     min_fixes      = 3,
+#'     min_duration_h = 2
+#'   )
+#' }
 detect_continuous_night_flights <- function(
     loc_data,
     daily_data = NULL,

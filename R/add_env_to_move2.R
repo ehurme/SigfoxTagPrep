@@ -1,3 +1,37 @@
+#' Append ERA5/ECMWF environmental variables to a move2 object
+#'
+#' Extracts raster values (e.g. wind, temperature, pressure) from yearly GRIB
+#' stacks at the time-matched location of each fix and joins them as new columns.
+#'
+#' @param m A \code{move2} object with a \code{timestamp} column.
+#' @param raster_by_year A named list of \code{SpatRaster} objects or file paths
+#'   (one entry per year, names are the year strings, e.g. \code{list("2024" = "ERA_2024.grib")}).
+#' @param var_names Character vector of variable names matching the GRIB layer
+#'   order within each hourly block. Defaults to ERA5 surface variables
+#'   (\code{u10}, \code{v10}, \code{t2m}, \code{msl}, \code{sp}, \code{tp},
+#'   \code{u100}, \code{v100}, \code{i10fg}, \code{tcc}).
+#' @param shift_hours Numeric; hours to shift timestamps before matching. Use
+#'   negative values to extract environmental conditions before a fix (e.g.
+#'   \code{-12} for conditions 12 h prior). Default is \code{0}.
+#' @param time_round Character; rounding unit passed to
+#'   \code{\link[lubridate]{round_date}}. Default \code{"hour"}.
+#' @param tz Time zone string for timestamp handling. Default \code{"UTC"}.
+#' @param id_col Name of a temporary row ID column created internally. Should
+#'   not conflict with existing column names.
+#' @param coord_crs CRS string for point coordinates. Default \code{"EPSG:4326"}.
+#' @param verbose Logical; print progress messages. Default \code{TRUE}.
+#' @return The input \code{move2} object with new columns named
+#'   \code{<var>_<shift_hours>h} for each variable in \code{var_names}.
+#' @examples
+#' \dontrun{
+#'   r_list <- list("2024" = "path/to/ERA_2024.grib")
+#'   m_env <- add_env_to_move2(m, raster_by_year = r_list)
+#' }
+#' @importFrom move2 mt_track_id mt_time
+#' @importFrom sf st_geometry st_coordinates st_drop_geometry
+#' @importFrom dplyr mutate row_number
+#' @importFrom lubridate hours round_date year
+#' @importFrom terra rast nlyr time extract vect crs project
 add_env_to_move2 <- function(
     m,
     raster_by_year,

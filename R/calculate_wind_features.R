@@ -1,4 +1,4 @@
-################# Wind Support Functions
+################# Wind Feature Functions
 
 # Function: Calculate Wind Direction
 wind_dir <- function(u_ms, v_ms) {
@@ -10,19 +10,7 @@ wind_dir <- function(u_ms, v_ms) {
   return(wind_dir_cardinal)
 }
 
-# Function: Calculate Bearing
-calculate_bearing <- function(lon1, lat1, lon2, lat2) {
-  lat1_rad <- lat1 * (pi / 180)
-  lat2_rad <- lat2 * (pi / 180)
-  delta_lon <- (lon2 - lon1) * (pi / 180)
-
-  bearing <- atan2(
-    sin(delta_lon) * cos(lat2_rad),
-    cos(lat1_rad) * sin(lat2_rad) - sin(lat1_rad) * cos(lat2_rad) * cos(delta_lon)
-  ) * (180 / pi)
-
-  return((bearing + 360) %% 360)
-}
+# calculate_bearing() is defined in tracking_data_processing.R
 
 # Function: Calculate Wind Support
 wind_support <- function(u, v, heading) {
@@ -41,9 +29,57 @@ airspeed <- function(ground_speed, ws, cw) {
   return(sqrt((ground_speed - ws)^2 + cw^2))
 }
 
-suffix = "h"
-env_name <- function(base, off_h) paste0(base, "_", off_h, suffix)
-
+#' Calculate wind support, crosswind, and airspeed from ERA5 wind components
+#'
+#' Given U/V wind component columns at one or more time offsets (e.g. from
+#' \code{\link{add_env_to_move2}}), computes:
+#' \itemize{
+#'   \item Wind speed and cardinal direction
+#'   \item Wind support (tailwind component along heading)
+#'   \item Crosswind (lateral component)
+#'   \item Estimated airspeed
+#' }
+#' New columns are added for each offset.
+#'
+#' @param data A data frame containing wind component columns and movement columns.
+#' @param u_col_base Character; base name of the U (eastward) wind column, e.g.
+#'   \code{"u10"} or \code{"u100"}. Offset suffix is appended automatically.
+#' @param v_col_base Character; base name of the V (northward) wind column, e.g.
+#'   \code{"v10"} or \code{"v100"}.
+#' @param windsp_col_base Character or \code{NULL}; base name for output wind
+#'   speed columns. If \code{NULL}, inferred from \code{v_col_base}.
+#' @param winddir_col_base Character or \code{NULL}; base name for output wind
+#'   direction columns. If \code{NULL}, inferred from \code{v_col_base}.
+#' @param distance_col Character; column name of distance (in metres or km,
+#'   consistent with \code{time_diff_units}).
+#' @param time_diff_col Character; column name of time difference between fixes.
+#' @param bearing_col Character; column name of movement bearing in degrees
+#'   (0 = North, clockwise).
+#' @param offsets Numeric vector of time offsets to process (in units of
+#'   \code{offset_units}).
+#' @param offset_units Character; \code{"hours"} (default) or \code{"days"}.
+#' @param time_diff_units Character; units of \code{time_diff_col}.
+#'   \code{"minutes"} (default) or \code{"seconds"}.
+#' @param suffix Character; suffix appended to offset value in column names.
+#'   Default \code{"h"}.
+#' @param quiet Logical; suppress messages about skipped offsets. Default
+#'   \code{FALSE}.
+#' @return The input data frame with new columns for wind speed, wind direction,
+#'   wind support, crosswind, and airspeed at each requested offset.
+#' @examples
+#' \dontrun{
+#'   b_daily <- calculate_wind_features(
+#'     data          = b_daily,
+#'     u_col_base    = "u100",
+#'     v_col_base    = "v100",
+#'     distance_col  = "distance",
+#'     time_diff_col = "diff_time",
+#'     bearing_col   = "bearing",
+#'     offsets       = -2:2,
+#'     offset_units  = "days",
+#'     time_diff_units = "minutes"
+#'   )
+#' }
 calculate_wind_features <- function(
     data,
     u_col_base, v_col_base,

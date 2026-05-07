@@ -1,3 +1,18 @@
+#' Join summed VeDBA and mean temperature onto location rows
+#'
+#' Aggregates VeDBA (\code{sensor_type == "VeDBA"}) and external temperature
+#' (\code{sensor_type == "avg.temp"}) from sensor rows per track/timestamp and
+#' joins them back onto location rows as \code{vedba_sum} and \code{avg_temp}.
+#' Designed for NanoFox multi-sensor Movebank downloads.
+#'
+#' @param df A data frame or move2 object with columns \code{sensor_type},
+#'   \code{vedba}, and \code{external_temperature}.
+#' @param track_col Unquoted name of the track/individual identifier column.
+#'   Default: \code{individual_local_identifier}.
+#' @param time_col Unquoted name of the timestamp column. Default: \code{timestamp}.
+#' @return The input data frame with additional columns \code{vedba_sum} (numeric)
+#'   and \code{avg_temp} (numeric, \eqn{^\circ}C) populated only on location rows.
+#' @seealso \code{\link{add_min_pressure_to_locations}}
 add_vedba_temp_to_locations <- function(df,
                                         track_col = individual_local_identifier,
                                         time_col  = timestamp) {

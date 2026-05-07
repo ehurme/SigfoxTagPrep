@@ -1,16 +1,47 @@
 Package: SigfoxTagPrep
-Title: Map and regularize the data from TinyFoxBatt tags.
-Version: 0.0.0.9000
-Authors@R: 
+Title: Download, Process, and Analyse Sigfox Wildlife Tracking Data
+Version: 0.1.0
+Authors@R:
     person("Edward", "Hurme", , "edwardhurme@gmail.com", role = c("aut", "cre"),
            comment = c(ORCID = "0000-0002-2936-2449"))
-Description: The package takes tag IDs, downloads any associated data, and then plots and regularizes the tracks.
-Depends: R (>= 3.1.0), data.table, dplyr, ggplot2, janitor, lubridate, mapview,
-    move2, pacman, rnaturalearth, rvest, sf, devtools, geosphere, stringr, suncalc
-License: `use_mit_license()`
+Description: Tools for working with ICARUS/Sigfox wildlife tracking tags
+    (TinyFox, NanoFox, uWasp). Provides functions to download raw transmission
+    data from the MPIAB Sigfox database or Movebank, convert it to move2
+    objects, compute movement metrics (speed, distance, bearing, displacement,
+    VeDBA), add environmental covariates from ERA5 rasters, detect tag
+    fall-off events, and identify continuous nocturnal flight bouts.
+License: MIT + file LICENSE
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
 RoxygenNote: 7.3.2
-Suggests: 
-    testthat (>= 3.0.0)
+Depends:
+    R (>= 4.1.0)
+Imports:
+    data.table,
+    dplyr,
+    ggplot2,
+    janitor,
+    lubridate,
+    mapview,
+    move2,
+    rnaturalearth,
+    rvest,
+    sf,
+    stringr,
+    suncalc
+Suggests:
+    devtools,
+    elevatr,
+    geosphere,
+    ggridges,
+    lme4,
+    pacman,
+    purrr,
+    terra,
+    testthat (>= 3.0.0),
+    tidyr,
+    tidyverse,
+    units
 Config/testthat/edition: 3
+URL: https://github.com/ehurme/SigfoxTagPrep
+BugReports: https://github.com/ehurme/SigfoxTagPrep/issues

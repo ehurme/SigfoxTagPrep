@@ -1,6 +1,3 @@
-library(dplyr)
-library(lubridate)
-
 #' Evaluate tag deployment quality
 #'
 #' Checks for suspicious deploy timestamps, implausible durations,

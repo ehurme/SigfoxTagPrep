@@ -1,5 +1,36 @@
 
-# Add moonlight / twilight covariates to a move2 object using moonlit
+#' Add moonlight and twilight covariates to a move2 object
+#'
+#' Uses the \pkg{moonlit} package to compute moonlight intensity, sun altitude,
+#' and twilight model values for each fix and attaches them as new columns.
+#'
+#' @param x A \code{move2} object with CRS set to EPSG:4326 (or transformable).
+#' @param time_col Character; name of the POSIXct timestamp column. Default
+#'   \code{"timestamp"}.
+#' @param e Numeric; atmospheric extinction coefficient. If \code{NULL},
+#'   derived from altitude (when \code{e_from_altitude = TRUE}) or defaults to
+#'   0.28 (sea level).
+#' @param e_from_altitude Logical; if \code{TRUE} and \code{e} is \code{NULL},
+#'   compute \code{e} from the median of \code{altitude_col} using
+#'   \code{moonlit::elevExtCoeff()}. Default \code{FALSE}.
+#' @param altitude_col Character; column name for altitude (m asl) used when
+#'   \code{e_from_altitude = TRUE}. Default \code{"altitude"}.
+#' @param altitude_fun Function applied to altitude values to produce a single
+#'   representative value. Default \code{stats::median}.
+#' @param tz Character or \code{NULL}; time zone to use for timestamps. If
+#'   \code{NULL} the column's existing time zone is used.
+#' @param prefix Character; prefix for new column names. Default \code{"moonlit_"}.
+#' @param quiet Logical; suppress informational messages. Default \code{FALSE}.
+#' @return The input \code{move2} object with new columns:
+#'   \code{moonlit_night}, \code{moonlit_sun_alt_degrees},
+#'   \code{moonlit_moonlight_model}, \code{moonlit_twilight_model_lx},
+#'   \code{moonlit_ext_coeff_e}.
+#' @note Requires the \pkg{moonlit} package from GitHub:
+#'   \code{devtools::install_github("msmielak/moonlit")}.
+#' @examples
+#' \dontrun{
+#'   m <- add_moonlit_to_move2(m)
+#' }
 add_moonlit_to_move2 <- function(x,
                                  time_col = "timestamp",
                                  e = NULL,
@@ -109,4 +140,4 @@ add_moonlit_to_move2 <- function(x,
 }
 
 # b_daily_wind <- add_moonlit_to_move2(b_daily_wind)
-b_daily_wind$moonlit_moonlight_model %>% plot()
+# b_daily_wind$moonlit_moonlight_model %>% plot()
