@@ -59,42 +59,56 @@
 #'   bats_daily <- out$daily
 #' }
 import_nanofox_movebank <- function(
-    study_id,
-    tag_type = NULL,
-    sensor_external_ids = c("acceleration", "accessory-measurements", "barometer", "sigfox-geolocation", "derived"),
-    sensor_labels       = c("VeDBA", "avg.temp", "min.baro.pressure", "location", "min.temp"),
-    merge_studies = TRUE,
-    track_combine = "merge",
-    compute_vedba_sum = TRUE,
-    vedba_col = "vedba",
-    vedba_sum_name = "vedba_sum",
-    run_elevation = TRUE,
-    run_daily_metrics = TRUE,
-    daily_method = c("solar_noon", "daytime_only", "noon_roost"),
-    compute_cum_dist = TRUE,
-    verbose = TRUE,
-    script_mt_add_start         = "../SigfoxTagPrep/R/mt_add_start.R",
-    script_add_min_pressure     = "../SigfoxTagPrep/R/add_min_pressure_to_locations.R",
-    script_mt_previous          = "../SigfoxTagPrep/R/mt_previous.R",
-    script_calc_displacement    = "../SigfoxTagPrep/R/calc_displacement.R",
-    script_pressure_to_altitude = "../SigfoxTagPrep/R/pressure_to_altitude_m.R",
-    script_daily                = "../SigfoxTagPrep/R/mt_thin_daily_solar_noon.R",
-    script_daily_sensor         = "../SigfoxTagPrep/R/mt_add_daily_sensor_metrics.R",
-    tz = "UTC"
+  study_id,
+  tag_type = NULL,
+  sensor_external_ids = c(
+    "acceleration",
+    "accessory-measurements",
+    "barometer",
+    "sigfox-geolocation",
+    "derived"
+  ),
+  sensor_labels = c(
+    "VeDBA",
+    "avg.temp",
+    "min.baro.pressure",
+    "location",
+    "min.temp"
+  ),
+  merge_studies = TRUE,
+  track_combine = "merge",
+  compute_vedba_sum = TRUE,
+  vedba_col = "vedba",
+  vedba_sum_name = "vedba_sum",
+  run_elevation = TRUE,
+  run_daily_metrics = TRUE,
+  daily_method = c("solar_noon", "daytime_only", "noon_roost"),
+  compute_cum_dist = TRUE,
+  verbose = TRUE,
+  script_mt_add_start = "../SigfoxTagPrep/R/mt_add_start.R",
+  script_add_min_pressure = "../SigfoxTagPrep/R/add_min_pressure_to_locations.R",
+  script_mt_previous = "../SigfoxTagPrep/R/mt_previous.R",
+  script_calc_displacement = "../SigfoxTagPrep/R/calc_displacement.R",
+  script_pressure_to_altitude = "../SigfoxTagPrep/R/pressure_to_altitude_m.R",
+  script_daily = "../SigfoxTagPrep/R/mt_thin_daily_solar_noon.R",
+  script_daily_sensor = "../SigfoxTagPrep/R/mt_add_daily_sensor_metrics.R",
+  tz = "UTC"
 ) {
   suppressPackageStartupMessages({
-    require("tidyverse",  quietly = TRUE)
-    require("dplyr",      quietly = TRUE)
-    require("tibble",     quietly = TRUE)
-    require("purrr",      quietly = TRUE)
-    require("tidyr",      quietly = TRUE)
-    require("stringr",    quietly = TRUE)
-    require("lubridate",  quietly = TRUE)
-    require("move2",      quietly = TRUE)
-    require("sf",         quietly = TRUE)
-    require("units",      quietly = TRUE)
-    require(assertthat,   quietly = TRUE)
-    if (isTRUE(run_elevation))     require("elevatr", quietly = TRUE)
+    require("tidyverse", quietly = TRUE)
+    require("dplyr", quietly = TRUE)
+    require("tibble", quietly = TRUE)
+    require("purrr", quietly = TRUE)
+    require("tidyr", quietly = TRUE)
+    require("stringr", quietly = TRUE)
+    require("lubridate", quietly = TRUE)
+    require("move2", quietly = TRUE)
+    require("sf", quietly = TRUE)
+    require("units", quietly = TRUE)
+    require(assertthat, quietly = TRUE)
+    if (isTRUE(run_elevation)) {
+      require("elevatr", quietly = TRUE)
+    }
     if (isTRUE(run_daily_metrics)) require("suncalc", quietly = TRUE)
   })
 
@@ -102,29 +116,40 @@ import_nanofox_movebank <- function(
   # Internal helpers
   # ---------------------------------------------------------------------------
 
-  .msg      <- function(...) if (isTRUE(verbose)) message(...)
-  `%||%`    <- function(a, b) if (!is.null(a)) a else b
+  .msg <- function(...) if (isTRUE(verbose)) message(...)
+  `%||%` <- function(a, b) if (!is.null(a)) a else b
 
   .safe_try <- function(expr, what = "step") {
     tryCatch(expr, error = function(e) {
-      .msg("\u26a0\ufe0f  ", what, " failed: ", conditionMessage(e)); NULL
+      .msg("\u26a0\ufe0f  ", what, " failed: ", conditionMessage(e))
+      NULL
     })
   }
 
   .norm <- function(x) gsub("\\s+", " ", tolower(trimws(as.character(x))))
 
   .stop_if_missing <- function(path) {
-    if (!file.exists(path)) stop("Missing required script: ", path)
+    if (!file.exists(path)) {
+      stop("Missing required script: ", path)
+    }
     invisible(TRUE)
   }
 
-  .source_local <- function(path) { .stop_if_missing(path); source(path); invisible(TRUE) }
+  .source_local <- function(path) {
+    .stop_if_missing(path)
+    source(path)
+    invisible(TRUE)
+  }
 
   # Choose the most specific identifier available for movement metrics.
   # Prefer deployment_id, then tag_local_identifier, then individual_local_identifier,
   # and finally the internal move2 track id.
   .metric_group_col <- function(x) {
-    for (nm in c("deployment_id", "tag_local_identifier", "individual_local_identifier")) {
+    for (nm in c(
+      "deployment_id",
+      "tag_local_identifier",
+      "individual_local_identifier"
+    )) {
       if (nm %in% names(x) && !all(is.na(x[[nm]]))) return(nm)
     }
     NULL
@@ -141,16 +166,29 @@ import_nanofox_movebank <- function(
   # ---------------------------------------------------------------------------
   .fill_from_td <- function(x, td_col, event_col) {
     td <- tryCatch(move2::mt_track_data(x), error = function(e) NULL)
-    if (is.null(td)) return(x)
+    if (is.null(td)) {
+      return(x)
+    }
     taxon_src <- intersect(
-      c(td_col, "taxon_canonical_name", "species", "individual_taxon_canonical_name"),
+      c(
+        td_col,
+        "taxon_canonical_name",
+        "species",
+        "individual_taxon_canonical_name"
+      ),
       names(td)
     )[1]
-    if (is.na(taxon_src)) return(x)
+    if (is.na(taxon_src)) {
+      return(x)
+    }
     id_col <- move2::mt_track_id_column(x)
-    if (!id_col %in% names(td)) return(x)
-    lkp  <- stats::setNames(as.character(td[[taxon_src]]),
-                            as.character(td[[id_col]]))
+    if (!id_col %in% names(td)) {
+      return(x)
+    }
+    lkp <- stats::setNames(
+      as.character(td[[taxon_src]]),
+      as.character(td[[id_col]])
+    )
     vals <- unname(lkp[as.character(move2::mt_track_id(x))])
     if (!event_col %in% names(x) || all(is.na(x[[event_col]]))) {
       x[[event_col]] <- vals
@@ -169,8 +207,10 @@ import_nanofox_movebank <- function(
     # for deduplication, but the final sort order must put the move2 track id first
     # so the cleave invariant is satisfied.
     move2_track_col <- move2::mt_track_id_column(x)
-    grp_col         <- .metric_group_col(x)
-    if (is.null(grp_col)) grp_col <- move2_track_col
+    grp_col <- .metric_group_col(x)
+    if (is.null(grp_col)) {
+      grp_col <- move2_track_col
+    }
 
     # Some studies do not include comments; prefer non-start rows only if present.
     ord_comments <- if ("comments" %in% names(x)) {
@@ -178,19 +218,27 @@ import_nanofox_movebank <- function(
     } else {
       rep(TRUE, nrow(x))
     }
-    ord_event <- if ("event_id" %in% names(x)) (!is.na(x$event_id)) else rep(FALSE, nrow(x))
+    ord_event <- if ("event_id" %in% names(x)) {
+      (!is.na(x$event_id))
+    } else {
+      rep(FALSE, nrow(x))
+    }
     x <- x %>% dplyr::mutate(`..dedupe_order` = ord_comments + 0.1 * ord_event)
 
     out <- x %>%
       dplyr::group_by(.data[[grp_col]], .data$timestamp) %>%
       dplyr::slice_max(
-        order_by  = .data$`..dedupe_order`,
-        n         = 1,
+        order_by = .data$`..dedupe_order`,
+        n = 1,
         with_ties = FALSE
       ) %>%
       dplyr::ungroup() %>%
       # Sort by move2 track id FIRST (satisfies cleave), then dep_col, then time
-      dplyr::arrange(.data[[move2_track_col]], .data[[grp_col]], .data$timestamp) %>%
+      dplyr::arrange(
+        .data[[move2_track_col]],
+        .data[[grp_col]],
+        .data$timestamp
+      ) %>%
       dplyr::select(-dplyr::any_of(c("..dedupe_order", "..metric_group_id")))
     out
   }
@@ -215,7 +263,8 @@ import_nanofox_movebank <- function(
   # the deployment is skipped (no start row inserted for it).
   # ---------------------------------------------------------------------------
   .add_start <- function(x) {
-    require(sf); require(dplyr)
+    require(sf)
+    require(dplyr)
 
     td <- tryCatch(move2::mt_track_data(x), error = function(e) NULL)
     if (is.null(td)) {
@@ -224,9 +273,9 @@ import_nanofox_movebank <- function(
     }
 
     # Identify required columns in track data
-    has_deploy_ts  <- "deploy_on_timestamp"  %in% names(td)
-    has_deploy_loc <- "deploy_on_location"   %in% names(td)
-    has_dep_id     <- "deployment_id"        %in% names(td)
+    has_deploy_ts <- "deploy_on_timestamp" %in% names(td)
+    has_deploy_loc <- "deploy_on_location" %in% names(td)
+    has_dep_id <- "deployment_id" %in% names(td)
 
     if (!has_deploy_ts) {
       .msg("  .add_start: deploy_on_timestamp not in track data; skipping.")
@@ -264,56 +313,93 @@ import_nanofox_movebank <- function(
       # deploy_on_timestamp — skip if missing or unparseable
       dep_ts_raw <- td$deploy_on_timestamp[i]
       # May be POSIXct, character (from stringification), or NA
-      dep_ts <- tryCatch({
-        if (inherits(dep_ts_raw, c("POSIXct", "POSIXlt"))) dep_ts_raw
-        else if (is.character(dep_ts_raw) && !is.na(dep_ts_raw) && nchar(trimws(dep_ts_raw)) > 0)
-          lubridate::ymd_hms(dep_ts_raw, tz = "UTC", quiet = TRUE)
-        else NA_real_
-      }, error = function(e) NA_real_)
-      if (length(dep_ts) == 0 || all(is.na(dep_ts))) next
+      dep_ts <- tryCatch(
+        {
+          if (inherits(dep_ts_raw, c("POSIXct", "POSIXlt"))) {
+            dep_ts_raw
+          } else if (
+            is.character(dep_ts_raw) &&
+              !is.na(dep_ts_raw) &&
+              nchar(trimws(dep_ts_raw)) > 0
+          ) {
+            lubridate::ymd_hms(dep_ts_raw, tz = "UTC", quiet = TRUE)
+          } else {
+            NA_real_
+          }
+        },
+        error = function(e) NA_real_
+      )
+      if (length(dep_ts) == 0 || all(is.na(dep_ts))) {
+        next
+      }
 
       # Geometry: prefer deploy_on_location from track data.
       # After .fix_track_data_lists(), geometry columns become character WKT strings.
       # Handle sfc, sfg, character WKT, and numeric/NA gracefully.
       ref_idx <- first_loc_idx[track_key]
-      geom    <- NULL
+      geom <- NULL
 
       if (has_deploy_loc) {
         loc_raw <- td$deploy_on_location[i]
-        geom <- tryCatch({
-          if (inherits(loc_raw, "sfc"))                                  sf::st_sfc(loc_raw, crs = sf::st_crs(x))
-          else if (inherits(loc_raw, "sfg"))                             sf::st_sfc(list(loc_raw), crs = sf::st_crs(x))
-          else if (is.character(loc_raw) && !is.na(loc_raw) &&
-                   nchar(trimws(loc_raw)) > 0 &&
-                   grepl("POINT|LINESTRING|POLYGON|GEOMETRY", loc_raw, ignore.case = TRUE))
-            sf::st_as_sfc(loc_raw, crs = sf::st_crs(x))
-          else                                                           NULL
-        }, error = function(e) NULL)
+        geom <- tryCatch(
+          {
+            if (inherits(loc_raw, "sfc")) {
+              sf::st_sfc(loc_raw, crs = sf::st_crs(x))
+            } else if (inherits(loc_raw, "sfg")) {
+              sf::st_sfc(list(loc_raw), crs = sf::st_crs(x))
+            } else if (
+              is.character(loc_raw) &&
+                !is.na(loc_raw) &&
+                nchar(trimws(loc_raw)) > 0 &&
+                grepl(
+                  "POINT|LINESTRING|POLYGON|GEOMETRY",
+                  loc_raw,
+                  ignore.case = TRUE
+                )
+            ) {
+              sf::st_as_sfc(loc_raw, crs = sf::st_crs(x))
+            } else {
+              NULL
+            }
+          },
+          error = function(e) NULL
+        )
       }
 
       # Fall back to first real location fix of the deployment
       if (is.null(geom) || length(geom) == 0) {
-        geom <- if (!is.null(ref_idx) && !is.na(ref_idx))
+        geom <- if (!is.null(ref_idx) && !is.na(ref_idx)) {
           sf::st_geometry(x)[ref_idx]
-        else
+        } else {
           sf::st_sfc(sf::st_point(), crs = sf::st_crs(x))
+        }
       }
 
       # Build the start row from the reference location row (copies all event columns)
-      base_idx <- if (!is.null(ref_idx) && !is.na(ref_idx)) ref_idx else {
+      base_idx <- if (!is.null(ref_idx) && !is.na(ref_idx)) {
+        ref_idx
+      } else {
         any_idx <- which(track_ids_vec == track_key)[1]
-        if (is.na(any_idx)) next
+        if (is.na(any_idx)) {
+          next
+        }
         any_idx
       }
       start_row <- sf::st_as_sf(x[base_idx, , drop = FALSE])
 
       # Override the deployment-specific fields
       start_row$timestamp <- dep_ts
-      if ("comments" %in% names(start_row)) start_row$comments <- "start"
-      else start_row$comments <- "start"
+      if ("comments" %in% names(start_row)) {
+        start_row$comments <- "start"
+      } else {
+        start_row$comments <- "start"
+      }
       tryCatch(
-        sf::st_geometry(start_row) <- sf::st_sfc(geom[[1]], crs = sf::st_crs(x)),
-        error = function(e) NULL  # geometry assignment failed — keep original
+        sf::st_geometry(start_row) <- sf::st_sfc(
+          geom[[1]],
+          crs = sf::st_crs(x)
+        ),
+        error = function(e) NULL # geometry assignment failed — keep original
       )
 
       # Ensure deployment_id is on the start row (may have been promoted from track data)
@@ -327,18 +413,26 @@ import_nanofox_movebank <- function(
 
     start_rows <- Filter(Negate(is.null), start_rows)
     if (length(start_rows) == 0) {
-      .msg("  .add_start: no valid deploy_on_timestamp found; no start rows inserted.")
+      .msg(
+        "  .add_start: no valid deploy_on_timestamp found; no start rows inserted."
+      )
       return(x)
     }
 
     new_rows <- tryCatch(
       dplyr::bind_rows(start_rows),
       error = function(e) {
-        .msg("  .add_start: bind_rows failed (", conditionMessage(e), "); skipping.")
+        .msg(
+          "  .add_start: bind_rows failed (",
+          conditionMessage(e),
+          "); skipping."
+        )
         NULL
       }
     )
-    if (is.null(new_rows)) return(x)
+    if (is.null(new_rows)) {
+      return(x)
+    }
 
     # Combine original + start rows without calling mt_as_move2().
     # mt_as_move2 would rebuild track data from event rows and error if any
@@ -353,24 +447,31 @@ import_nanofox_movebank <- function(
 
     class(combined) <- c("move2", class(combined))
     attr(combined, "track_id_column") <- track_col
-    attr(combined, "time_column")     <- "timestamp"
-    if (!is.null(orig_td_start))
-      combined <- tryCatch(move2::mt_set_track_data(combined, orig_td_start),
-                           error = function(e) combined)
+    attr(combined, "time_column") <- "timestamp"
+    if (!is.null(orig_td_start)) {
+      combined <- tryCatch(
+        move2::mt_set_track_data(combined, orig_td_start),
+        error = function(e) combined
+      )
+    }
 
     .msg("  .add_start: inserted ", n_inserted, " deployment start rows.")
     combined
   }
 
   add_prev_latlon <- function(x, lat_name = "lat_prev", lon_name = "lon_prev") {
-    if (!inherits(x, "move2")) stop("x must be a move2 object")
-    coords   <- sf::st_coordinates(x)
+    if (!inherits(x, "move2")) {
+      stop("x must be a move2 object")
+    }
+    coords <- sf::st_coordinates(x)
     track_id <- move2::mt_track_id(x)
-    df <- tibble::tibble(track_id = track_id,
-                         lon = coords[, "X"], lat = coords[, "Y"]) %>%
+    df <- tibble::tibble(
+      track_id = track_id,
+      lon = coords[, "X"],
+      lat = coords[, "Y"]
+    ) %>%
       group_by(track_id) %>%
-      mutate(!!lon_name := dplyr::lag(lon),
-             !!lat_name := dplyr::lag(lat)) %>%
+      mutate(!!lon_name := dplyr::lag(lon), !!lat_name := dplyr::lag(lat)) %>%
       ungroup()
     x[[lon_name]] <- df[[lon_name]]
     x[[lat_name]] <- df[[lat_name]]
@@ -378,8 +479,11 @@ import_nanofox_movebank <- function(
   }
 
   .wanted_sensor_ids <- function(study_info, sensor_selected) {
-    study_names <- trimws(unlist(strsplit(as.character(study_info$sensor_type_ids), "\\s*,\\s*")))
-    matched    <- sensor_selected %>%
+    study_names <- trimws(unlist(strsplit(
+      as.character(study_info$sensor_type_ids),
+      "\\s*,\\s*"
+    )))
+    matched <- sensor_selected %>%
       mutate(name_n = .norm(.data$name)) %>%
       dplyr::filter(.data$name_n %in% .norm(study_names))
     wanted_ids <- pull(matched, .data$id)
@@ -387,10 +491,15 @@ import_nanofox_movebank <- function(
     # TinyFox studies advertise only "sigfox-geolocation"; all tinyfox_* columns
     # are delivered as extra columns on location rows, not separate sensor rows.
     unmatched <- dplyr::anti_join(sensor_selected, matched, by = "id")
-    if (nrow(unmatched) > 0)
-      .msg("  Note: ", nrow(unmatched), " requested sensor(s) not in study sensor_type_ids ",
-           "(likely stored as flat columns): ",
-           paste(unmatched$external_id, collapse = ", "))
+    if (nrow(unmatched) > 0) {
+      .msg(
+        "  Note: ",
+        nrow(unmatched),
+        " requested sensor(s) not in study sensor_type_ids ",
+        "(likely stored as flat columns): ",
+        paste(unmatched$external_id, collapse = ", ")
+      )
+    }
 
     list(wanted_ids = wanted_ids, study_sensor_names = study_names)
   }
@@ -417,18 +526,30 @@ import_nanofox_movebank <- function(
       for (nm in names(td)) {
         v <- td[[nm]]
         if (inherits(v, "integer64") || is.factor(v) || is.ordered(v)) {
-          td[[nm]] <- as.character(v); changed <- TRUE
+          td[[nm]] <- as.character(v)
+          changed <- TRUE
         }
       }
-      if (changed)
+      if (changed) {
         x <- tryCatch(move2::mt_set_track_data(x, td), error = function(e) x)
+      }
     }
 
     # ---- Promote attributes from track data to event columns ----
-    for (attr in c("sex", "model", "tag_firmware", "attachment_comments",
-                   "tag_local_identifier", "deployment_id"))
-      x <- .safe_try(x %>% mt_as_event_attribute(attr, .keep = TRUE),
-                     paste0("mt_as_event_attribute(", attr, ")")) %||% x
+    for (attr in c(
+      "sex",
+      "model",
+      "tag_firmware",
+      "attachment_comments",
+      "tag_local_identifier",
+      "deployment_id"
+    )) {
+      x <- .safe_try(
+        x %>% mt_as_event_attribute(attr, .keep = TRUE),
+        paste0("mt_as_event_attribute(", attr, ")")
+      ) %||%
+        x
+    }
 
     # ---- species: direct track-data lookup (robust to type mismatches) ----
     x <- .fill_from_td(x, "taxon_canonical_name", "species")
@@ -438,8 +559,9 @@ import_nanofox_movebank <- function(
     geom_col <- if (inherits(x, "sf")) attr(x, "sf_column") else character(0)
     for (nm in setdiff(names(x), geom_col)) {
       v <- x[[nm]]
-      if (is.factor(v) || is.ordered(v))
+      if (is.factor(v) || is.ordered(v)) {
         x[[nm]] <- as.character(v)
+      }
     }
 
     x
@@ -451,8 +573,8 @@ import_nanofox_movebank <- function(
     .classify_model <- function(s) {
       s <- as.character(s)
       dplyr::case_when(
-        grepl("uWasp|SigfoxGH",          s, ignore.case = TRUE) ~ "uWasp",
-        grepl("Nano|NanoFox",            s, ignore.case = TRUE) ~ "nanofox",
+        grepl("uWasp|SigfoxGH", s, ignore.case = TRUE) ~ "uWasp",
+        grepl("Nano|NanoFox", s, ignore.case = TRUE) ~ "nanofox",
         grepl("Tiny|TinyFox|TinyFoxBat", s, ignore.case = TRUE) ~ "tinyfox",
         TRUE ~ NA_character_
       )
@@ -466,9 +588,15 @@ import_nanofox_movebank <- function(
         x$tag_type[bad] <- NA_character_
       }
       if (any(!is.na(x$tag_type))) {
-        .msg("  tag_type: using existing event/data column. Distribution: ",
-             paste(names(table(x$tag_type, useNA = "no")),
-                   table(x$tag_type, useNA = "no"), sep = "=", collapse = ", "))
+        .msg(
+          "  tag_type: using existing event/data column. Distribution: ",
+          paste(
+            names(table(x$tag_type, useNA = "no")),
+            table(x$tag_type, useNA = "no"),
+            sep = "=",
+            collapse = ", "
+          )
+        )
         return(x)
       }
     }
@@ -483,9 +611,14 @@ import_nanofox_movebank <- function(
         if (sid %in% names(tag_type)) override <- as.character(tag_type[[sid]])
       }
       if (!is.null(override) && !is.na(override) && !override %in% allowed) {
-        stop("Invalid tag_type override for study ", study_id_current,
-             ": ", override, ". Allowed values are: ",
-             paste(allowed, collapse = ", "))
+        stop(
+          "Invalid tag_type override for study ",
+          study_id_current,
+          ": ",
+          override,
+          ". Allowed values are: ",
+          paste(allowed, collapse = ", ")
+        )
       }
     }
 
@@ -495,9 +628,15 @@ import_nanofox_movebank <- function(
       inferred <- .classify_model(x[["format_type"]])
       if (any(!is.na(inferred))) {
         x$tag_type <- inferred
-        .msg("  tag_type: resolved from format_type. Distribution: ",
-             paste(names(table(x$tag_type, useNA = "no")),
-                   table(x$tag_type, useNA = "no"), sep = "=", collapse = ", "))
+        .msg(
+          "  tag_type: resolved from format_type. Distribution: ",
+          paste(
+            names(table(x$tag_type, useNA = "no")),
+            table(x$tag_type, useNA = "no"),
+            sep = "=",
+            collapse = ", "
+          )
+        )
         return(x)
       }
     }
@@ -519,10 +658,16 @@ import_nanofox_movebank <- function(
           td_model_col <- td_model_cols[1]
           track_id_vec <- as.character(move2::mt_track_id(x))
           id_col <- names(td)[1]
-          td_lookup <- stats::setNames(as.character(td[[td_model_col]]),
-                                       as.character(td[[id_col]]))
+          td_lookup <- stats::setNames(
+            as.character(td[[td_model_col]]),
+            as.character(td[[id_col]])
+          )
           model_vec <- td_lookup[track_id_vec]
-          .msg("  tag_type: resolved from track data column '", td_model_col, "'")
+          .msg(
+            "  tag_type: resolved from track data column '",
+            td_model_col,
+            "'"
+          )
         }
       }
     }
@@ -530,9 +675,15 @@ import_nanofox_movebank <- function(
       inferred <- .classify_model(model_vec)
       if (any(!is.na(inferred))) {
         x$tag_type <- inferred
-        .msg("  tag_type distribution: ",
-             paste(names(table(x$tag_type, useNA = "no")),
-                   table(x$tag_type, useNA = "no"), sep = "=", collapse = ", "))
+        .msg(
+          "  tag_type distribution: ",
+          paste(
+            names(table(x$tag_type, useNA = "no")),
+            table(x$tag_type, useNA = "no"),
+            sep = "=",
+            collapse = ", "
+          )
+        )
         return(x)
       }
     }
@@ -544,32 +695,64 @@ import_nanofox_movebank <- function(
       return(x)
     }
 
-    stop("tag_type could not be inferred for study ", as.character(study_id_current),
-         ". Supply tag_type as a named vector for only the unresolved studies. ",
-         "Allowed values are: ", paste(allowed, collapse = ", "), ".")
+    stop(
+      "tag_type could not be inferred for study ",
+      as.character(study_id_current),
+      ". Supply tag_type as a named vector for only the unresolved studies. ",
+      "Allowed values are: ",
+      paste(allowed, collapse = ", "),
+      "."
+    )
   }
 
   .add_lonlat <- function(x) {
-    coords <- sf::st_coordinates(x); x$lon <- coords[, 1]; x$lat <- coords[, 2]; x
+    coords <- sf::st_coordinates(x)
+    x$lon <- coords[, 1]
+    x$lat <- coords[, 2]
+    x
   }
 
   .calc_dist_bearing <- function(lon1, lat1, lon2, lat2) {
     if (require("geosphere", quietly = TRUE)) {
-      list(dist_m     = geosphere::distHaversine(cbind(lon1, lat1), cbind(lon2, lat2)),
-           bearing_deg = (geosphere::bearing(cbind(lon1, lat1), cbind(lon2, lat2)) + 360) %% 360)
+      list(
+        dist_m = geosphere::distHaversine(cbind(lon1, lat1), cbind(lon2, lat2)),
+        bearing_deg = (geosphere::bearing(
+          cbind(lon1, lat1),
+          cbind(lon2, lat2)
+        ) +
+          360) %%
+          360
+      )
     } else {
-      p1m <- sf::st_transform(sf::st_as_sf(data.frame(lon = lon1, lat = lat1),
-                                           coords = c("lon","lat"), crs = 4326), 3857)
-      p2m <- sf::st_transform(sf::st_as_sf(data.frame(lon = lon2, lat = lat2),
-                                           coords = c("lon","lat"), crs = 4326), 3857)
-      list(dist_m      = as.numeric(sf::st_distance(p1m, p2m, by_element = TRUE)),
-           bearing_deg = (atan2(lon2 - lon1, lat2 - lat1) * 180 / pi + 360) %% 360)
+      p1m <- sf::st_transform(
+        sf::st_as_sf(
+          data.frame(lon = lon1, lat = lat1),
+          coords = c("lon", "lat"),
+          crs = 4326
+        ),
+        3857
+      )
+      p2m <- sf::st_transform(
+        sf::st_as_sf(
+          data.frame(lon = lon2, lat = lat2),
+          coords = c("lon", "lat"),
+          crs = 4326
+        ),
+        3857
+      )
+      list(
+        dist_m = as.numeric(sf::st_distance(p1m, p2m, by_element = TRUE)),
+        bearing_deg = (atan2(lon2 - lon1, lat2 - lat1) * 180 / pi + 360) %% 360
+      )
     }
   }
 
   .label_sensor_type <- function(x, sensor_selected) {
-    x %>% left_join(sensor_selected %>% dplyr::select(id, sensor_type, is_location_sensor),
-                    by = c("sensor_type_id" = "id"))
+    x %>%
+      left_join(
+        sensor_selected %>% dplyr::select(id, sensor_type, is_location_sensor),
+        by = c("sensor_type_id" = "id")
+      )
   }
 
   .fix_track_data_lists <- function(x) {
@@ -583,33 +766,48 @@ import_nanofox_movebank <- function(
     #   3. Leave any remaining list-columns intact — downstream code must tolerate
     #      them.  mt_as_event_attribute() correctly handles list-valued track data.
 
-    if (!any(sapply(mt_track_data(x), rlang::is_bare_list))) return(x)
+    if (!any(sapply(mt_track_data(x), rlang::is_bare_list))) {
+      return(x)
+    }
 
     .msg("  Track data has list-columns (multiple deployments per individual).")
 
     # Step 1: collapse columns where all entries are the same value
-    x <- x |> move2::mutate_track_data(dplyr::across(
-      dplyr::where(~rlang::is_bare_list(.x) &&
-                     all(purrr::map_lgl(.x, function(y) length(unique(y)) == 1L))),
-      ~do.call(vctrs::vec_c, purrr::map(.x, utils::head, 1L))
-    ))
+    x <- x |>
+      move2::mutate_track_data(dplyr::across(
+        dplyr::where(
+          ~ rlang::is_bare_list(.x) &&
+            all(purrr::map_lgl(.x, function(y) length(unique(y)) == 1L))
+        ),
+        ~ do.call(vctrs::vec_c, purrr::map(.x, utils::head, 1L))
+      ))
 
     # Step 2: stringify columns where entries differ across deployments
     if (any(sapply(mt_track_data(x), rlang::is_bare_list))) {
-      x <- x |> move2::mutate_track_data(dplyr::across(
-        dplyr::where(~rlang::is_bare_list(.x) &&
-                       any(purrr::map_lgl(.x, function(y) length(unique(y)) != 1L))),
-        ~unlist(purrr::map(.x, paste, collapse = ","))
-      ))
+      x <- x |>
+        move2::mutate_track_data(dplyr::across(
+          dplyr::where(
+            ~ rlang::is_bare_list(.x) &&
+              any(purrr::map_lgl(.x, function(y) length(unique(y)) != 1L))
+          ),
+          ~ unlist(purrr::map(.x, paste, collapse = ","))
+        ))
     }
 
-    remaining <- names(mt_track_data(x))[sapply(mt_track_data(x), rlang::is_bare_list)]
-    if (length(remaining) > 0)
-      .msg("  Track data: ", length(remaining),
-           " list-column(s) retained (entries differ and cannot be stringified): ",
-           paste(remaining, collapse = ", "))
-    else
+    remaining <- names(mt_track_data(x))[sapply(
+      mt_track_data(x),
+      rlang::is_bare_list
+    )]
+    if (length(remaining) > 0) {
+      .msg(
+        "  Track data: ",
+        length(remaining),
+        " list-column(s) retained (entries differ and cannot be stringified): ",
+        paste(remaining, collapse = ", ")
+      )
+    } else {
       .msg("  Track data list-columns resolved.")
+    }
 
     x
   }
@@ -635,33 +833,54 @@ import_nanofox_movebank <- function(
   #
   # Writes altitude_m [m] to x. Never overwrites an existing non-NA value.
   # ---------------------------------------------------------------------------
-  .add_altitude_from_pressure_col <- function(x, P0 = 1013.25,
-                                              p_min = 396, p_max = 1100) {
+  .add_altitude_from_pressure_col <- function(
+    x,
+    P0 = 1013.25,
+    p_min = 396,
+    p_max = 1100
+  ) {
     # p_min / p_max: valid pressure range in mbar.
     #   Values outside this range are sensor errors and are set to NA before
     #   conversion so they never produce altitude_m values.
     #   Default range 500–1100 mbar corresponds to ~5600m–sea level altitude.
     #   The known error value 395 mbar falls well below p_min and is caught here.
-    pressure_to_alt <- function(P) 44330 * (1 - (as.numeric(P) / P0)^(1 / 5.255))
+    pressure_to_alt <- function(P) {
+      44330 * (1 - (as.numeric(P) / P0)^(1 / 5.255))
+    }
 
     .mask_pressure <- function(col_name) {
-      if (!col_name %in% names(x)) return(invisible(NULL))
+      if (!col_name %in% names(x)) {
+        return(invisible(NULL))
+      }
       raw <- as.numeric(x[[col_name]])
       bad <- !is.na(raw) & (raw < p_min | raw > p_max)
       if (any(bad, na.rm = TRUE)) {
         x[[col_name]][bad] <<- NA_real_
-        .msg("  pressure: ", sum(bad, na.rm = TRUE),
-             " error value(s) in ", col_name,
-             " set to NA (outside ", p_min, "–", p_max, " mbar).")
+        .msg(
+          "  pressure: ",
+          sum(bad, na.rm = TRUE),
+          " error value(s) in ",
+          col_name,
+          " set to NA (outside ",
+          p_min,
+          "–",
+          p_max,
+          " mbar)."
+        )
       }
     }
-    for (pc in c("barometric_pressure", "min_3h_pressure",
-                 "tinyfox_pressure_min_last_24h")) {
+    for (pc in c(
+      "barometric_pressure",
+      "min_3h_pressure",
+      "tinyfox_pressure_min_last_24h"
+    )) {
       .mask_pressure(pc)
     }
 
     # Initialise altitude_m if absent
-    if (!"altitude_m" %in% names(x)) x$altitude_m <- NA_real_
+    if (!"altitude_m" %in% names(x)) {
+      x$altitude_m <- NA_real_
+    }
     existing <- !is.na(as.numeric(x$altitude_m))
 
     # barometric_pressure (NanoFox multi-sensor schema, joined from sensor rows)
@@ -670,8 +889,11 @@ import_nanofox_movebank <- function(
       if (any(fill, na.rm = TRUE)) {
         x$altitude_m[fill] <- pressure_to_alt(x$barometric_pressure[fill])
         existing <- existing | fill
-        .msg("  altitude_m: ", sum(fill, na.rm = TRUE),
-             " rows filled from barometric_pressure.")
+        .msg(
+          "  altitude_m: ",
+          sum(fill, na.rm = TRUE),
+          " rows filled from barometric_pressure."
+        )
       }
     }
 
@@ -681,8 +903,11 @@ import_nanofox_movebank <- function(
       if (any(fill, na.rm = TRUE)) {
         x$altitude_m[fill] <- pressure_to_alt(x$min_3h_pressure[fill])
         existing <- existing | fill
-        .msg("  altitude_m: ", sum(fill, na.rm = TRUE),
-             " rows filled from min_3h_pressure.")
+        .msg(
+          "  altitude_m: ",
+          sum(fill, na.rm = TRUE),
+          " rows filled from min_3h_pressure."
+        )
       }
     }
 
@@ -690,10 +915,15 @@ import_nanofox_movebank <- function(
     if ("tinyfox_pressure_min_last_24h" %in% names(x)) {
       fill <- !existing & !is.na(as.numeric(x$tinyfox_pressure_min_last_24h))
       if (any(fill, na.rm = TRUE)) {
-        x$altitude_m[fill] <- pressure_to_alt(x$tinyfox_pressure_min_last_24h[fill])
+        x$altitude_m[fill] <- pressure_to_alt(x$tinyfox_pressure_min_last_24h[
+          fill
+        ])
         existing <- existing | fill
-        .msg("  altitude_m: ", sum(fill, na.rm = TRUE),
-             " rows filled from tinyfox_pressure_min_last_24h.")
+        .msg(
+          "  altitude_m: ",
+          sum(fill, na.rm = TRUE),
+          " rows filled from tinyfox_pressure_min_last_24h."
+        )
       }
     }
 
@@ -701,7 +931,6 @@ import_nanofox_movebank <- function(
     x$altitude_m <- units::set_units(as.numeric(x$altitude_m), "m")
     x
   }
-
 
   # .expand_tinyfox_rows()
   #
@@ -748,15 +977,19 @@ import_nanofox_movebank <- function(
   # sorted by individual and timestamp.
   # ---------------------------------------------------------------------------
   .expand_tinyfox_rows <- function(x) {
-
     # Only run if the characteristic column exists
-    if (!"tinyfox_pressure_min_last_24h" %in% names(x) &&
-        !any(grepl("^tinyfox_vedba_\\d+h_ago$", names(x)))) {
+    if (
+      !"tinyfox_pressure_min_last_24h" %in% names(x) &&
+        !any(grepl("^tinyfox_vedba_\\d+h_ago$", names(x)))
+    ) {
       .msg("  .expand_tinyfox_rows: no TinyFox sensor columns found; skipping.")
       return(x)
     }
 
-    require(sf); require(dplyr); require(tidyr); require(lubridate)
+    require(sf)
+    require(dplyr)
+    require(tidyr)
+    require(lubridate)
 
     # Strip units from all columns before building sub-tibbles.
     # Mixed-study downloads may have units-classed columns (e.g. vedba [standard_free_fall])
@@ -766,38 +999,75 @@ import_nanofox_movebank <- function(
     x <- .strip_units_cols(x)
 
     # Identify column groups
-    vedba_h_cols  <- sort(names(x)[grepl("^tinyfox_vedba_\\d+h_ago$", names(x))])
-    total_v_col   <- if ("tinyfox_total_vedba"                  %in% names(x)) "tinyfox_total_vedba"                  else NULL
-    pres_col      <- if ("tinyfox_pressure_min_last_24h"        %in% names(x)) "tinyfox_pressure_min_last_24h"        else NULL
-    tmin_col      <- if ("tinyfox_temperature_min_last_24h"     %in% names(x)) "tinyfox_temperature_min_last_24h"     else NULL
-    tmax_col      <- if ("tinyfox_temperature_max_last_24h"     %in% names(x)) "tinyfox_temperature_max_last_24h"     else NULL
-    act_col       <- if ("tinyfox_activity_percent_last_24h"    %in% names(x)) "tinyfox_activity_percent_last_24h"    else NULL
+    vedba_h_cols <- sort(names(x)[grepl("^tinyfox_vedba_\\d+h_ago$", names(x))])
+    total_v_col <- if ("tinyfox_total_vedba" %in% names(x)) {
+      "tinyfox_total_vedba"
+    } else {
+      NULL
+    }
+    pres_col <- if ("tinyfox_pressure_min_last_24h" %in% names(x)) {
+      "tinyfox_pressure_min_last_24h"
+    } else {
+      NULL
+    }
+    tmin_col <- if ("tinyfox_temperature_min_last_24h" %in% names(x)) {
+      "tinyfox_temperature_min_last_24h"
+    } else {
+      NULL
+    }
+    tmax_col <- if ("tinyfox_temperature_max_last_24h" %in% names(x)) {
+      "tinyfox_temperature_max_last_24h"
+    } else {
+      NULL
+    }
+    act_col <- if ("tinyfox_activity_percent_last_24h" %in% names(x)) {
+      "tinyfox_activity_percent_last_24h"
+    } else {
+      NULL
+    }
 
     # All tinyfox_* columns that will be NA'd on non-location rows
-    all_tf_cols <- c(vedba_h_cols, total_v_col, pres_col, tmin_col, tmax_col, act_col,
-                     "tinyfox_tag_activation") %>% intersect(names(x))
+    all_tf_cols <- c(
+      vedba_h_cols,
+      total_v_col,
+      pres_col,
+      tmin_col,
+      tmax_col,
+      act_col,
+      "tinyfox_tag_activation"
+    ) %>%
+      intersect(names(x))
 
     # Helper: build a derived-sensor tibble from one scalar column
     # Each source row → one output row with its own time window
-    .make_scalar_rows <- function(src_col, value_col_name, sensor_lbl,
-                                  window_hours_start, window_hours_end = 0) {
-      if (is.null(src_col) || !src_col %in% names(x)) return(NULL)
+    .make_scalar_rows <- function(
+      src_col,
+      value_col_name,
+      sensor_lbl,
+      window_hours_start,
+      window_hours_end = 0
+    ) {
+      if (is.null(src_col) || !src_col %in% names(x)) {
+        return(NULL)
+      }
       vals <- as.numeric(x[[src_col]])
       keep <- !is.na(vals)
-      if (!any(keep)) return(NULL)
+      if (!any(keep)) {
+        return(NULL)
+      }
 
       sf::st_as_sf(tibble::tibble(
-        .src_row                    = seq_len(nrow(x))[keep],
+        .src_row = seq_len(nrow(x))[keep],
         individual_local_identifier = x$individual_local_identifier[keep],
-        timestamp                   = x$timestamp[keep] -
+        timestamp = x$timestamp[keep] -
           lubridate::dhours(window_hours_end),
-        time_start                  = x$timestamp[keep] -
+        time_start = x$timestamp[keep] -
           lubridate::dhours(window_hours_start),
-        time_end                    = x$timestamp[keep] -
+        time_end = x$timestamp[keep] -
           lubridate::dhours(window_hours_end),
-        sensor_type                 = sensor_lbl,
-        !!value_col_name            := vals[keep],
-        geometry                    = sf::st_geometry(x)[keep]
+        sensor_type = sensor_lbl,
+        !!value_col_name := vals[keep],
+        geometry = sf::st_geometry(x)[keep]
       ))
     }
 
@@ -807,20 +1077,22 @@ import_nanofox_movebank <- function(
     vedba_h_rows <- NULL
     if (length(vedba_h_cols) > 0) {
       vedba_h_rows <- lapply(vedba_h_cols, function(col) {
-        nn  <- as.integer(sub("tinyfox_vedba_(\\d+)h_ago", "\\1", col))
+        nn <- as.integer(sub("tinyfox_vedba_(\\d+)h_ago", "\\1", col))
         vals <- as.numeric(x[[col]])
         keep <- !is.na(vals)
-        if (!any(keep)) return(NULL)
+        if (!any(keep)) {
+          return(NULL)
+        }
 
         sf::st_as_sf(tibble::tibble(
-          .src_row                    = seq_len(nrow(x))[keep],
+          .src_row = seq_len(nrow(x))[keep],
           individual_local_identifier = x$individual_local_identifier[keep],
-          time_end                    = x$timestamp[keep] - lubridate::dhours(nn - 1L),
-          time_start                  = x$timestamp[keep] - lubridate::dhours(nn),
-          timestamp                   = x$timestamp[keep] - lubridate::dhours(nn - 1L),
-          sensor_type                 = "VeDBA",
-          vedba                       = vals[keep],
-          geometry                    = sf::st_geometry(x)[keep]
+          time_end = x$timestamp[keep] - lubridate::dhours(nn - 1L),
+          time_start = x$timestamp[keep] - lubridate::dhours(nn),
+          timestamp = x$timestamp[keep] - lubridate::dhours(nn - 1L),
+          sensor_type = "VeDBA",
+          vedba = vals[keep],
+          geometry = sf::st_geometry(x)[keep]
         ))
       })
       vedba_h_rows <- dplyr::bind_rows(Filter(Negate(is.null), vedba_h_rows))
@@ -828,35 +1100,50 @@ import_nanofox_movebank <- function(
 
     # ---- 2. Total VeDBA (full 22-hour window) ----
     total_v_rows <- .make_scalar_rows(
-      total_v_col, "vedba", "VeDBA",
-      window_hours_start = 22, window_hours_end = 0
+      total_v_col,
+      "vedba",
+      "VeDBA",
+      window_hours_start = 22,
+      window_hours_end = 0
     )
 
     # ---- 3. Pressure ----
     pres_rows <- .make_scalar_rows(
-      pres_col, "barometric_pressure", "min.baro.pressure",
-      window_hours_start = 24, window_hours_end = 0
+      pres_col,
+      "barometric_pressure",
+      "min.baro.pressure",
+      window_hours_start = 24,
+      window_hours_end = 0
     )
 
     # ---- 4. Temperature (min and max as separate rows) ----
     tmin_rows <- .make_scalar_rows(
-      tmin_col, "external_temperature_min", "avg.temp",
-      window_hours_start = 24, window_hours_end = 0
+      tmin_col,
+      "external_temperature_min",
+      "avg.temp",
+      window_hours_start = 24,
+      window_hours_end = 0
     )
     tmax_rows <- .make_scalar_rows(
-      tmax_col, "external_temperature_max", "avg.temp",
-      window_hours_start = 24, window_hours_end = 0
+      tmax_col,
+      "external_temperature_max",
+      "avg.temp",
+      window_hours_start = 24,
+      window_hours_end = 0
     )
 
     # ---- 5. Activity ----
     act_rows <- .make_scalar_rows(
-      act_col, "activity_percent", "activity",
-      window_hours_start = 24, window_hours_end = 0
+      act_col,
+      "activity_percent",
+      "activity",
+      window_hours_start = 24,
+      window_hours_end = 0
     )
 
     # ---- 6. Add time_start / time_end to original location rows ----
     x$time_start <- x$timestamp
-    x$time_end   <- x$timestamp
+    x$time_end <- x$timestamp
     # NA out tinyfox sensor columns on location rows is intentional —
     # they are now represented as dedicated rows.
     # (Keep them on location rows for backward compatibility; mark with a note.)
@@ -864,7 +1151,14 @@ import_nanofox_movebank <- function(
     # ---- 7. Collect all new sensor rows ----
     new_rows_list <- Filter(
       Negate(is.null),
-      list(vedba_h_rows, total_v_rows, pres_rows, tmin_rows, tmax_rows, act_rows)
+      list(
+        vedba_h_rows,
+        total_v_rows,
+        pres_rows,
+        tmin_rows,
+        tmax_rows,
+        act_rows
+      )
     )
 
     if (length(new_rows_list) == 0) {
@@ -876,33 +1170,54 @@ import_nanofox_movebank <- function(
     # Handles units, factors, and plain vectors safely without vctrs::vec_cast
     # (which errors on geometry and other complex column types).
     .typed_na <- function(src, n) {
-      if (inherits(src, "units"))
-        return(units::set_units(rep(NA_real_, n),
-                                units::deparse_unit(src), mode = "standard"))
-      if (is.factor(src))
+      if (inherits(src, "units")) {
+        return(units::set_units(
+          rep(NA_real_, n),
+          units::deparse_unit(src),
+          mode = "standard"
+        ))
+      }
+      if (is.factor(src)) {
         return(factor(rep(NA_character_, n), levels = levels(src)))
-      if (is.integer(src))   return(rep(NA_integer_,   n))
-      if (is.numeric(src))   return(rep(NA_real_,      n))
-      if (is.logical(src))   return(rep(NA,            n))
-      if (is.character(src)) return(rep(NA_character_,  n))
-      if (inherits(src, "POSIXct"))
+      }
+      if (is.integer(src)) {
+        return(rep(NA_integer_, n))
+      }
+      if (is.numeric(src)) {
+        return(rep(NA_real_, n))
+      }
+      if (is.logical(src)) {
+        return(rep(NA, n))
+      }
+      if (is.character(src)) {
+        return(rep(NA_character_, n))
+      }
+      if (inherits(src, "POSIXct")) {
         return(as.POSIXct(rep(NA_real_, n), origin = "1970-01-01", tz = "UTC"))
-      if (inherits(src, "sfc"))  # geometry — copy a null/empty geometry column
-        return(sf::st_sfc(lapply(seq_len(n), function(...) sf::st_point()), crs = sf::st_crs(src)))
-      rep(NA, n)   # fallback
+      }
+      if (inherits(src, "sfc")) {
+        # geometry — copy a null/empty geometry column
+        return(sf::st_sfc(
+          lapply(seq_len(n), function(...) sf::st_point()),
+          crs = sf::st_crs(src)
+        ))
+      }
+      rep(NA, n) # fallback
     }
 
     # Align all sub-tibbles in new_rows_list to the same column schema as x
     # BEFORE binding, so the internal bind_rows sees consistent types.
-    x_cols      <- names(x)
-    x_sf        <- sf::st_drop_geometry(.strip_units_cols(x))   # drop geometry + units for type reference
+    x_cols <- names(x)
+    x_sf <- sf::st_drop_geometry(.strip_units_cols(x)) # drop geometry + units for type reference
 
     new_rows_list <- lapply(new_rows_list, function(sub) {
       n <- nrow(sub)
       # Add columns present in x but missing from this sub-tibble
       for (col in setdiff(x_cols, c(names(sub), "geometry"))) {
         src <- x_sf[[col]]
-        if (is.null(src)) next
+        if (is.null(src)) {
+          next
+        }
         sub[[col]] <- .typed_na(src, n)
       }
       # Remove any extra columns not in x (value columns like "vedba", "barometric_pressure")
@@ -921,20 +1236,25 @@ import_nanofox_movebank <- function(
     # Final column alignment: add any remaining x-columns still missing
     for (col in setdiff(names(x), names(new_rows))) {
       src <- x[[col]]
-      if (inherits(src, "sfc")) next   # geometry handled by st_as_sf below
+      if (inherits(src, "sfc")) {
+        next
+      } # geometry handled by st_as_sf below
       new_rows[[col]] <- .typed_na(src, nrow(new_rows))
     }
     # Reorder to match x (geometry column may differ in position — that's fine)
     shared_cols <- intersect(names(x), names(new_rows))
-    new_rows    <- new_rows[, shared_cols, drop = FALSE]
+    new_rows <- new_rows[, shared_cols, drop = FALSE]
 
     # ---- 8. Stack original + new rows and re-cast to move2 ----
     # Use only columns present in both to avoid geometry/type conflicts.
-    x_out       <- sf::st_as_sf(x)[, shared_cols, drop = FALSE]
+    x_out <- sf::st_as_sf(x)[, shared_cols, drop = FALSE]
     new_rows_sf <- sf::st_as_sf(new_rows)
     # Ensure new_rows_sf has the geometry column from their source rows
-    if (!"geometry" %in% names(new_rows_sf))
-      sf::st_geometry(new_rows_sf) <- sf::st_geometry(x)[new_rows$.src_row %% nrow(x) + 1L]
+    if (!"geometry" %in% names(new_rows_sf)) {
+      sf::st_geometry(new_rows_sf) <- sf::st_geometry(x)[
+        new_rows$.src_row %% nrow(x) + 1L
+      ]
+    }
 
     combined <- dplyr::bind_rows(x_out, new_rows_sf) %>%
       dplyr::arrange(individual_local_identifier, timestamp)
@@ -942,19 +1262,31 @@ import_nanofox_movebank <- function(
     # Re-establish move2 class using the same track id as the input object.
     # Do NOT hardcode individual_local_identifier — the input is keyed to deployment_id.
     orig_track_col_expand <- move2::mt_track_id_column(x)
-    orig_td_expand        <- tryCatch(move2::mt_track_data(x), error = function(e) NULL)
+    orig_td_expand <- tryCatch(move2::mt_track_data(x), error = function(e) {
+      NULL
+    })
     class(combined) <- c("move2", class(combined))
     attr(combined, "track_id_column") <- orig_track_col_expand
-    attr(combined, "time_column")     <- "timestamp"
-    if (!is.null(orig_td_expand))
-      combined <- tryCatch(move2::mt_set_track_data(combined, orig_td_expand),
-                           error = function(e) combined)
+    attr(combined, "time_column") <- "timestamp"
+    if (!is.null(orig_td_expand)) {
+      combined <- tryCatch(
+        move2::mt_set_track_data(combined, orig_td_expand),
+        error = function(e) combined
+      )
+    }
 
     n_new <- nrow(combined) - nrow(x)
-    .msg("  .expand_tinyfox_rows: added ", n_new, " sensor rows. ",
-         "Total rows: ", nrow(combined),
-         " | sensor_type distribution:")
-    if (isTRUE(verbose)) print(table(combined$sensor_type, useNA = "ifany"))
+    .msg(
+      "  .expand_tinyfox_rows: added ",
+      n_new,
+      " sensor rows. ",
+      "Total rows: ",
+      nrow(combined),
+      " | sensor_type distribution:"
+    )
+    if (isTRUE(verbose)) {
+      print(table(combined$sensor_type, useNA = "ifany"))
+    }
 
     combined
   }
@@ -979,7 +1311,7 @@ import_nanofox_movebank <- function(
     group_vec <- as.character(move2::mt_track_id(x))
 
     delta <- tibble::tibble(
-      track_id   = group_vec,
+      track_id = group_vec,
       altitude_m = as.numeric(x$altitude_m)
     ) %>%
       dplyr::group_by(track_id) %>%
@@ -988,8 +1320,11 @@ import_nanofox_movebank <- function(
 
     x$delta_altitude_m <- units::set_units(delta$delta_altitude_m, "m")
 
-    .msg("  delta_altitude_m computed (",
-         sum(!is.na(delta$delta_altitude_m)), " non-NA values).")
+    .msg(
+      "  delta_altitude_m computed (",
+      sum(!is.na(delta$delta_altitude_m)),
+      " non-NA values)."
+    )
     x
   }
 
@@ -1008,7 +1343,10 @@ import_nanofox_movebank <- function(
   # ---------------------------------------------------------------------------
   .make_location_metrics <- function(x) {
     b_loc <- x %>%
-      dplyr::filter(.data$sensor_type == "location", !sf::st_is_empty(.data$geometry))
+      dplyr::filter(
+        .data$sensor_type == "location",
+        !sf::st_is_empty(.data$geometry)
+      )
 
     b_loc <- .dedupe_timestamps(b_loc)
     b_loc$year <- lubridate::year(b_loc$timestamp)
@@ -1026,43 +1364,57 @@ import_nanofox_movebank <- function(
     # For move2 functions (mt_speed, mt_distance, mt_azimuth, mt_time_lags,
     # calc_displacement) we temporarily re-key by SWAPPING the track id attribute
     # on the move2 object — NOT via mt_as_move2() which drops track data.
-    dep_col   <- .metric_group_col(b_loc)   # deployment_id > tag_local_id > individual_local_id
+    dep_col <- .metric_group_col(b_loc) # deployment_id > tag_local_id > individual_local_id
     track_col <- move2::mt_track_id_column(b_loc)
 
-    if (!is.null(dep_col) && dep_col != track_col &&
-        dep_col %in% names(b_loc) && !all(is.na(b_loc[[dep_col]]))) {
-
+    if (
+      !is.null(dep_col) &&
+        dep_col != track_col &&
+        dep_col %in% names(b_loc) &&
+        !all(is.na(b_loc[[dep_col]]))
+    ) {
       b_loc[[dep_col]] <- as.character(b_loc[[dep_col]])
 
       # Swap the track id attribute directly — preserves all track data
       attr(b_loc, "track_id_column") <- dep_col
 
-      .msg("  Metrics grouped by: ", dep_col,
-           " (", dplyr::n_distinct(b_loc[[dep_col]], na.rm = TRUE), " deployments)")
+      .msg(
+        "  Metrics grouped by: ",
+        dep_col,
+        " (",
+        dplyr::n_distinct(b_loc[[dep_col]], na.rm = TRUE),
+        " deployments)"
+      )
     }
 
-    if (!move2::mt_is_time_ordered(b_loc))
-      stop("Location data still not strictly time-ordered within track after dedupe.")
+    if (!move2::mt_is_time_ordered(b_loc)) {
+      stop(
+        "Location data still not strictly time-ordered within track after dedupe."
+      )
+    }
 
     # Ensure the deployment grouping column is a plain character vector so sourced
     # scripts that do filter(deployment_id %in% tracks) work without type mismatch
     dep_col_now <- move2::mt_track_id_column(b_loc)
-    if (dep_col_now %in% names(b_loc))
+    if (dep_col_now %in% names(b_loc)) {
       b_loc[[dep_col_now]] <- as.character(b_loc[[dep_col_now]])
+    }
 
     b_loc <- b_loc %>%
       mutate(
-        azimuth  = mt_azimuth(.),
-        speed    = mt_speed(.,    units = "km/h"),   # km/h: valid SI symbol
+        azimuth = mt_azimuth(.),
+        speed = mt_speed(., units = "km/h"), # km/h: valid SI symbol
         distance = mt_distance(., units = "km"),
-        dt       = mt_time_lags(., "secs")
+        dt = mt_time_lags(., "secs")
       )
 
     .source_local(script_mt_previous)
     b_loc <- b_loc %>%
-      mt_add_prev_metrics(dist_units  = "km",
-                          speed_units = "km/h",
-                          time_units  = "secs")
+      mt_add_prev_metrics(
+        dist_units = "km",
+        speed_units = "km/h",
+        time_units = "secs"
+      )
 
     .source_local(script_calc_displacement)
     b_loc <- calc_displacement(b_loc)
@@ -1070,9 +1422,9 @@ import_nanofox_movebank <- function(
     # ---- Cumulative distance — grouped by deployment_id ----
     if (isTRUE(compute_cum_dist) && "distance" %in% names(b_loc)) {
       # Group by the finest deployment key (dep_col), not individual
-      track_id_vec   <- as.character(b_loc[[move2::mt_track_id_column(b_loc)]])
-      dist_numeric   <- as.numeric(b_loc$distance)
-      cum_dist       <- ave(
+      track_id_vec <- as.character(b_loc[[move2::mt_track_id_column(b_loc)]])
+      dist_numeric <- as.numeric(b_loc$distance)
+      cum_dist <- ave(
         ifelse(is.na(dist_numeric), 0, dist_numeric),
         track_id_vec,
         FUN = cumsum
@@ -1086,13 +1438,16 @@ import_nanofox_movebank <- function(
     b_loc <- .add_altitude_from_pressure_col(b_loc)
 
     # ---- Delta altitude — grouped by deployment_id ----
-    b_loc <- .safe_try(.add_delta_altitude(b_loc), "add_delta_altitude") %||% b_loc
+    b_loc <- .safe_try(.add_delta_altitude(b_loc), "add_delta_altitude") %||%
+      b_loc
 
     # ---- Restore original track id attribute ----
     # Swap back by setting the attribute directly — no mt_as_move2() call,
     # so track data is preserved exactly as it was.
-    if (move2::mt_track_id_column(b_loc) != track_col &&
-        track_col %in% names(b_loc)) {
+    if (
+      move2::mt_track_id_column(b_loc) != track_col &&
+        track_col %in% names(b_loc)
+    ) {
       attr(b_loc, "track_id_column") <- track_col
     }
 
@@ -1109,28 +1464,43 @@ import_nanofox_movebank <- function(
   # ---------------------------------------------------------------------------
   .add_night_day_id <- function(x) {
     if (!require("suncalc", quietly = TRUE)) {
-      warning(".add_night_day_id: suncalc not available; skipping."); return(x)
+      warning(".add_night_day_id: suncalc not available; skipping.")
+      return(x)
     }
     if (!all(c("lon", "lat") %in% names(x))) {
-      coords <- sf::st_coordinates(x); x$lon <- coords[, 1]; x$lat <- coords[, 2]
+      coords <- sf::st_coordinates(x)
+      x$lon <- coords[, 1]
+      x$lat <- coords[, 2]
     }
-    df <- tibble::tibble(.row_idx = seq_len(nrow(x)),
-                         individual = x$individual_local_identifier,
-                         timestamp  = x$timestamp,
-                         lon = x$lon, lat = x$lat) %>%
-      dplyr::filter(!is.na(.data$lon), !is.na(.data$lat), !is.na(.data$timestamp))
+    df <- tibble::tibble(
+      .row_idx = seq_len(nrow(x)),
+      individual = x$individual_local_identifier,
+      timestamp = x$timestamp,
+      lon = x$lon,
+      lat = x$lat
+    ) %>%
+      dplyr::filter(
+        !is.na(.data$lon),
+        !is.na(.data$lat),
+        !is.na(.data$timestamp)
+      )
 
-    if (nrow(df) == 0) { x$night_day_id <- NA_character_; return(x) }
+    if (nrow(df) == 0) {
+      x$night_day_id <- NA_character_
+      return(x)
+    }
 
-    sun_pos      <- suncalc::getSunlightPosition(
+    sun_pos <- suncalc::getSunlightPosition(
       data = data.frame(date = df$timestamp, lat = df$lat, lon = df$lon),
       keep = "altitude"
     )
     df$night_day <- ifelse(sun_pos$altitude < 0, "night", "day")
     df <- df %>%
       dplyr::group_by(.data$individual) %>%
-      dplyr::mutate(first_date = as.Date(min(.data$timestamp, na.rm = TRUE)),
-                    period     = as.integer(as.Date(.data$timestamp) - .data$first_date)) %>%
+      dplyr::mutate(
+        first_date = as.Date(min(.data$timestamp, na.rm = TRUE)),
+        period = as.integer(as.Date(.data$timestamp) - .data$first_date)
+      ) %>%
       dplyr::ungroup()
     df$night_day_id <- paste(df$night_day, df$period, sep = "_")
 
@@ -1138,9 +1508,14 @@ import_nanofox_movebank <- function(
     out_vec[df$.row_idx] <- df$night_day_id
     x$night_day_id <- out_vec
 
-    .msg("  night_day_id assigned. Unique: ", dplyr::n_distinct(df$night_day_id),
-         " | night: ", sum(df$night_day == "night"),
-         " | day: ",   sum(df$night_day == "day"))
+    .msg(
+      "  night_day_id assigned. Unique: ",
+      dplyr::n_distinct(df$night_day_id),
+      " | night: ",
+      sum(df$night_day == "night"),
+      " | day: ",
+      sum(df$night_day == "day")
+    )
     x
   }
 
@@ -1148,15 +1523,24 @@ import_nanofox_movebank <- function(
   # .select_daily_daytime_only()
   # ---------------------------------------------------------------------------
   .select_daily_daytime_only <- function(x) {
-    if (!inherits(x, c("move2", "sf"))) stop("x must be a move2/sf object")
+    if (!inherits(x, c("move2", "sf"))) {
+      stop("x must be a move2/sf object")
+    }
     hr <- lubridate::hour(x$timestamp)
     flying_window <- hr >= 21 | hr < 5
-    .msg("  [daytime_only] Removing ", sum(flying_window, na.rm = TRUE),
-         " fixes in 21:00-05:00 UTC flight window.")
+    .msg(
+      "  [daytime_only] Removing ",
+      sum(flying_window, na.rm = TRUE),
+      " fixes in 21:00-05:00 UTC flight window."
+    )
     x_day <- x[!flying_window, ]
-    if (nrow(x_day) == 0) { warning("[daytime_only] No fixes remain."); return(NULL) }
-    if (!exists("mt_thin_daily_solar_noon", mode = "function"))
+    if (nrow(x_day) == 0) {
+      warning("[daytime_only] No fixes remain.")
+      return(NULL)
+    }
+    if (!exists("mt_thin_daily_solar_noon", mode = "function")) {
       stop("mt_thin_daily_solar_noon() not found.")
+    }
     mt_thin_daily_solar_noon(x_day, tz = tz)
   }
 
@@ -1164,19 +1548,29 @@ import_nanofox_movebank <- function(
   # .select_daily_noon_roost()
   # ---------------------------------------------------------------------------
   .select_daily_noon_roost <- function(x) {
-    if (!"night_day_id" %in% names(x)) stop("[noon_roost] 'night_day_id' not found.")
+    if (!"night_day_id" %in% names(x)) {
+      stop("[noon_roost] 'night_day_id' not found.")
+    }
     rep_daily <- x %>%
       dplyr::filter(!stringr::str_detect(.data$night_day_id, "_0$")) %>%
       dplyr::mutate(
         night_day_split = stringr::str_split_fixed(.data$night_day_id, "_", 2),
-        night_day = night_day_split[, 1], period_id = night_day_split[, 2]
+        night_day = night_day_split[, 1],
+        period_id = night_day_split[, 2]
       ) %>%
       dplyr::select(-night_day_split)
-    .msg("  [noon_roost] Period-0 removed. Remaining: ", nrow(rep_daily), " of ", nrow(x))
+    .msg(
+      "  [noon_roost] Period-0 removed. Remaining: ",
+      nrow(rep_daily),
+      " of ",
+      nrow(x)
+    )
 
     grp_col <- .metric_group_col(rep_daily)
     if (is.null(grp_col)) {
-      rep_daily$`..metric_group_id` <- as.character(move2::mt_track_id(rep_daily))
+      rep_daily$`..metric_group_id` <- as.character(move2::mt_track_id(
+        rep_daily
+      ))
       grp_col <- "..metric_group_id"
     }
 
@@ -1187,32 +1581,65 @@ import_nanofox_movebank <- function(
             as.Date(.data$timestamp) + 1,
           TRUE ~ as.Date(.data$timestamp)
         ),
-        noon_time    = as.POSIXct(paste0(.data$noon_date, " 12:00:00"), tz = "UTC"),
-        dist_to_noon = abs(as.numeric(difftime(.data$timestamp, .data$noon_time, units = "secs")))
+        noon_time = as.POSIXct(
+          paste0(.data$noon_date, " 12:00:00"),
+          tz = "UTC"
+        ),
+        dist_to_noon = abs(as.numeric(difftime(
+          .data$timestamp,
+          .data$noon_time,
+          units = "secs"
+        )))
       ) %>%
       dplyr::group_by(.data[[grp_col]], .data$period_id) %>%
-      dplyr::arrange(.data$night_day == "night", .data$dist_to_noon, .by_group = TRUE) %>%
+      dplyr::arrange(
+        .data$night_day == "night",
+        .data$dist_to_noon,
+        .by_group = TRUE
+      ) %>%
       dplyr::slice(1) %>%
       dplyr::ungroup()
 
-    .msg("  [noon_roost] Selected ", nrow(rep_daily), " daily points across ",
-         dplyr::n_distinct(rep_daily[[grp_col]]), " groups (", grp_col, ").")
-    rep_daily %>% dplyr::select(-dplyr::any_of(c("night_day", "period_id",
-                                                 "noon_date", "noon_time", "dist_to_noon")))
+    .msg(
+      "  [noon_roost] Selected ",
+      nrow(rep_daily),
+      " daily points across ",
+      dplyr::n_distinct(rep_daily[[grp_col]]),
+      " groups (",
+      grp_col,
+      ")."
+    )
+    rep_daily %>%
+      dplyr::select(
+        -dplyr::any_of(c(
+          "night_day",
+          "period_id",
+          "noon_date",
+          "noon_time",
+          "dist_to_noon"
+        ))
+      )
   }
 
   # ---------------------------------------------------------------------------
   # .make_daily()
   # ---------------------------------------------------------------------------
   .make_daily <- function(x) {
-    method  <- match.arg(daily_method, c("solar_noon", "daytime_only", "noon_roost"))
+    method <- match.arg(
+      daily_method,
+      c("solar_noon", "daytime_only", "noon_roost")
+    )
     b_daily <- switch(
       method,
       "solar_noon" = {
-        if (!exists("mt_thin_daily_solar_noon", mode = "function"))
+        if (!exists("mt_thin_daily_solar_noon", mode = "function")) {
           stop("mt_thin_daily_solar_noon() not found.")
+        }
         .msg("Daily method: solar_noon")
-        .safe_try(mt_thin_daily_solar_noon(x, tz = tz), "mt_thin_daily_solar_noon")
+        .safe_try(
+          mt_thin_daily_solar_noon(x, tz = tz),
+          "mt_thin_daily_solar_noon"
+        )
       },
       "daytime_only" = {
         .msg("Daily method: daytime_only (excludes 21:00-05:00 UTC)")
@@ -1224,12 +1651,21 @@ import_nanofox_movebank <- function(
       }
     )
     if (is.null(b_daily) || nrow(b_daily) == 0) {
-      warning(".make_daily(): no rows returned for method '", method, "'."); return(b_daily)
+      warning(".make_daily(): no rows returned for method '", method, "'.")
+      return(b_daily)
     }
-    if (exists("mt_add_daily_sensor_metrics", mode = "function"))
-      b_daily <- .safe_try(mt_add_daily_sensor_metrics(b_all = x, b_daily = b_daily,
-                                                       tz = tz, day_anchor_hour = 12),
-                           "mt_add_daily_sensor_metrics") %||% b_daily
+    if (exists("mt_add_daily_sensor_metrics", mode = "function")) {
+      b_daily <- .safe_try(
+        mt_add_daily_sensor_metrics(
+          b_all = x,
+          b_daily = b_daily,
+          tz = tz,
+          day_anchor_hour = 12
+        ),
+        "mt_add_daily_sensor_metrics"
+      ) %||%
+        b_daily
+    }
 
     # ---- diff_date: days elapsed between consecutive daily fixes per deployment ----
     # For a perfect daily dataset every value is 1.
@@ -1244,9 +1680,13 @@ import_nanofox_movebank <- function(
       FUN = function(d) c(NA_real_, diff(d))
     )
 
-    .msg("  diff_date: ", sum(b_daily$diff_date == 1, na.rm = TRUE),
-         " consecutive day pairs, ",
-         sum(b_daily$diff_date > 1, na.rm = TRUE), " gaps (>1 day).")
+    .msg(
+      "  diff_date: ",
+      sum(b_daily$diff_date == 1, na.rm = TRUE),
+      " consecutive day pairs, ",
+      sum(b_daily$diff_date > 1, na.rm = TRUE),
+      " gaps (>1 day)."
+    )
 
     b_daily
   }
@@ -1254,22 +1694,35 @@ import_nanofox_movebank <- function(
   # ---------------------------------------------------------------------------
   # Input checks
   # ---------------------------------------------------------------------------
-  if (length(study_id) < 1) stop("Provide at least one study_id.")
-  if (length(sensor_external_ids) != length(sensor_labels))
+  if (length(study_id) < 1) {
+    stop("Provide at least one study_id.")
+  }
+  if (length(sensor_external_ids) != length(sensor_labels)) {
     stop("sensor_external_ids and sensor_labels must have the same length.")
+  }
 
   # ---------------------------------------------------------------------------
   # Sensor lookup
   # ---------------------------------------------------------------------------
-  sensors_tbl     <- move2::movebank_retrieve(entity_type = "tag_type") %>% as_tibble()
+  sensors_tbl <- move2::movebank_retrieve(entity_type = "tag_type") %>%
+    as_tibble()
   sensor_selected <- sensors_tbl %>%
     dplyr::filter(.data$external_id %in% sensor_external_ids) %>%
-    mutate(sensor_type = sensor_labels[match(.data$external_id, sensor_external_ids)])
-  if (nrow(sensor_selected) == 0)
-    stop("None of the requested sensor_external_ids found in movebank_retrieve(tag_type).")
+    mutate(
+      sensor_type = sensor_labels[match(.data$external_id, sensor_external_ids)]
+    )
+  if (nrow(sensor_selected) == 0) {
+    stop(
+      "None of the requested sensor_external_ids found in movebank_retrieve(tag_type)."
+    )
+  }
   if (verbose) {
     .msg("Selected sensors:")
-    print(sensor_selected %>% dplyr::select(id, name, external_id, sensor_type, is_location_sensor), n = 50)
+    print(
+      sensor_selected %>%
+        dplyr::select(id, name, external_id, sensor_type, is_location_sensor),
+      n = 50
+    )
   }
 
   # ---------------------------------------------------------------------------
@@ -1279,7 +1732,6 @@ import_nanofox_movebank <- function(
   # Column utilities (used by download_one_study, merge_stack, and output loop)
   # ---------------------------------------------------------------------------
 
-
   # ---------------------------------------------------------------------------
   # Column utilities — defined before download_one_study so all downstream
   # code (expand_tinyfox, output loop, merge_stack) can call them freely.
@@ -1289,7 +1741,6 @@ import_nanofox_movebank <- function(
   # Column utilities — defined before download_one_study so all downstream
   # code (expand_tinyfox, output loop, merge_stack) can call them freely.
   # ---------------------------------------------------------------------------
-
 
   # ---------------------------------------------------------------------------
   # Merge studies
@@ -1300,21 +1751,33 @@ import_nanofox_movebank <- function(
   # each column so it can be reattached if needed; stripping to double is safe
   # because the physical meaning is preserved by the column name.
   .strip_units_cols <- function(obj) {
-    if (is.null(obj) || !is.data.frame(obj)) return(obj)
+    if (is.null(obj) || !is.data.frame(obj)) {
+      return(obj)
+    }
     for (col in names(obj)) {
-      if (inherits(obj[[col]], "units"))
+      if (inherits(obj[[col]], "units")) {
         obj[[col]] <- as.numeric(obj[[col]])
+      }
     }
     obj
   }
   .na_like <- function(src, n) {
-    if (inherits(src, "POSIXct"))
+    if (inherits(src, "POSIXct")) {
       return(as.POSIXct(rep(NA_real_, n), origin = "1970-01-01", tz = "UTC"))
-    if (is.double(src))    return(rep(NA_real_,      n))
-    if (is.integer(src))   return(rep(NA_integer_,   n))
-    if (is.character(src)) return(rep(NA_character_,  n))
-    if (is.logical(src))   return(rep(NA,             n))
-    rep(NA_character_, n)   # safe fallback
+    }
+    if (is.double(src)) {
+      return(rep(NA_real_, n))
+    }
+    if (is.integer(src)) {
+      return(rep(NA_integer_, n))
+    }
+    if (is.character(src)) {
+      return(rep(NA_character_, n))
+    }
+    if (is.logical(src)) {
+      return(rep(NA, n))
+    }
+    rep(NA_character_, n) # safe fallback
   }
 
   # ---------------------------------------------------------------------------
@@ -1328,11 +1791,22 @@ import_nanofox_movebank <- function(
   .normalise_cols <- function(x) {
     geom_col <- if (inherits(x, "sf")) attr(x, "sf_column") else NULL
     for (nm in names(x)) {
-      if (!is.null(geom_col) && nm == geom_col) next
+      if (!is.null(geom_col) && nm == geom_col) {
+        next
+      }
       v <- x[[nm]]
-      if (inherits(v, "units"))              { x[[nm]] <- as.numeric(v);    next }
-      if (is.ordered(v) || is.factor(v))     { x[[nm]] <- as.character(v);  next }
-      if (inherits(v, "integer64"))          { x[[nm]] <- as.character(v);  next }
+      if (inherits(v, "units")) {
+        x[[nm]] <- as.numeric(v)
+        next
+      }
+      if (is.ordered(v) || is.factor(v)) {
+        x[[nm]] <- as.character(v)
+        next
+      }
+      if (inherits(v, "integer64")) {
+        x[[nm]] <- as.character(v)
+        next
+      }
     }
     x
   }
@@ -1345,18 +1819,33 @@ import_nanofox_movebank <- function(
   # columns that are entirely empty.
   # ---------------------------------------------------------------------------
   .drop_all_na_cols <- function(x) {
-    if (is.null(x) || nrow(x) == 0) return(x)
+    if (is.null(x) || nrow(x) == 0) {
+      return(x)
+    }
     geom_col <- if (inherits(x, "sf")) attr(x, "sf_column") else character(0)
-    keep <- vapply(names(x), function(nm) {
-      if (nm %in% geom_col) return(TRUE)          # always keep geometry
-      v <- x[[nm]]
-      if (inherits(v, "sfc")) return(TRUE)         # always keep sfc columns
-      !all(is.na(v))
-    }, logical(1))
+    keep <- vapply(
+      names(x),
+      function(nm) {
+        if (nm %in% geom_col) {
+          return(TRUE)
+        } # always keep geometry
+        v <- x[[nm]]
+        if (inherits(v, "sfc")) {
+          return(TRUE)
+        } # always keep sfc columns
+        !all(is.na(v))
+      },
+      logical(1)
+    )
     dropped <- names(x)[!keep]
-    if (length(dropped) > 0)
-      .msg("  Dropping ", length(dropped), " all-NA column(s): ",
-           paste(dropped, collapse = ", "))
+    if (length(dropped) > 0) {
+      .msg(
+        "  Dropping ",
+        length(dropped),
+        " all-NA column(s): ",
+        paste(dropped, collapse = ", ")
+      )
+    }
     x[, keep, drop = FALSE]
   }
 
@@ -1372,8 +1861,10 @@ import_nanofox_movebank <- function(
   # ---------------------------------------------------------------------------
   .normalise_one <- function(x) {
     # Ensure keyed to deployment_id
-    if (move2::mt_track_id_column(x) != "deployment_id" &&
-        "deployment_id" %in% names(x)) {
+    if (
+      move2::mt_track_id_column(x) != "deployment_id" &&
+        "deployment_id" %in% names(x)
+    ) {
       x$deployment_id <- as.character(x$deployment_id)
       attr(x, "track_id_column") <- "deployment_id"
     }
@@ -1387,28 +1878,49 @@ import_nanofox_movebank <- function(
       changed <- FALSE
       for (nm in names(td)) {
         v <- td[[nm]]
-        if (inherits(v, "units"))          { td[[nm]] <- as.numeric(v);   changed <- TRUE }
-        else if (is.ordered(v))            { td[[nm]] <- as.character(v); changed <- TRUE }
-        else if (is.factor(v))             { td[[nm]] <- as.character(v); changed <- TRUE }
-        else if (inherits(v, "integer64")) { td[[nm]] <- as.character(v); changed <- TRUE }
+        if (inherits(v, "units")) {
+          td[[nm]] <- as.numeric(v)
+          changed <- TRUE
+        } else if (is.ordered(v)) {
+          td[[nm]] <- as.character(v)
+          changed <- TRUE
+        } else if (is.factor(v)) {
+          td[[nm]] <- as.character(v)
+          changed <- TRUE
+        } else if (inherits(v, "integer64")) {
+          td[[nm]] <- as.character(v)
+          changed <- TRUE
+        }
         # Leave sfc geometry columns intact — that is the whole point
       }
-      if (changed)
+      if (changed) {
         x <- tryCatch(move2::mt_set_track_data(x, td), error = function(e) x)
+      }
     }
     x
   }
   download_one_study <- function(id) {
     .msg("Downloading study: ", id)
-    si         <- move2::movebank_download_study_info(study_id = id)
-    w          <- .wanted_sensor_ids(si, sensor_selected)
+    si <- move2::movebank_download_study_info(study_id = id)
+    w <- .wanted_sensor_ids(si, sensor_selected)
     wanted_ids <- w$wanted_ids
-    if (length(wanted_ids) == 0)
-      stop("Study ", id, " has no matching sensors.\n",
-           "Study: ",     paste(w$study_sensor_names, collapse = ", "), "\n",
-           "Requested: ", paste(sensor_selected$name, collapse = ", "))
+    if (length(wanted_ids) == 0) {
+      stop(
+        "Study ",
+        id,
+        " has no matching sensors.\n",
+        "Study: ",
+        paste(w$study_sensor_names, collapse = ", "),
+        "\n",
+        "Requested: ",
+        paste(sensor_selected$name, collapse = ", ")
+      )
+    }
 
-    b <- move2::movebank_download_study(study_id = id, sensor_type_id = wanted_ids)
+    b <- move2::movebank_download_study(
+      study_id = id,
+      sensor_type_id = wanted_ids
+    )
 
     # ---------------------------------------------------------------------------
     # Re-key to deployment_id immediately after download.
@@ -1429,74 +1941,105 @@ import_nanofox_movebank <- function(
     #   3. Re-key via attr swap (not mt_as_move2) — preserves track data exactly.
     #   4. Re-attach the saved track data, re-indexed by deployment_id.
     # ---------------------------------------------------------------------------
-    b <- tryCatch({
-      orig_td      <- move2::mt_track_data(b)
-      orig_track_col <- move2::mt_track_id_column(b)
+    b <- tryCatch(
+      {
+        orig_td <- move2::mt_track_data(b)
+        orig_track_col <- move2::mt_track_id_column(b)
 
-      # ---- Promote individual_local_identifier to event column ----
-      if (!"individual_local_identifier" %in% names(b) &&
-          "individual_local_identifier" %in% names(orig_td)) {
-        lkp <- stats::setNames(as.character(orig_td$individual_local_identifier),
-                               as.character(orig_td[[orig_track_col]]))
-        b$individual_local_identifier <- unname(lkp[as.character(move2::mt_track_id(b))])
-      }
-      if (!"individual_local_identifier" %in% names(b) ||
-          all(is.na(b$individual_local_identifier)))
-        b$individual_local_identifier <- as.character(move2::mt_track_id(b))
-
-      # ---- If already keyed to deployment_id, coerce to character for join safety ----
-      if (orig_track_col == "deployment_id") {
-        if ("deployment_id" %in% names(b))
-          b$deployment_id <- as.character(b$deployment_id)
-        if ("deployment_id" %in% names(orig_td) && !is.character(orig_td$deployment_id)) {
-          orig_td$deployment_id <- as.character(orig_td$deployment_id)
-          b <- tryCatch(move2::mt_set_track_data(b, orig_td), error = function(e) b)
+        # ---- Promote individual_local_identifier to event column ----
+        if (
+          !"individual_local_identifier" %in% names(b) &&
+            "individual_local_identifier" %in% names(orig_td)
+        ) {
+          lkp <- stats::setNames(
+            as.character(orig_td$individual_local_identifier),
+            as.character(orig_td[[orig_track_col]])
+          )
+          b$individual_local_identifier <- unname(lkp[as.character(move2::mt_track_id(
+            b
+          ))])
         }
-        b
-      } else if ("deployment_id" %in% names(orig_td)) {
+        if (
+          !"individual_local_identifier" %in% names(b) ||
+            all(is.na(b$individual_local_identifier))
+        ) {
+          b$individual_local_identifier <- as.character(move2::mt_track_id(b))
+        }
 
-        # ---- Coerce track data deployment_id to character immediately ----
-        # This prevents mt_as_event_attribute() join failures caused by
-        # int64 (track data) vs character (event col) type mismatch.
-        orig_td$deployment_id <- as.character(orig_td$deployment_id)
+        # ---- If already keyed to deployment_id, coerce to character for join safety ----
+        if (orig_track_col == "deployment_id") {
+          if ("deployment_id" %in% names(b)) {
+            b$deployment_id <- as.character(b$deployment_id)
+          }
+          if (
+            "deployment_id" %in%
+              names(orig_td) &&
+              !is.character(orig_td$deployment_id)
+          ) {
+            orig_td$deployment_id <- as.character(orig_td$deployment_id)
+            b <- tryCatch(
+              move2::mt_set_track_data(b, orig_td),
+              error = function(e) b
+            )
+          }
+          b
+        } else if ("deployment_id" %in% names(orig_td)) {
+          # ---- Coerce track data deployment_id to character immediately ----
+          # This prevents mt_as_event_attribute() join failures caused by
+          # int64 (track data) vs character (event col) type mismatch.
+          orig_td$deployment_id <- as.character(orig_td$deployment_id)
 
-        # ---- Build deployment_id event column from mt_track_id ----
-        # Use mt_track_id(b) rather than b[[orig_track_col]] because the
-        # original track id column may not exist as an event column.
-        track_id_vec <- as.character(move2::mt_track_id(b))
-        dep_lkp      <- stats::setNames(
-          as.character(orig_td$deployment_id),
-          as.character(orig_td[[orig_track_col]])
+          # ---- Build deployment_id event column from mt_track_id ----
+          # Use mt_track_id(b) rather than b[[orig_track_col]] because the
+          # original track id column may not exist as an event column.
+          track_id_vec <- as.character(move2::mt_track_id(b))
+          dep_lkp <- stats::setNames(
+            as.character(orig_td$deployment_id),
+            as.character(orig_td[[orig_track_col]])
+          )
+          b$deployment_id <- as.character(dep_lkp[track_id_vec])
+
+          # ---- Swap track id attribute (preserves track data intact) ----
+          attr(b, "track_id_column") <- "deployment_id"
+
+          # ---- Re-index track data so deployment_id is the key column ----
+          # orig_td already has deployment_id (it came from Movebank track data).
+          # We just need to: coerce it to character, move it to position 1,
+          # and drop the old track id column (e.g. individual_local_identifier).
+          # No join required — orig_td is already one row per deployment.
+          new_td <- orig_td %>%
+            dplyr::mutate(deployment_id = as.character(deployment_id)) %>%
+            dplyr::select(
+              deployment_id,
+              dplyr::everything(),
+              -dplyr::any_of(setdiff(orig_track_col, "deployment_id"))
+            )
+
+          b <- move2::mt_set_track_data(b, new_td)
+
+          .msg(
+            "  Re-keyed to deployment_id (",
+            dplyr::n_distinct(b$deployment_id, na.rm = TRUE),
+            " deployments)."
+          )
+          b
+        } else {
+          .msg(
+            "  deployment_id not in track data; keeping original track id: ",
+            orig_track_col
+          )
+          b
+        }
+      },
+      error = function(e) {
+        .msg(
+          "  Re-key to deployment_id failed (",
+          conditionMessage(e),
+          "); using original track id."
         )
-        b$deployment_id <- as.character(dep_lkp[track_id_vec])
-
-        # ---- Swap track id attribute (preserves track data intact) ----
-        attr(b, "track_id_column") <- "deployment_id"
-
-        # ---- Re-index track data so deployment_id is the key column ----
-        # orig_td already has deployment_id (it came from Movebank track data).
-        # We just need to: coerce it to character, move it to position 1,
-        # and drop the old track id column (e.g. individual_local_identifier).
-        # No join required — orig_td is already one row per deployment.
-        new_td <- orig_td %>%
-          dplyr::mutate(deployment_id = as.character(deployment_id)) %>%
-          dplyr::select(deployment_id, dplyr::everything(),
-                        -dplyr::any_of(setdiff(orig_track_col, "deployment_id")))
-
-        b <- move2::mt_set_track_data(b, new_td)
-
-        .msg("  Re-keyed to deployment_id (",
-             dplyr::n_distinct(b$deployment_id, na.rm = TRUE), " deployments).")
-        b
-      } else {
-        .msg("  deployment_id not in track data; keeping original track id: ", orig_track_col)
         b
       }
-    }, error = function(e) {
-      .msg("  Re-key to deployment_id failed (", conditionMessage(e),
-           "); using original track id.")
-      b
-    })
+    )
 
     # .fix_track_data_lists only needed if re-keying failed (multi-deployment individual track)
     b <- .fix_track_data_lists(b)
@@ -1515,19 +2058,38 @@ import_nanofox_movebank <- function(
         .msg("  sensor_type distribution:")
         print(table(b$sensor_type, useNA = "ifany"))
       }
-      if ("tag_type" %in% col_names)
-        .msg("  tag_type: ",
-             paste(names(table(b$tag_type)), table(b$tag_type), sep = "=", collapse = ", "))
-      pcols <- grep("pressure|baro|altitude|tinyfox", col_names, value = TRUE, ignore.case = TRUE)
-      if (length(pcols)) .msg("  TinyFox/pressure columns: ", paste(pcols, collapse = ", "))
+      if ("tag_type" %in% col_names) {
+        .msg(
+          "  tag_type: ",
+          paste(
+            names(table(b$tag_type)),
+            table(b$tag_type),
+            sep = "=",
+            collapse = ", "
+          )
+        )
+      }
+      pcols <- grep(
+        "pressure|baro|altitude|tinyfox",
+        col_names,
+        value = TRUE,
+        ignore.case = TRUE
+      )
+      if (length(pcols)) {
+        .msg("  TinyFox/pressure columns: ", paste(pcols, collapse = ", "))
+      }
     }
     b <- tryCatch(.add_start(b), error = function(e) {
-      .msg("  .add_start failed: ", conditionMessage(e)); b
+      .msg("  .add_start failed: ", conditionMessage(e))
+      b
     })
 
-
     .source_local(script_add_min_pressure)
-    b <- .safe_try(add_min_pressure_to_locations(df = b), "add_min_pressure_to_locations") %||% b
+    b <- .safe_try(
+      add_min_pressure_to_locations(df = b),
+      "add_min_pressure_to_locations"
+    ) %||%
+      b
 
     # Populate temperature_min, temperature_max, avg_temp on location rows for
     # all tag types (TinyFox flat columns + NanoFox sensor-row join fallback).
@@ -1555,7 +2117,11 @@ import_nanofox_movebank <- function(
     .source_local(script_daily)
     b_daily <- .make_daily(b)
     if (is.null(b_daily) || nrow(b_daily) == 0) {
-      .msg("Warning: daily dataset empty for study ", id, " \u2014 skipping metrics.")
+      .msg(
+        "Warning: daily dataset empty for study ",
+        id,
+        " \u2014 skipping metrics."
+      )
       b_daily2 <- b_daily
     } else {
       b_daily2 <- .make_location_metrics(b_daily)
@@ -1566,18 +2132,26 @@ import_nanofox_movebank <- function(
     for (obj_name in c("b", "b_loc", "b_daily2")) {
       obj <- get(obj_name)
       if (!is.null(obj) && nrow(obj) > 0) {
-        obj$year   <- as.character(lubridate::year(obj$timestamp))
-        obj$yday   <- as.character(lubridate::yday(obj$timestamp))
-        obj$season <- ifelse(lubridate::month(obj$timestamp) > 7, "Fall", "Spring")
+        obj$year <- as.character(lubridate::year(obj$timestamp))
+        obj$yday <- as.character(lubridate::yday(obj$timestamp))
+        obj$season <- ifelse(
+          lubridate::month(obj$timestamp) > 7,
+          "Fall",
+          "Spring"
+        )
         # Guarantee species on every output object (re-apply after row filtering).
         obj <- .fill_from_td(obj, "taxon_canonical_name", "species")
         obj$species <- as.character(obj$species)
         # Remove internal columns not needed in outputs:
         #   tag_type             — internal inference label
         #   taxon_canonical_name — redundant with species
-        drop_cols <- intersect(names(obj), c("tag_type", "taxon_canonical_name"))
-        if (length(drop_cols) > 0)
+        drop_cols <- intersect(
+          names(obj),
+          c("tag_type", "taxon_canonical_name")
+        )
+        if (length(drop_cols) > 0) {
           obj <- obj[, !names(obj) %in% drop_cols, drop = FALSE]
+        }
 
         # ---- tag_tech_spec → min_temp_c + min_temp_group ----
         # tag_tech_spec carries ordinal minimum-temperature bins from the
@@ -1589,7 +2163,7 @@ import_nanofox_movebank <- function(
           obj$min_temp_c <- as.character(obj$tag_tech_spec)
           obj$min_temp_group <- factor(
             obj$min_temp_c,
-            levels  = c("<=0", ">0 / <=5", ">5 / <=10", ">10"),
+            levels = c("<=0", ">0 / <=5", ">5 / <=10", ">10"),
             ordered = TRUE
           )
           obj <- obj[, !names(obj) %in% "tag_tech_spec", drop = FALSE]
@@ -1605,7 +2179,7 @@ import_nanofox_movebank <- function(
     list(study_id = id, full = b, location = b_loc, daily = b_daily2)
   }
 
-  res_list        <- lapply(study_id, download_one_study)
+  res_list <- lapply(study_id, download_one_study)
   names(res_list) <- as.character(study_id)
 
   # Create a typed NA vector that matches `src` in class so bind_rows
@@ -1613,8 +2187,12 @@ import_nanofox_movebank <- function(
 
   merge_stack <- function(objs) {
     objs <- Filter(Negate(is.null), objs)
-    if (length(objs) == 0) return(NULL)
-    if (length(objs) == 1) return(objs[[1]])
+    if (length(objs) == 0) {
+      return(NULL)
+    }
+    if (length(objs) == 1) {
+      return(objs[[1]])
+    }
 
     # Step 1: normalise all objects (key to deployment_id, fix column types)
     objs <- lapply(objs, .normalise_one)
@@ -1623,15 +2201,23 @@ import_nanofox_movebank <- function(
     # including sfc geometry columns.  Uses .track_combine = track_combine which
     # defaults to "merge" (keeps all track data columns from all studies).
     out <- tryCatch(
-      Reduce(function(a, b) move2::mt_stack(a, b, .track_combine = track_combine), objs),
+      Reduce(
+        function(a, b) move2::mt_stack(a, b, .track_combine = track_combine),
+        objs
+      ),
       error = function(e) {
-        .msg("  merge_stack: mt_stack failed (", conditionMessage(e),
-             "); falling back to manual bind_rows merge.")
+        .msg(
+          "  merge_stack: mt_stack failed (",
+          conditionMessage(e),
+          "); falling back to manual bind_rows merge."
+        )
         NULL
       }
     )
 
-    if (!is.null(out)) return(out)
+    if (!is.null(out)) {
+      return(out)
+    }
 
     # Fallback: strip units from event columns, drop move2 class, bind_rows, re-cast
     .to_plain_sf <- function(x) {
@@ -1643,20 +2229,31 @@ import_nanofox_movebank <- function(
 
     # Build union column set and typed-NA fill map
     geom_cols <- vapply(sf_objs, function(x) attr(x, "sf_column"), character(1))
-    all_cols  <- unique(unlist(mapply(
-      function(x, gc) setdiff(names(x), gc), sf_objs, geom_cols, SIMPLIFY = FALSE)))
+    all_cols <- unique(unlist(mapply(
+      function(x, gc) setdiff(names(x), gc),
+      sf_objs,
+      geom_cols,
+      SIMPLIFY = FALSE
+    )))
 
     type_map <- list()
-    for (x in sf_objs)
-      for (nm in names(x))
-        if (!nm %in% names(type_map) && !inherits(x[[nm]], "sfc"))
+    for (x in sf_objs) {
+      for (nm in names(x)) {
+        if (!nm %in% names(type_map) && !inherits(x[[nm]], "sfc")) {
           type_map[[nm]] <- x[[nm]]
+        }
+      }
+    }
 
     align_one <- function(x, gc) {
       n <- nrow(x)
       for (col in setdiff(all_cols, names(x))) {
         src <- type_map[[col]]
-        x[[col]] <- if (!is.null(src)) .na_like(src, n) else rep(NA_character_, n)
+        x[[col]] <- if (!is.null(src)) {
+          .na_like(src, n)
+        } else {
+          rep(NA_character_, n)
+        }
       }
       x[, c(all_cols, gc), drop = FALSE]
     }
@@ -1665,43 +2262,81 @@ import_nanofox_movebank <- function(
     combined <- tryCatch(
       do.call(dplyr::bind_rows, sf_objs),
       error = function(e) {
-        .msg("  merge_stack: bind_rows failed (", conditionMessage(e),
-             "); coercing all non-geometry columns to character.")
+        .msg(
+          "  merge_stack: bind_rows failed (",
+          conditionMessage(e),
+          "); coercing all non-geometry columns to character."
+        )
         sf_objs2 <- lapply(sf_objs, function(x) {
           gc <- attr(x, "sf_column")
-          for (nm in setdiff(names(x), gc))
-            x[[nm]] <- if (!inherits(x[[nm]], "sfc")) as.character(x[[nm]]) else x[[nm]]
+          for (nm in setdiff(names(x), gc)) {
+            x[[nm]] <- if (!inherits(x[[nm]], "sfc")) {
+              as.character(x[[nm]])
+            } else {
+              x[[nm]]
+            }
+          }
           x
         })
         do.call(dplyr::bind_rows, sf_objs2)
       }
     )
 
-    track_col <- if ("deployment_id" %in% names(combined) &&
-                     !all(is.na(combined$deployment_id))) "deployment_id"
-    else if ("individual_local_identifier" %in% names(combined) &&
-             !all(is.na(combined$individual_local_identifier))) "individual_local_identifier"
-    else { combined$..row_id <- as.character(seq_len(nrow(combined))); "..row_id" }
+    track_col <- if (
+      "deployment_id" %in%
+        names(combined) &&
+        !all(is.na(combined$deployment_id))
+    ) {
+      "deployment_id"
+    } else if (
+      "individual_local_identifier" %in%
+        names(combined) &&
+        !all(is.na(combined$individual_local_identifier))
+    ) {
+      "individual_local_identifier"
+    } else {
+      combined$..row_id <- as.character(seq_len(nrow(combined)))
+      "..row_id"
+    }
 
     combined[[track_col]] <- as.character(combined[[track_col]])
     combined <- combined[order(combined[[track_col]], combined$timestamp), ]
-    move2::mt_as_move2(combined, track_id_column = track_col,
-                       time_column = "timestamp", crs = sf::st_crs(sf_objs[[1]]))
+    move2::mt_as_move2(
+      combined,
+      track_id_column = track_col,
+      time_column = "timestamp",
+      crs = sf::st_crs(sf_objs[[1]])
+    )
   }
-  full_merged  <- if (isTRUE(merge_studies)) merge_stack(lapply(res_list, `[[`, "full"))     else lapply(res_list, `[[`, "full")
-  loc_merged   <- if (isTRUE(merge_studies)) merge_stack(lapply(res_list, `[[`, "location")) else lapply(res_list, `[[`, "location")
-  daily_merged <- if (isTRUE(merge_studies)) merge_stack(lapply(res_list, `[[`, "daily"))    else lapply(res_list, `[[`, "daily")
+  full_merged <- if (isTRUE(merge_studies)) {
+    merge_stack(lapply(res_list, `[[`, "full"))
+  } else {
+    lapply(res_list, `[[`, "full")
+  }
+  loc_merged <- if (isTRUE(merge_studies)) {
+    merge_stack(lapply(res_list, `[[`, "location"))
+  } else {
+    lapply(res_list, `[[`, "location")
+  }
+  daily_merged <- if (isTRUE(merge_studies)) {
+    merge_stack(lapply(res_list, `[[`, "daily"))
+  } else {
+    lapply(res_list, `[[`, "daily")
+  }
 
   # ---------------------------------------------------------------------------
   # Post-merge: drop all-NA columns from merged outputs
   # ---------------------------------------------------------------------------
   if (isTRUE(merge_studies)) {
-    if (!is.null(full_merged)  && nrow(full_merged)  > 0)
-      full_merged  <- .drop_all_na_cols(full_merged)
-    if (!is.null(loc_merged)   && nrow(loc_merged)   > 0)
-      loc_merged   <- .drop_all_na_cols(loc_merged)
-    if (!is.null(daily_merged) && nrow(daily_merged) > 0)
+    if (!is.null(full_merged) && nrow(full_merged) > 0) {
+      full_merged <- .drop_all_na_cols(full_merged)
+    }
+    if (!is.null(loc_merged) && nrow(loc_merged) > 0) {
+      loc_merged <- .drop_all_na_cols(loc_merged)
+    }
+    if (!is.null(daily_merged) && nrow(daily_merged) > 0) {
       daily_merged <- .drop_all_na_cols(daily_merged)
+    }
   }
 
   # ---------------------------------------------------------------------------
@@ -1709,28 +2344,36 @@ import_nanofox_movebank <- function(
   # ---------------------------------------------------------------------------
   if (verbose && isTRUE(merge_studies)) {
     .msg("Merged studies: ", paste(study_id, collapse = ", "))
-    .msg("Sensor types (merged full):"); print(table(full_merged$sensor_type, useNA = "ifany"))
-    .msg("Timestamp range (merged full):"); print(summary(full_merged$timestamp))
+    .msg("Sensor types (merged full):")
+    print(table(full_merged$sensor_type, useNA = "ifany"))
+    .msg("Timestamp range (merged full):")
+    print(summary(full_merged$timestamp))
     # Note: units are stripped from merged objects by .strip_units_cols() before
     # mt_stack(), so deparse_unit() would error here — report class instead.
     if (!is.null(loc_merged)) {
-      if ("speed" %in% names(loc_merged))
+      if ("speed" %in% names(loc_merged)) {
         .msg("Speed column class (location): ", class(loc_merged$speed)[1])
-      if ("delta_altitude_m" %in% names(loc_merged))
-        .msg("Delta altitude column class (location): ", class(loc_merged$delta_altitude_m)[1])
-      if ("cum_dist_km" %in% names(loc_merged))
+      }
+      if ("delta_altitude_m" %in% names(loc_merged)) {
+        .msg(
+          "Delta altitude column class (location): ",
+          class(loc_merged$delta_altitude_m)[1]
+        )
+      }
+      if ("cum_dist_km" %in% names(loc_merged)) {
         .msg("Cumulative distance column present (location): yes")
+      }
     }
   } else if (verbose) {
     .msg("Downloaded ", length(study_id), " studies (not merged).")
   }
 
   list(
-    sensors_table    = sensors_tbl,
+    sensors_table = sensors_tbl,
     sensors_selected = sensor_selected,
-    studies          = res_list,
-    full             = full_merged,
-    location         = loc_merged,
-    daily            = daily_merged
+    studies = res_list,
+    full = full_merged,
+    location = loc_merged,
+    daily = daily_merged
   )
 }
