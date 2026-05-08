@@ -7,9 +7,9 @@ from ICARUS/Sigfox biologger tags — TinyFox, NanoFox, and uWasp.
 
 ## Overview
 
-Sigfox-based tracking tags transmit GPS locations, activity (VeDBA), temperature,
+Sigfox-based tracking tags transmit ATLAS location estimates, activity (VeDBA), temperature,
 and barometric pressure at programmed intervals. Raw data is downloaded from
-[Wildcloud](https://wildcloud.io/) and uploaded to
+[Wildcloud](https://mpi-ab.vercel.app/) and uploaded to
 [Movebank](https://www.movebank.org/). This package provides a complete pipeline
 from Wildcloud/Movebank downloads through to `move2` objects ready for analysis,
 including environmental covariate extraction (ERA5 wind/weather) and migration
@@ -203,9 +203,9 @@ p      <- result[[4]]   # ggplot map
 
 | Tag | Manufacturer | Fix interval | Sensors |
 |---|---|---|---|
-| **TinyFox** (V1 / BB firmware) | Ecotone | ~30 min | GPS, VeDBA, temperature, pressure (P firmware) |
-| **NanoFox** | Ecotone | ~3 h (configurable) | GPS, VeDBA (hourly bins), temperature, pressure |
-| **uWasp** | custom | ~60 min | GPS, temperature |
+| **TinyFox** (V1 / BB firmware) | MPIAB | ~24 hr | Location, VeDBA, temperature, pressure (P firmware) |
+| **NanoFox** | MPIAB | ~3 h | Location, VeDBA (hourly bins), temperature, pressure |
+| **uWasp** | Jens Koblitz | ~60 min | Location, temperature |
 
 ---
 
