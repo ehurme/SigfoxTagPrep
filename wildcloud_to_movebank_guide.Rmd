@@ -1,0 +1,374 @@
+---
+title: "Wildcloud to Movebank Workflow"
+author: "Edward Hurme"
+date: "Updated: 2026-05-10"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+---
+
+# Overview
+
+This guide describes how to take raw tag data from the WildCloud platform and
+upload it to Movebank. The pipeline is implemented in
+`R/wildcloud_to_movebank.R` (github.com/ehurme/SigfoxTagPrep).
+
+**Tag models and firmware supported:**
+
+| Model | Firmware | Years active | VeDBA type |
+|---|---|---|---|
+| TinyFoxBatt | V13, V13P, V14P, TV1, BBV6, BBX5 | 2022–2024 | Cumulative daily total |
+| NanoFox | 30Days, DailyVeDBA, 10Day, BBX5 | 2025 | Windowed sum (36 min) |
+| NanoFox | 30DaysFineScalePressure (FSP) | 2026 | Windowed sum (36 min) |
+| TinyFoxTwo | TINYFOXTWO BLACKBIRDS V | 2024–2026 | Windowed sum (60 min) |
+
+---
+
+# 1. Organize the Capture Sheet
+
+The capture sheet is a CSV or Excel file with one row per tag deployment.
+Required columns (any recognized spelling variant works — see auto-detection
+rules in `wildcloud_to_movebank()`):
+
+| Field | Example | Notes |
+|---|---|---|
+| Tag ID | `120EBBA` | WildCloud device ID |
+| Species / Animal taxon | `Nyctalus leisleri` | Genus + species, or full taxon string |
+| Deployment date | `2025-08-14` | ISO format preferred |
+| Deployment time | `21:30:00` | HMS; defaults to noon if missing |
+| Capture latitude | `47.6123` | Decimal degrees WGS84 |
+| Capture longitude | `9.0456` | Decimal degrees WGS84 |
+
+**Recommended additional columns:**
+
+| Field | Notes |
+|---|---|
+| Ring number / Ring ID | Used as the Movebank `animal.ring.id` and as `Animal.ID` when present |
+| PIT tag ID | Takes priority over ring number for `Animal.ID` |
+| Animal mass (g) | Body mass at deployment |
+| Animal sex | M / F |
+| Life stage | adult / juvenile |
+| Forearm length (mm) | |
+| Tag model | e.g. `NanoFox`, `TinyFoxBatt` |
+| Firmware version | e.g. `30Days`, `30DaysFineScalePressure` |
+
+**Animal ID assignment** (automatic, in priority order):
+
+1. PIT tag ID (most stable — survives recapture and re-tagging)
+2. Ring / band number
+3. `Animal_ID` column if present
+4. Structured fallback: `{Gspp}{YY}_{location}_{TagID}` — e.g. `Nlei25_Swiss_120EBBA`
+
+Pass `location_abbr = "Swiss"` (or similar 3–6 character code) to get
+meaningful fallback IDs. Without it the fallback uses `Unk`.
+
+---
+
+# 2. Download Data from WildCloud
+
+1. Log in to wildcloud.icarus.mpg.de
+2. Select your device group / project
+3. Set the date range and export as CSV
+
+**How many records to download:**
+Tags can send a maximum of ~300–400 messages over their lifetime. A safe upper
+bound is `n_tags × 400`. The WildCloud website may crash on very large exports
+— if so, split the download by tag ID and save all CSVs into the same folder.
+The R function merges them automatically.
+
+**WildCloud CSV columns vary by firmware version.** The function
+`harmonize_wc_columns()` normalizes all known variants to canonical names
+before processing, so you do not need to rename columns manually.
+
+---
+
+# 3. Convert to Movebank Format in R
+
+Source the function file, then call one of two functions depending on whether
+this is a **new study** or an **update to an existing study**.
+
+```r
+source("R/wildcloud_to_movebank.R")
+```
+
+## 3a. New study — `wildcloud_to_movebank()`
+
+Use this for the **first upload** of a study, or when you want to regenerate
+all files from scratch without querying Movebank.
+
+```r
+result <- wildcloud_to_movebank(
+  wc_path               = "path/to/wildcloud/csvs/",   # folder of WildCloud exports
+  # movebank_csv_path   = "path/to/single_export.csv", # alternative: one merged CSV
+  animals_path          = "path/to/capture_sheet.xlsx",
+  output_dir            = "path/to/movebank_output/",
+  movebank_project_name = "ICARUS Bats. Nyctalus leisleri. Switzerland",
+  location_abbr         = "Swiss"                       # used in fallback Animal.IDs
+)
+```
+
+**Key optional arguments:**
+
+| Argument | Default | Purpose |
+|---|---|---|
+| `location_abbr` | `"Unk"` | Short code embedded in fallback Animal.IDs |
+| `species` | auto-detected | Override species string for all rows |
+| `life_stage` | auto-detected | Override life stage for all rows |
+| `animal_id_col` | auto-detected | Force a specific column as Animal.ID |
+| `clean_lat_range` | `NULL` | Drop fixes outside `c(min_lat, max_lat)` |
+| `clean_lon_range` | `NULL` | Drop fixes outside `c(min_lon, max_lon)` |
+| `force_tag_model_family` | auto | Override tag model (e.g. `"NanoFox"`) |
+| `force_firmware_version` | auto | Override firmware (e.g. `"30Days"`) |
+| `force_vedba_count` | auto | Override the burst count used for VeDBA avg |
+| `correct_drift` | `FALSE` | Apply clock-drift correction (requires `lme4`) |
+| `programmed_interval` | `NULL` | Tag transmission interval in seconds (for drift) |
+| `sampling_config` | built-in | Custom firmware sampling table |
+
+**What the function does internally:**
+
+1. Reads the capture sheet and resolves Animal IDs (PIT > ring > fallback)
+2. Reads all WildCloud CSVs, normalizes column names across firmware versions
+3. Expands the wide per-transmission schema into long Movebank-style rows:
+   - **Location row** — timestamp + lat/lon (one per transmission)
+   - **VeDBA rows** — 5 × 36-min windows per transmission (NanoFox), or cumulative daily total (TinyFoxBatt)
+   - **Temperature rows** — 5 × 36-min average bins
+   - **Pressure row** — minimum of last 3 hrs (or 5 instantaneous readings for FSP)
+   - **Min/max temperature row** — 3-hr summary
+4. Optionally applies clock-drift correction at transmission level
+5. Joins firmware sampling metadata (vedba_count, burst_rate_hz, etc.)
+6. Computes `deploy.on.date` / `deploy.off.date` for the deployment table
+7. Writes per-project CSVs to `output_dir/Projects/{project_name}/`
+
+**Output files written:**
+
+| File | Movebank sensor type | Content |
+|---|---|---|
+| `data.csv` | `sigfox-geolocation` | Locations with Sigfox metadata |
+| `dataVeDBA.csv` | `acceleration` | VeDBA sum + avg, firmware metadata |
+| `dataBar.csv` | `barometer` | Minimum barometric pressure |
+| `dataTemp.csv` | `accessory-measurements` | Average temperature bins |
+| `dataMinTempText.csv` | `Derived` | Min temp as categorical range label (30Days) |
+| `dataMinMaxTemp.csv` | `accessory-measurements` | Numeric min + max temp (FSP firmware) |
+| `deployment.csv` | — | One row per deployment; upload first |
+
+**Inspecting the result:**
+
+```r
+# All processed sensor data (before splitting into per-type tables)
+head(result$movebank_df)
+
+# Deployment table
+result$deployment_data
+
+# Firmware sampling config used
+result$sampling_config
+
+# Drift model (if correct_drift = TRUE)
+drift_model <- attr(result, "drift_model")
+summary(drift_model)
+```
+
+### Clock-drift correction
+
+Tags without a real-time clock accumulate timing error over the deployment.
+Set `correct_drift = TRUE` to model and remove this per-tag drift. The
+correction requires the `lme4` package.
+
+```r
+source("R/correct_time_drift.R")   # must be sourced separately
+
+result <- wildcloud_to_movebank(
+  wc_path             = "path/to/wildcloud/csvs/",
+  animals_path        = "path/to/capture_sheet.xlsx",
+  output_dir          = "path/to/movebank_output/",
+  movebank_project_name = "ICARUS Bats. Nyctalus leisleri. Switzerland",
+  correct_drift       = TRUE,
+  programmed_interval = 3 * 3600,          # 3-hour schedule in seconds
+  drift_temp_col      = "temperature [°C]",# include temperature as drift predictor
+  drift_diagnostics   = TRUE               # saves diagnostic plots to output_dir
+)
+```
+
+---
+
+## 3b. Updating an existing study — `update_wildcloud_movebank()`
+
+Use this when the study **already exists on Movebank** and you are adding new
+data from a later field season or download batch. The function queries Movebank
+to find which tags already have deployments, then:
+
+- **Always** writes all data files for the new WildCloud export
+- **Only writes `deployment.csv`** if new (un-deployed) tags are found; in
+  that case it covers all animals in the capture sheet (whole-study upload)
+- **Stamps every data file** with a `run_label` suffix so multiple uploads
+  accumulate in the same folder without overwriting each other
+
+Requires Movebank credentials stored via `move2::movebank_store_credentials()`.
+
+```r
+library(move2)
+# Run once to store credentials:
+# movebank_store_credentials(username = "your_username", password = "your_password")
+
+result <- update_wildcloud_movebank(
+  study_id              = 123456789,        # Movebank study ID (from the study URL)
+  wc_path               = "path/to/new_wildcloud_csvs/",
+  animals_path          = "path/to/capture_sheet.xlsx",
+  output_dir            = "path/to/movebank_output/",
+  movebank_project_name = "ICARUS Bats. Nyctalus leisleri. Switzerland",
+  run_label             = "2026-05-10",     # appended to all data file names
+  location_abbr         = "Swiss"
+)
+```
+
+**What the function does:**
+
+1. Downloads the existing deployment table from Movebank (`study_id`)
+2. Runs the full `wildcloud_to_movebank()` pipeline on the new data
+3. Renames all data files: `data_2026-05-10.csv`, `dataVeDBA_2026-05-10.csv`, etc.
+4. Compares tag IDs in the new export against already-deployed tags:
+   - **No new tags** → removes `deployment.csv`, writes `NO_DEPLOYMENT_UPLOAD_NEEDED.txt`
+   - **New tags found** → keeps `deployment.csv` (whole study), writes `DEPLOYMENT_UPLOAD_REQUIRED.txt` listing the new tags and upload order
+
+**`run_label`** defaults to today's date (`"2026-05-10"`). You can pass any
+alphanumeric string, e.g. `"spring2026"` or `"2026-05-10_navarre"`.
+
+**Inspecting the update assessment:**
+
+```r
+result$update_assessment$tags_needing_deployment   # new tags requiring deployment entries
+result$update_assessment$tags_already_deployed     # tags already in Movebank
+result$update_assessment$deployment_needed         # TRUE / FALSE
+result$update_assessment$existing_deployments      # full Movebank deployment table
+```
+
+---
+
+# 4. Quick Diagnostic Look at Raw WildCloud Data — `wildcloud_quicklook()`
+
+Before converting to Movebank format it is useful to visually check what the
+raw WildCloud export looks like: which tags are transmitting, whether locations
+look sensible, and what the VeDBA and temperature traces look like. The
+`wildcloud_quicklook()` function in `R/wildcloud_quicklook.R` does this
+directly from the WildCloud CSV without needing a capture sheet.
+
+```r
+source("R/wildcloud_quicklook.R")
+
+out <- wildcloud_quicklook(
+  "path/to/wildcloud_export.csv",   # file path OR an already-loaded data.frame
+  start_time      = "2026-04-09",   # optional date/time filter
+  end_time        = NULL,
+  plot_dir        = "path/to/plots/"  # omit to display without saving
+)
+```
+
+**What it produces:**
+
+| Plot | Name in `out$plots` | Description |
+|---|---|---|
+| Daily distance | `daily_distance` | Total step distance per tag per day |
+| Daily VeDBA | `daily_vedba` | Mean VeDBA sum per tag per day |
+| Speed over time | `speed_over_time` | Step speed (m/s), faceted per tag |
+| Transmission timeline | `transmission_timeline` | All transmissions; blue = valid fix, red = flagged |
+| Raw VeDBA (time-corrected) | `raw_vedba` | VeDBA bins plotted at their measurement time |
+| Altitude (ISA) | `raw_altitude` | Pressure converted to altitude via ISA formula |
+| Temperature | `raw_temperature` | Min + max 3-hr temperature |
+| Map | `map` | Track lines + points over country outlines |
+
+Night periods (sunset to sunrise) are shaded grey in all time-series plots,
+computed from the median tag location for each device.
+
+**Key optional arguments:**
+
+| Argument | Default | Purpose |
+|---|---|---|
+| `start_time` / `end_time` | `NULL` | Subset to a date or datetime range |
+| `min_quality` | `NULL` | Minimum LQI: `"Poor"`, `"Average"`, `"Good"`, `"Excellent"` |
+| `max_radius` | `NULL` | Drop locations with position radius > this (metres) |
+| `gap_hours` | `3` | Hours between fixes that breaks a track segment in line plots |
+| `plot_daily` | `TRUE` | Show daily distance and VeDBA summary plots |
+| `plot_raw` | `TRUE` | Show per-fix speed, VeDBA, altitude, and timeline plots |
+| `plot_temp` | `TRUE` | Show temperature panel |
+| `free_y_raw` | `TRUE` | Each tag gets its own y-axis in faceted plots |
+| `facets_per_page` | `20` | Max tags per page; automatically paginates beyond this |
+| `plot_dir` | `NULL` | If set, saves all plots as PNGs to this directory |
+
+**Accessing results:**
+
+```r
+# Data table with computed columns (step_dist_m, speed_ms, vedba_sum, coord_ok, ...)
+head(out$data)
+
+# Per-device summary (n_fixes, mean speed, max VeDBA, ...)
+out$summary
+
+# Individual plots
+print(out$plots$map)
+print(out$plots$daily_distance)
+
+# If > 20 devices, raw plots are paginated — access by page
+print(out$plots$speed_over_time_p1)
+print(out$plots$speed_over_time_p2)
+```
+
+**Coordinate filtering:** Locations outside 35–72 °N / 15 °W–40 °E are
+automatically flagged (`coord_ok = FALSE`) and excluded from distance and speed
+calculations but retained in the data. Pass `clean_lat_range` /
+`clean_lon_range` to `wildcloud_to_movebank()` later to hard-drop these rows
+from the Movebank output.
+
+---
+
+# 6. Upload Files to Movebank
+
+Log in to movebank.org and navigate to your study.
+
+**Upload order matters:**
+
+1. **`deployment.csv`** — must be uploaded first, before any data files.
+   Skip this file on update runs where no new tags were found
+   (`NO_DEPLOYMENT_UPLOAD_NEEDED.txt` will be present).
+2. **`data.csv`** — GPS / Sigfox locations
+3. **`dataVeDBA.csv`** — acceleration / VeDBA
+4. **`dataBar.csv`** — barometric pressure
+5. **`dataTemp.csv`** — temperature (36-min bins)
+6. **`dataMinTempText.csv`** — categorical min temperature (30Days firmware)
+7. **`dataMinMaxTemp.csv`** — numeric min + max temperature (FSP firmware)
+
+Not all files will exist for every study — only upload files that are present
+in the project folder.
+
+**On update runs**, upload the `run_label`-stamped files:
+e.g. `data_2026-05-10.csv`, `dataVeDBA_2026-05-10.csv`, etc.
+
+---
+
+# 7. Check the Upload in R
+
+After uploading, verify the data arrived correctly using the `move2` package.
+
+```r
+library(move2)
+
+# Authenticate (run once)
+# movebank_store_credentials(username = "your_username", password = "your_password")
+
+# List your studies
+movebank_list_studies()
+
+# Download and inspect
+bats <- movebank_download_study(study_id = 123456789)
+head(bats)
+mt_n_tracks(bats)
+
+# Check deployment coverage
+deps <- movebank_retrieve("deployment", study_id = 123456789)
+deps[, c("tag_local_identifier", "deploy_on_date", "deploy_off_date")]
+
+# Quick map
+library(mapview)
+mapview(bats)
+```

@@ -1437,6 +1437,22 @@ import_nanofox_movebank <- function(
     # ---- Altitude from pressure ----
     b_loc <- .add_altitude_from_pressure_col(b_loc)
 
+    # ---- Ground elevation from AWS DEM (elevatr) ----
+    if (isTRUE(run_elevation) && requireNamespace("elevatr", quietly = TRUE)) {
+      .safe_try({
+        idx <- which(!sf::st_is_empty(b_loc$geometry) & !is.na(b_loc$lon))
+        if (length(idx) > 0) {
+          elev_pts <- data.frame(x = b_loc$lon[idx], y = b_loc$lat[idx])
+          elev_vals <- elevatr::get_elev_point(
+            locations = elev_pts, src = "aws", prj = 4326
+          )$elevation
+          b_loc$elevation <- NA_real_
+          b_loc$elevation[idx] <- elev_vals
+          .msg("  elevation: ", sum(!is.na(elev_vals)), " values fetched from AWS DEM.")
+        }
+      }, "get_elev_point")
+    }
+
     # ---- Delta altitude — grouped by deployment_id ----
     b_loc <- .safe_try(.add_delta_altitude(b_loc), "add_delta_altitude") %||%
       b_loc
@@ -1451,6 +1467,122 @@ import_nanofox_movebank <- function(
       attr(b_loc, "track_id_column") <- track_col
     }
 
+    b_loc
+  }
+
+  # ---------------------------------------------------------------------------
+  # .add_location_sensor_metrics()
+  # Join per-transmission VeDBA sum, mean temperature, minimum pressure, and
+  # maximum altitude onto location-only rows from the full multi-sensor object.
+  #
+  # NanoFox: all sensor rows (VeDBA, avg.temp, min.baro.pressure) share the
+  #   location row timestamp, so a group_by(individual, timestamp) join works.
+  # TinyFox: pressure and temperature expanded rows share the location timestamp
+  #   (window_hours_end = 0). VeDBA hourly bins do NOT all share it — the 1h-ago
+  #   bin also has timestamp = tx_timestamp, so summing VeDBA rows would
+  #   double-count. Patch vedba_sum and avg_temp from flat columns instead.
+  #
+  # All aggregation runs on sf::st_drop_geometry() to avoid MULTIPOINT geometry.
+  # New columns are assigned directly to the move2 object (no geometry touched).
+  # ---------------------------------------------------------------------------
+  .add_location_sensor_metrics <- function(b_full, b_loc) {
+    if (!"sensor_type" %in% names(b_full)) return(b_loc)
+    join_cols <- c("individual_local_identifier", "timestamp")
+    if (!all(join_cols %in% names(b_full))) return(b_loc)
+
+    df <- sf::st_drop_geometry(b_full)
+
+    has_vedba <- "vedba" %in% names(df)
+    has_temp  <- "external_temperature" %in% names(df)
+    has_pres  <- "barometric_pressure" %in% names(df)
+    has_alt   <- "altitude_m" %in% names(df)
+
+    agg <- df %>%
+      dplyr::group_by(dplyr::across(dplyr::all_of(join_cols))) %>%
+      dplyr::summarise(
+        vedba_sum = if (has_vedba) {
+          v <- as.numeric(vedba[sensor_type == "VeDBA"])
+          v <- v[!is.na(v)]
+          if (length(v) == 0L) NA_real_ else sum(v)
+        } else NA_real_,
+        avg_temp = if (has_temp) {
+          t <- as.numeric(external_temperature[sensor_type == "avg.temp"])
+          t <- t[!is.na(t)]
+          if (length(t) == 0L) NA_real_ else mean(t)
+        } else NA_real_,
+        min_pressure = if (has_pres) {
+          p <- as.numeric(barometric_pressure[sensor_type == "min.baro.pressure"])
+          p <- p[!is.na(p)]
+          if (length(p) == 0L) NA_real_
+          else {
+            pv <- min(p)
+            dplyr::if_else(is.infinite(pv), NA_real_, pv)
+          }
+        } else NA_real_,
+        max_altitude_m = if (has_alt) {
+          a <- as.numeric(altitude_m)
+          a <- a[!is.na(a)]
+          if (length(a) == 0L) NA_real_
+          else {
+            av <- max(a)
+            dplyr::if_else(is.infinite(av), NA_real_, av)
+          }
+        } else NA_real_,
+        .groups = "drop"
+      )
+
+    # Safe join: extract attribute table only, use .row_id, assign columns
+    # directly to the move2 object — geometry is never touched.
+    key <- sf::st_drop_geometry(b_loc) %>%
+      tibble::as_tibble() %>%
+      dplyr::select(dplyr::all_of(join_cols)) %>%
+      dplyr::mutate(.row_id = dplyr::row_number())
+
+    joined <- dplyr::left_join(key, agg, by = join_cols) %>%
+      dplyr::arrange(.row_id)
+
+    new_cols <- c("vedba_sum", "avg_temp", "min_pressure", "max_altitude_m")
+    for (nm in new_cols) {
+      if (nm %in% names(b_loc)) b_loc[[nm]] <- NULL
+    }
+    for (nm in new_cols) {
+      b_loc[[nm]] <- joined[[nm]]
+    }
+
+    # ---- TinyFox flat-column patches ----
+    # vedba_sum: summing VeDBA sensor rows double-counts because the 1h-ago bin
+    # and the total-VeDBA row both have timestamp = tx_timestamp.  Use the flat
+    # column tinyfox_total_vedba (retained on location rows after expansion).
+    if ("tinyfox_total_vedba" %in% names(b_loc) && "tag_type" %in% names(b_loc)) {
+      is_tiny <- !is.na(b_loc$tag_type) &
+        tolower(as.character(b_loc$tag_type)) == "tinyfox"
+      if (any(is_tiny)) {
+        b_loc$vedba_sum[is_tiny] <- as.numeric(b_loc$tinyfox_total_vedba[is_tiny])
+      }
+    }
+    # avg_temp: expanded TinyFox temp rows use external_temperature_min/max, not
+    # external_temperature — so the sensor-row mean is NA.  Patch from flat columns.
+    has_tmin <- "tinyfox_temperature_min_last_24h" %in% names(b_loc)
+    has_tmax <- "tinyfox_temperature_max_last_24h" %in% names(b_loc)
+    if ((has_tmin || has_tmax) && "tag_type" %in% names(b_loc)) {
+      is_tiny <- !is.na(b_loc$tag_type) &
+        tolower(as.character(b_loc$tag_type)) == "tinyfox"
+      if (any(is_tiny)) {
+        tmin <- if (has_tmin) as.numeric(b_loc$tinyfox_temperature_min_last_24h[is_tiny]) else rep(NA_real_, sum(is_tiny))
+        tmax <- if (has_tmax) as.numeric(b_loc$tinyfox_temperature_max_last_24h[is_tiny]) else rep(NA_real_, sum(is_tiny))
+        avg_vals <- rowMeans(cbind(tmin, tmax), na.rm = TRUE)
+        avg_vals[is.nan(avg_vals)] <- NA_real_
+        b_loc$avg_temp[is_tiny] <- avg_vals
+      }
+    }
+
+    .msg(
+      "  location sensor metrics: vedba_sum=", sum(!is.na(b_loc$vedba_sum)),
+      " avg_temp=", sum(!is.na(b_loc$avg_temp)),
+      " min_pressure=", sum(!is.na(b_loc$min_pressure)),
+      " max_altitude_m=", sum(!is.na(b_loc$max_altitude_m)),
+      " rows"
+    )
     b_loc
   }
 
@@ -1917,10 +2049,24 @@ import_nanofox_movebank <- function(
       )
     }
 
-    b <- move2::movebank_download_study(
-      study_id = id,
-      sensor_type_id = wanted_ids
+    b <- tryCatch(
+      move2::movebank_download_study(
+        study_id = id,
+        sensor_type_id = wanted_ids
+      ),
+      error = function(e) {
+        msg <- conditionMessage(e)
+        if (grepl("none seem to be deployed|deployment_id.*NA", msg, ignore.case = TRUE)) {
+          .msg(
+            "  Skipping study ", id,
+            ": no deployments defined in Movebank (deployment_id is NA for all records)."
+          )
+          return(NULL)
+        }
+        stop(e)
+      }
     )
+    if (is.null(b)) return(NULL)
 
     # ---------------------------------------------------------------------------
     # Re-key to deployment_id immediately after download.
@@ -2112,6 +2258,12 @@ import_nanofox_movebank <- function(
     # Location subset: speed (km/h), distance (km), delta_altitude_m (m)
     b_loc <- .make_location_metrics(b)
     b_loc <- add_prev_latlon(b_loc)
+
+    # Join per-transmission sensor aggregates onto location rows
+    b_loc <- .safe_try(
+      .add_location_sensor_metrics(b, b_loc),
+      "add_location_sensor_metrics"
+    ) %||% b_loc
 
     # Daily subset: same metrics pipeline (speed km/h, delta_altitude_m)
     .source_local(script_daily)

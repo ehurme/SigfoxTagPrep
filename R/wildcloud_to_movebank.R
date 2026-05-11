@@ -1,5 +1,5 @@
 # Wildcloud to Movebank ----
-# Updated: 2026-03-25
+# Updated: 2026-05-08
 # Edward Hurme
 
 # Summary:
@@ -1049,6 +1049,18 @@ wildcloud_to_movebank <- function(
   # ---- resolve firmware sampling config per tag ----
   fw_config <- if (!is.null(sampling_config)) sampling_config else get_default_sampling_config()
 
+  # Ensure sensor_schema column exists. If a custom sampling_config omits it
+  # (e.g. it was created before sensor_schema was added to the default table),
+  # backfill from the default config by tag_model + software_version so that
+  # firmware-specific routing (nanofox_fsp vs 30Days) still works correctly.
+  if (!"sensor_schema" %in% names(fw_config)) {
+    default_schema <- get_default_sampling_config() %>%
+      dplyr::select(tag_model, software_version, sensor_schema)
+    fw_config <- fw_config %>%
+      dplyr::left_join(default_schema,
+                       by = c("tag_model", "software_version"))
+  }
+
   animals_mb$tag_model_family <- match_tag_model(animals_mb$tag_model_raw)
 
   if (!is.null(force_tag_model_family)) {
@@ -1868,6 +1880,309 @@ wildcloud_to_movebank <- function(
   if (!is.null(drift_model)) {
     attr(result, "drift_model") <- drift_model
   }
+
+  invisible(result)
+}
+
+
+# =============================================================================
+# 4) Update existing Movebank study with new WildCloud data
+# =============================================================================
+#
+# Downloads existing deployment info from Movebank to assess which tags already
+# have deployments and which are new. Always writes data files (locations, VeDBA,
+# pressure, temperature) for all tags in the new WildCloud export. Writes a
+# deployment CSV only when new (un-deployed) tags are detected; in that case the
+# deployment CSV covers ALL animals in animals_path — i.e. the whole study —
+# consistent with Movebank's bulk-upload workflow.
+#
+# Authentication: move2 credentials must be configured before calling this
+# function. See ?move2::movebank_store_credentials.
+#
+# Parameters (wc_path through drift_diagnostics) are identical to
+# wildcloud_to_movebank(). Additional parameter:
+#   study_id   — Numeric or character Movebank study ID used to query existing
+#                deployments.
+#
+# Returns the same list as wildcloud_to_movebank() with one extra element:
+#   $update_assessment — a list describing the Movebank comparison:
+#     $study_id, $n_existing_deployments, $existing_tag_ids,
+#     $all_new_data_tags, $tags_already_deployed, $tags_needing_deployment,
+#     $deployment_needed, $existing_deployments
+
+update_wildcloud_movebank <- function(
+    study_id,
+    wc_path               = NULL,
+    movebank_csv_path     = NULL,
+    animals_path,
+    output_dir,
+    movebank_project_name,
+    run_label             = format(Sys.Date(), "%Y-%m-%d"),
+    location_abbr         = NULL,
+    species               = NULL,
+    life_stage            = NULL,
+    animal_id_col         = NULL,
+    clean_lat_range       = NULL,
+    clean_lon_range       = NULL,
+    sampling_config       = NULL,
+    force_tag_model_family = NULL,
+    force_firmware_version = NULL,
+    force_vedba_count      = NULL,
+    correct_drift         = FALSE,
+    programmed_interval   = NULL,
+    drift_temp_col        = NULL,
+    drift_poly_degree     = 2L,
+    drift_max_filter      = 0.10,
+    drift_min_obs         = 5L,
+    drift_diagnostics     = FALSE
+) {
+  suppressPackageStartupMessages({
+    require(dplyr)
+    require(stringr)
+    require(lubridate)
+    require(readr)
+    require(fs)
+  })
+
+  # ---- 1. Download existing Movebank deployment info --------------------------------
+  message("[update] Querying Movebank for existing deployments in study: ", study_id)
+
+  if (!requireNamespace("move2", quietly = TRUE))
+    stop("Package 'move2' is required to query Movebank. ",
+         "Install with: install.packages('move2')")
+
+  existing_deployments <- tryCatch({
+    deps <- move2::movebank_retrieve(
+      entity_type = "deployment",
+      study_id    = as.numeric(study_id)
+    )
+    message(sprintf("[update] Downloaded %d deployment record(s) from Movebank.",
+                    nrow(deps)))
+    deps
+  }, error = function(e) {
+    warning("[update] Could not retrieve Movebank deployments: ", conditionMessage(e),
+            "\nProceeding without Movebank comparison — all tags treated as new.")
+    NULL
+  })
+
+  # Extract existing tag IDs (column name varies by move2 version)
+  existing_tag_ids <- character(0)
+  n_existing_deps  <- 0L
+
+  if (!is.null(existing_deployments) && nrow(existing_deployments) > 0) {
+    n_existing_deps <- nrow(existing_deployments)
+
+    tag_id_col <- intersect(
+      c("tag_local_identifier", "tag.local.identifier", "tagLocalIdentifier",
+        "tag_id", "tag.id"),
+      names(existing_deployments)
+    )
+
+    if (length(tag_id_col) == 0) {
+      warning("[update] Could not identify tag ID column in Movebank deployment table. ",
+              "Available columns: ", paste(names(existing_deployments), collapse = ", "),
+              "\nAll tags will be treated as new.")
+    } else {
+      existing_tag_ids <- as.character(
+        na.omit(unique(existing_deployments[[tag_id_col[1]]]))
+      )
+      message(sprintf("[update] %d unique tag(s) already deployed in study %s: %s%s",
+                      length(existing_tag_ids), study_id,
+                      paste(head(existing_tag_ids, 5), collapse = ", "),
+                      if (length(existing_tag_ids) > 5) " ..." else ""))
+    }
+
+    # Report date span of existing deployments
+    date_col_mb <- intersect(
+      c("deploy_on_date", "timestamp_start", "deploy.on.date"),
+      names(existing_deployments)
+    )
+    if (length(date_col_mb) > 0) {
+      dep_dates <- suppressWarnings(
+        lubridate::as_datetime(existing_deployments[[date_col_mb[1]]])
+      )
+      valid_dates <- dep_dates[!is.na(dep_dates)]
+      if (length(valid_dates) > 0)
+        message(sprintf("[update] Existing deployments span: %s to %s",
+                        format(min(valid_dates), "%Y-%m-%d"),
+                        format(max(valid_dates), "%Y-%m-%d")))
+    }
+
+  } else {
+    message("[update] No existing deployments found — all tags will be treated as new.")
+  }
+
+  # ---- 2. Run the full processing pipeline ----------------------------------------
+  # wildcloud_to_movebank() reads the WildCloud data, builds all data frames,
+  # and writes data + deployment CSVs to output_dir. We will then fix up the
+  # deployment CSV based on the Movebank assessment.
+  message("[update] Processing new WildCloud data through the standard pipeline ...")
+
+  result <- wildcloud_to_movebank(
+    wc_path               = wc_path,
+    movebank_csv_path     = movebank_csv_path,
+    animals_path          = animals_path,
+    output_dir            = output_dir,
+    movebank_project_name = movebank_project_name,
+    location_abbr         = location_abbr,
+    species               = species,
+    life_stage            = life_stage,
+    animal_id_col         = animal_id_col,
+    clean_lat_range       = clean_lat_range,
+    clean_lon_range       = clean_lon_range,
+    sampling_config       = sampling_config,
+    force_tag_model_family = force_tag_model_family,
+    force_firmware_version = force_firmware_version,
+    force_vedba_count     = force_vedba_count,
+    correct_drift         = correct_drift,
+    programmed_interval   = programmed_interval,
+    drift_temp_col        = drift_temp_col,
+    drift_poly_degree     = drift_poly_degree,
+    drift_max_filter      = drift_max_filter,
+    drift_min_obs         = drift_min_obs,
+    drift_diagnostics     = drift_diagnostics
+  )
+
+  # ---- 2b. Rename data files with run_label suffix --------------------------------
+  # deployment.csv is intentionally excluded — it is managed in step 4.
+  run_label <- gsub("[^A-Za-z0-9_\\-]", "-", trimws(run_label))
+
+  data_files <- c(
+    "data.csv",
+    "dataVeDBA.csv",
+    "dataBar.csv",
+    "dataTemp.csv",
+    "dataMinTempText.csv",
+    "dataMinMaxTemp.csv"
+  )
+
+  for (proj in unique(na.omit(result$deployment_data$Movebank.Project))) {
+    safe_proj      <- stringr::str_replace_all(proj, "[^A-Za-z0-9_\\-]", "_")
+    project_folder <- file.path(output_dir, "Projects", safe_proj)
+    for (f in data_files) {
+      old_path <- file.path(project_folder, f)
+      if (fs::file_exists(old_path)) {
+        base   <- tools::file_path_sans_ext(f)
+        new_f  <- paste0(base, "_", run_label, ".csv")
+        fs::file_move(old_path, file.path(project_folder, new_f))
+      }
+    }
+  }
+  message(sprintf("[update] Data files renamed with suffix '_%s'.", run_label))
+
+  # ---- 3. Identify new vs. existing tags ------------------------------------------
+  # Collect tag IDs from all sensor streams (tags may transmit sensor data
+  # without a fix, so check beyond loc_data alone).
+  loc_tags    <- as.character(na.omit(result$loc_data$`tag ID`))
+  vedba_tags  <- as.character(na.omit(result$vedba_data$`tag ID`))
+  bar_tags    <- as.character(na.omit(result$bar_data$`tag ID`))
+  temp_tags   <- as.character(na.omit(result$temp_data$`tag ID`))
+  all_new_data_tags <- unique(c(loc_tags, vedba_tags, bar_tags, temp_tags))
+
+  tags_already_deployed   <- intersect(all_new_data_tags, existing_tag_ids)
+  tags_needing_deployment <- setdiff(all_new_data_tags,  existing_tag_ids)
+
+  message(sprintf("[update] Tags in new WildCloud export:        %d", length(all_new_data_tags)))
+  message(sprintf("[update] Already deployed in Movebank:        %d (%s)",
+                  length(tags_already_deployed),
+                  if (length(tags_already_deployed) > 0)
+                    paste(head(tags_already_deployed, 5), collapse = ", ")
+                  else "none"))
+  message(sprintf("[update] Need new Movebank deployment entry:  %d (%s)",
+                  length(tags_needing_deployment),
+                  if (length(tags_needing_deployment) > 0)
+                    paste(head(tags_needing_deployment, 5), collapse = ", ")
+                  else "none"))
+
+  # ---- 4. Adjust deployment CSV based on assessment --------------------------------
+  # wildcloud_to_movebank() wrote deployment.csv covering ALL animals in
+  # animals_path. We either:
+  #   a) Remove it (all tags already deployed) and leave a clear note, or
+  #   b) Keep it (covers the whole study, as required when new tags are found)
+  #      and add an instruction note.
+
+  projects <- unique(na.omit(result$deployment_data$Movebank.Project))
+
+  for (proj in projects) {
+    safe_proj      <- stringr::str_replace_all(proj, "[^A-Za-z0-9_\\-]", "_")
+    project_folder <- file.path(output_dir, "Projects", safe_proj)
+    dep_path       <- file.path(project_folder, "deployment.csv")
+
+    if (length(tags_needing_deployment) == 0) {
+      # ---- Case A: no new deployments needed ----
+      # Remove deployment.csv to prevent accidental re-upload, leave a note.
+      if (fs::file_exists(dep_path)) fs::file_delete(dep_path)
+
+      note_path <- file.path(project_folder, "NO_DEPLOYMENT_UPLOAD_NEEDED.txt")
+      writeLines(
+        c(
+          paste0("Study: ", study_id, " — ", proj),
+          paste0("Run label: ", run_label),
+          paste0("Assessed: ", format(Sys.time(), "%Y-%m-%d %H:%M:%S UTC")),
+          "",
+          "All tags in the new WildCloud export already have Movebank deployments.",
+          "Upload data files only — do NOT upload a deployment CSV.",
+          "",
+          paste("Existing Movebank deployments:", n_existing_deps),
+          paste("Tags in new export:", length(all_new_data_tags)),
+          paste("Tags already deployed:", paste(tags_already_deployed, collapse = ", ")),
+          "",
+          "Data files for this run:",
+          paste0("  data_", run_label, ".csv"),
+          paste0("  dataVeDBA_", run_label, ".csv"),
+          paste0("  dataBar_", run_label, ".csv"),
+          paste0("  dataTemp_", run_label, ".csv")
+        ),
+        note_path
+      )
+
+      message("[update] No new deployments needed. Removed deployment.csv.")
+      message("         Upload data CSV files only. See: ", note_path)
+
+    } else {
+      # ---- Case B: new tags present — upload full study deployment ----
+      # deployment.csv (already written) covers ALL animals in animals_path,
+      # which is the correct whole-study upload when adding new deployments.
+      note_path <- file.path(project_folder, "DEPLOYMENT_UPLOAD_REQUIRED.txt")
+      writeLines(
+        c(
+          paste0("Study: ", study_id, " — ", proj),
+          paste0("Run label: ", run_label),
+          paste0("Assessed: ", format(Sys.time(), "%Y-%m-%d %H:%M:%S UTC")),
+          "",
+          sprintf("%d new tag(s) require Movebank deployment entries:",
+                  length(tags_needing_deployment)),
+          paste(" ", tags_needing_deployment, collapse = "\n"),
+          "",
+          "Upload order:",
+          "  1. deployment.csv  — covers ALL animals in the study (whole-study upload)",
+          paste0("  2. data_", run_label, ".csv, dataVeDBA_", run_label,
+                 ".csv, dataBar_", run_label, ".csv, dataTemp_", run_label, ".csv, ..."),
+          "",
+          paste("Tags already deployed (data files only for these):",
+                paste(tags_already_deployed, collapse = ", "))
+        ),
+        note_path
+      )
+
+      message(sprintf("[update] %d new tag(s) need Movebank deployment entries.",
+                      length(tags_needing_deployment)))
+      message("         Upload deployment.csv (whole study) + all data files.")
+      message("         See: ", note_path)
+    }
+  }
+
+  # ---- 5. Return result with update assessment attached ---------------------------
+  result$update_assessment <- list(
+    study_id                = study_id,
+    n_existing_deployments  = n_existing_deps,
+    existing_tag_ids        = existing_tag_ids,
+    all_new_data_tags       = all_new_data_tags,
+    tags_already_deployed   = tags_already_deployed,
+    tags_needing_deployment = tags_needing_deployment,
+    deployment_needed       = length(tags_needing_deployment) > 0,
+    existing_deployments    = existing_deployments
+  )
 
   invisible(result)
 }
