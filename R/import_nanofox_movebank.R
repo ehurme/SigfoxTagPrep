@@ -1586,6 +1586,156 @@ import_nanofox_movebank <- function(
     b_loc
   }
 
+  # ---------------------------------------------------------------------------
+  # .detect_tag_fell_off_loc()
+  # Per-deployment tag-fell-off detection on the location-only object.
+  # Routes to detect_tag_fell_off() with method- and column-appropriate
+  # arguments depending on the tag_type of each deployment track.
+  #
+  # NanoFox: vedba_sum > 0 (or vedba_threshold) → active
+  # TinyFox: vedba_sum > tinyfox_vedba_threshold OR activity_percent > 0 → active
+  # uWasp:   distance > dist_threshold → active (noisy; marked as best-effort)
+  #
+  # The first post-active location row is kept as tag_fell_off = FALSE because
+  # the tag physically moved to that coordinate before detaching.
+  # ---------------------------------------------------------------------------
+  .detect_tag_fell_off_loc <- function(
+      b_loc,
+      nanofox_vedba_threshold  = 0,
+      tinyfox_vedba_threshold  = 280800 * 3.9 / 1000 / (60 * 24),
+      tinyfox_activity_threshold = 0,
+      uwasp_dist_threshold     = 0.5,   # km — above Sigfox jitter radius
+      min_inactive_run         = 3L
+  ) {
+    if (!"tag_type" %in% names(b_loc)) return(b_loc)
+
+    track_col <- move2::mt_track_id_column(b_loc)
+    b_loc$tag_fell_off <- FALSE
+
+    tracks <- unique(as.character(b_loc[[track_col]]))
+
+    for (trk in tracks) {
+      idx <- which(as.character(b_loc[[track_col]]) == trk)
+      if (length(idx) <= 1L) next
+
+      tt <- tolower(as.character(
+        na.omit(b_loc$tag_type[idx])[1]
+      ))
+      if (length(tt) == 0L || is.na(tt)) next
+
+      sub <- b_loc[idx, , drop = FALSE]
+
+      if (tt == "nanofox") {
+        if (!"vedba_sum" %in% names(sub)) next
+        sub <- detect_tag_fell_off(
+          sub,
+          method           = "nanofox",
+          tag_col          = track_col,
+          vedba_col        = "vedba_sum",
+          vedba_threshold  = nanofox_vedba_threshold,
+          min_inactive_run = min_inactive_run
+        )
+
+      } else if (tt == "tinyfox") {
+        sub <- detect_tag_fell_off(
+          sub,
+          method             = "tinyfox",
+          tag_col            = track_col,
+          vedba_col          = "vedba_sum",
+          activity_col       = "tinyfox_activity_percent_last_24h",
+          vedba_threshold    = tinyfox_vedba_threshold,
+          activity_threshold = tinyfox_activity_threshold,
+          min_inactive_run   = min_inactive_run
+        )
+
+      } else if (tt == "uwasp") {
+        if (!"distance" %in% names(sub)) next
+        sub <- detect_tag_fell_off(
+          sub,
+          method           = "uwasp",
+          tag_col          = track_col,
+          dist_col         = "distance",
+          dist_threshold   = uwasp_dist_threshold,
+          min_inactive_run = min_inactive_run
+        )
+
+      } else {
+        next
+      }
+
+      b_loc$tag_fell_off[idx] <- sub$tag_fell_off
+    }
+
+    n_fell <- sum(b_loc$tag_fell_off, na.rm = TRUE)
+    if (n_fell > 0) {
+      .msg("  tag_fell_off: ", n_fell, " / ", nrow(b_loc), " location rows flagged.")
+    }
+    b_loc
+  }
+
+  # ---------------------------------------------------------------------------
+  # .propagate_fell_off()
+  # Propagate tag_fell_off flags from b_loc onto b (full) and b_daily2.
+  #
+  # b_loc drives the detection because it has vedba_sum from sensor rows joined
+  # onto location rows.  Once we know the per-deployment cutoff timestamp
+  # (earliest row where tag_fell_off == TRUE in b_loc), we stamp all rows in
+  # the target object that occur at or after that cutoff as tag_fell_off = TRUE.
+  #
+  # This timestamp-cutoff approach works correctly for all row types in b:
+  #   - NanoFox sensor rows share the location row timestamp → always matched
+  #   - TinyFox hourly VeDBA bins have offset timestamps (T - N h) and are
+  #     flagged when their timestamp >= cutoff, i.e. they are from a post-
+  #     detachment transmission window
+  # ---------------------------------------------------------------------------
+  .propagate_fell_off <- function(b_loc, target) {
+    if (is.null(target) || nrow(target) == 0L) return(target)
+    target$tag_fell_off <- FALSE
+    if (!"tag_fell_off" %in% names(b_loc)) return(target)
+    if (!any(b_loc$tag_fell_off, na.rm = TRUE)) return(target)
+
+    loc_tc <- move2::mt_track_id_column(b_loc)
+    tgt_tc <- move2::mt_track_id_column(target)
+
+    # Pick the best common join column: prefer deployment_id, else track id
+    join_col <- if (
+      "deployment_id" %in% names(b_loc) && "deployment_id" %in% names(target)
+    ) {
+      "deployment_id"
+    } else if (loc_tc %in% names(target)) {
+      loc_tc
+    } else if (tgt_tc %in% names(b_loc)) {
+      tgt_tc
+    } else {
+      return(target)
+    }
+
+    # Earliest fell-off timestamp per deployment
+    cutoffs <- sf::st_drop_geometry(b_loc) %>%
+      tibble::as_tibble() %>%
+      dplyr::filter(isTRUE(.data$tag_fell_off) | .data$tag_fell_off == TRUE) %>%
+      dplyr::group_by(dplyr::across(dplyr::all_of(join_col))) %>%
+      dplyr::summarise(cutoff_ts = min(.data$timestamp, na.rm = TRUE), .groups = "drop")
+
+    if (nrow(cutoffs) == 0L) return(target)
+
+    df_t <- sf::st_drop_geometry(target) %>%
+      tibble::as_tibble() %>%
+      dplyr::select(dplyr::all_of(c(join_col, "timestamp"))) %>%
+      dplyr::mutate(.row_id = dplyr::row_number()) %>%
+      dplyr::left_join(cutoffs, by = join_col)
+
+    flag_rows <- which(!is.na(df_t$cutoff_ts) & df_t$timestamp >= df_t$cutoff_ts)
+    if (length(flag_rows) > 0L) target$tag_fell_off[flag_rows] <- TRUE
+
+    n_fell  <- sum(target$tag_fell_off, na.rm = TRUE)
+    n_total <- nrow(target)
+    if (n_fell > 0L) {
+      .msg("  tag_fell_off propagated: ", n_fell, " / ", n_total, " rows flagged.")
+    }
+    target
+  }
+
   # Produce a daily (solar-noon) location dataset + bat-night sensor summaries.
   .source_local(script_daily)
   .source_local(script_pressure_to_altitude)
@@ -2265,6 +2415,21 @@ import_nanofox_movebank <- function(
       "add_location_sensor_metrics"
     ) %||% b_loc
 
+    # Flag likely tag-fell-off rows per deployment and tag type.
+    # tag_type is still present here (dropped later in the cleanup loop).
+    b_loc <- .safe_try(
+      .detect_tag_fell_off_loc(b_loc),
+      "detect_tag_fell_off_loc"
+    ) %||% b_loc
+
+    # Propagate tag_fell_off from b_loc to the full multi-sensor object.
+    # All sensor rows (VeDBA, temp, pressure) at or after the cutoff timestamp
+    # per deployment are also flagged.
+    b <- .safe_try(
+      .propagate_fell_off(b_loc, b),
+      "propagate_fell_off_full"
+    ) %||% b
+
     # Daily subset: same metrics pipeline (speed km/h, delta_altitude_m)
     .source_local(script_daily)
     b_daily <- .make_daily(b)
@@ -2278,6 +2443,10 @@ import_nanofox_movebank <- function(
     } else {
       b_daily2 <- .make_location_metrics(b_daily)
       b_daily2 <- add_prev_latlon(b_daily2)
+      b_daily2 <- .safe_try(
+        .propagate_fell_off(b_loc, b_daily2),
+        "propagate_fell_off_daily"
+      ) %||% b_daily2
     }
 
     # Temporal covariates + final cleanup on all three objects

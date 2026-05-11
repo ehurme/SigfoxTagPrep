@@ -132,27 +132,30 @@ animate_tracks <- function(
   # ── Basemap ───────────────────────────────────────────────────────────────
   world <- rnaturalearth::ne_countries(scale = country_scale, returnclass = "sf")
 
-  basemap_layers <- if (basemap == "dark") {
-    list(
-      geom_sf(data = world, fill = "black", col = "white", linewidth = 0.3),
-      theme(
-        panel.background = element_rect(fill = "black", color = "black"),
-        plot.background  = element_rect(fill = "black", color = "black"),
-        panel.grid       = element_line(color = "gray25"),
-        text             = element_text(color = "white"),
-        axis.text        = element_text(color = "white"),
-        axis.title       = element_text(color = "white"),
-        plot.title       = element_text(color = "white", face = "bold")
-      )
+  # Keep geom layers and theme separate — mixing theme() inside a list causes
+  # gganimate to see p$labels as a plain list instead of <ggplot2::labels>,
+  # which produces "Failed to plot frame" warnings on every frame.
+  if (basemap == "dark") {
+    basemap_geoms <- list(
+      geom_sf(data = world, fill = "black", col = "white", linewidth = 0.3)
+    )
+    basemap_theme <- theme(
+      panel.background = element_rect(fill = "black", color = "black"),
+      plot.background  = element_rect(fill = "black", color = "black"),
+      panel.grid       = element_line(color = "gray25"),
+      text             = element_text(color = "white"),
+      axis.text        = element_text(color = "white"),
+      axis.title       = element_text(color = "white"),
+      plot.title       = element_text(color = "white", face = "bold")
     )
   } else if (basemap == "light") {
-    list(
-      geom_sf(data = world, fill = "lightgrey", col = "white", linewidth = 0.3),
-      theme(
-        panel.background = element_rect(fill = "aliceblue", color = NA),
-        plot.background  = element_rect(fill = "white", color = NA),
-        plot.title       = element_text(face = "bold")
-      )
+    basemap_geoms <- list(
+      geom_sf(data = world, fill = "lightgrey", col = "white", linewidth = 0.3)
+    )
+    basemap_theme <- theme(
+      panel.background = element_rect(fill = "aliceblue", color = NA),
+      plot.background  = element_rect(fill = "white", color = NA),
+      plot.title       = element_text(face = "bold")
     )
   } else if (basemap == "elevation") {
     if (!requireNamespace("elevatr",   quietly = TRUE)) stop("Package 'elevatr' required for basemap='elevation'")
@@ -162,16 +165,16 @@ animate_tracks <- function(
     m_sf   <- if (inherits(m, "sf")) m else sf::st_as_sf(m)
     e_rast <- terra::rast(elevatr::get_elev_raster(m_sf, z = elev_z, expand = 1))
     terra::values(e_rast)[terra::values(e_rast) < 0] <- 0
-    list(
+    basemap_geoms <- list(
       tidyterra::geom_spatraster(data = e_rast),
       tidyterra::scale_fill_hypso_c(name = "Elevation (m)", palette = "arctic_bathy",
                                     limits = c(0, 4000)),
-      geom_sf(data = world, fill = NA, col = "white", linewidth = 0.3),
-      theme(
-        panel.background = element_rect(fill = "white", color = NA),
-        plot.background  = element_rect(fill = "white", color = NA),
-        plot.title       = element_text(face = "bold")
-      )
+      geom_sf(data = world, fill = NA, col = "white", linewidth = 0.3)
+    )
+    basemap_theme <- theme(
+      panel.background = element_rect(fill = "white", color = NA),
+      plot.background  = element_rect(fill = "white", color = NA),
+      plot.title       = element_text(face = "bold")
     )
   } else {
     stop("basemap must be one of 'dark', 'light', or 'elevation'")
@@ -179,7 +182,7 @@ animate_tracks <- function(
 
   # ── Build base ggplot ─────────────────────────────────────────────────────
   p <- ggplot() +
-    basemap_layers +
+    basemap_geoms +
     geom_path(
       data = df,
       aes(.lon, .lat,
@@ -198,7 +201,15 @@ animate_tracks <- function(
     coord_sf(xlim = xlim, ylim = ylim, expand = FALSE) +
     labs(title = title, x = "Longitude", y = "Latitude") +
     theme_linedraw() +
+    basemap_theme +
     theme(legend.position = if (legend) "right" else "none")
+
+  # ── ggplot2 4.x / gganimate compatibility ────────────────────────────────
+  # ggplot2 4.0+ requires p$labels to have class "ggplot2::labels", but the
+  # +.gg pipeline can strip it back to a plain list.  Restore before handing
+  # off to gganimate, which validates the class on every frame.
+  if (!inherits(p$labels, "ggplot2::labels"))
+    class(p$labels) <- c("ggplot2::labels", class(p$labels))
 
   # ── Animation transition ──────────────────────────────────────────────────
   if (transition == "reveal") {

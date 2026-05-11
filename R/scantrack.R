@@ -233,27 +233,37 @@ scan_tracks <- function(
       if (is_tinyfox) {
         if (.has_data(b_full_df, "tinyfox_temperature_min_last_24h"))
           p_temperature <- p_temperature +
-            geom_path(data = b_full_df,
-                      aes(timestamp, tinyfox_temperature_min_last_24h), col = "darkblue")
+            geom_path(data  = b_full_df,
+                      aes(timestamp, tinyfox_temperature_min_last_24h), col = "darkblue") +
+            geom_point(data = b_full_df,
+                       aes(timestamp, tinyfox_temperature_min_last_24h), col = "darkblue", size = 1.5)
         if (.has_data(b_full_df, "tinyfox_temperature_max_last_24h"))
           p_temperature <- p_temperature +
-            geom_path(data = b_full_df,
-                      aes(timestamp, tinyfox_temperature_max_last_24h), col = "tomato")
+            geom_path(data  = b_full_df,
+                      aes(timestamp, tinyfox_temperature_max_last_24h), col = "tomato") +
+            geom_point(data = b_full_df,
+                       aes(timestamp, tinyfox_temperature_max_last_24h), col = "tomato", size = 1.5)
       } else {
         # 30Days / 30DaysFineScalePressure min + max
         if (.has_data(b_full_df, "temperature_min"))
           p_temperature <- p_temperature +
-            geom_path(data = b_full_df,
-                      aes(timestamp, temperature_min), col = "steelblue")
+            geom_path(data  = b_full_df,
+                      aes(timestamp, temperature_min), col = "steelblue") +
+            geom_point(data = b_full_df,
+                       aes(timestamp, temperature_min), col = "steelblue", size = 1.5)
         if (.has_data(b_full_df, "temperature_max"))
           p_temperature <- p_temperature +
-            geom_path(data = b_full_df,
-                      aes(timestamp, temperature_max), col = "tomato")
+            geom_path(data  = b_full_df,
+                      aes(timestamp, temperature_max), col = "tomato") +
+            geom_point(data = b_full_df,
+                       aes(timestamp, temperature_max), col = "tomato", size = 1.5)
         # NanoFox average temperature
         if (.has_data(b_full_df, "external_temperature"))
           p_temperature <- p_temperature +
-            geom_path(data = b_full_df,
-                      aes(timestamp, external_temperature), col = "darkred")
+            geom_path(data  = b_full_df,
+                      aes(timestamp, external_temperature), col = "darkred") +
+            geom_point(data = b_full_df,
+                       aes(timestamp, external_temperature), col = "darkred", size = 1.5)
       }
       sensor_panels[["temperature"]] <- p_temperature
 
@@ -262,13 +272,17 @@ scan_tracks <- function(
 
       if (.has_data(b_full_df, "barometric_pressure"))
         p_pressure <- p_pressure +
-          geom_path(data = b_full_df,
-                    aes(timestamp, barometric_pressure / 100), col = "purple")
+          geom_path(data  = b_full_df,
+                    aes(timestamp, barometric_pressure / 100), col = "purple") +
+          geom_point(data = b_full_df,
+                     aes(timestamp, barometric_pressure / 100), col = "purple", size = 1.5)
 
       if (.has_data(b_full_df, "tinyfox_pressure_min_last_24h"))
         p_pressure <- p_pressure +
-          geom_path(data = b_full_df,
-                    aes(timestamp, tinyfox_pressure_min_last_24h), col = "darkorchid")
+          geom_path(data  = b_full_df,
+                    aes(timestamp, tinyfox_pressure_min_last_24h), col = "darkorchid") +
+          geom_point(data = b_full_df,
+                     aes(timestamp, tinyfox_pressure_min_last_24h), col = "darkorchid", size = 1.5)
 
       sensor_panels[["pressure"]] <- p_pressure
 
@@ -281,6 +295,15 @@ scan_tracks <- function(
       # Pressure-derived altitude uses location-row pressure columns (b_df).
       # tinyfox_pressure_min_last_24h is already in mbar.
       # barometric_pressure (NanoFox) is in Pa → divide by 100.
+      # Compute pressure-derived altitude for ALL sensor rows (b_full_df)
+      b_full_df$alt_pressure_m <- NA_real_
+      if (.has_data(b_full_df, "tinyfox_pressure_min_last_24h")) {
+        b_full_df$alt_pressure_m <- .pressure_to_alt_m(b_full_df$tinyfox_pressure_min_last_24h)
+      } else if (.has_data(b_full_df, "barometric_pressure")) {
+        b_full_df$alt_pressure_m <- .pressure_to_alt_m(b_full_df$barometric_pressure / 100)
+      }
+
+      # Also compute for location rows (used for the path)
       b_df$alt_pressure_m <- NA_real_
       if (.has_data(b_df, "tinyfox_pressure_min_last_24h")) {
         b_df$alt_pressure_m <- .pressure_to_alt_m(b_df$tinyfox_pressure_min_last_24h)
@@ -288,15 +311,36 @@ scan_tracks <- function(
         b_df$alt_pressure_m <- .pressure_to_alt_m(b_df$barometric_pressure / 100)
       }
 
+      # Assign cum_dist_km to all b_full_df rows via nearest location timestamp
+      {
+        t_full <- as.numeric(b_full_df$timestamp)
+        t_loc  <- as.numeric(b_df$timestamp)
+        idx_l  <- findInterval(t_full, t_loc, all.inside = TRUE)
+        idx_r  <- pmin(idx_l + 1L, nrow(b_df))
+        use_r  <- abs(t_full - t_loc[idx_r]) < abs(t_full - t_loc[idx_l])
+        nn     <- ifelse(use_r, idx_r, idx_l)
+        b_full_df$cum_dist_km <- b_df$cum_dist_km[nn]
+      }
+
       p_altitude <- ggplot() +
-        geom_path(data = elev, aes(distance_from_origin, elevation), col = "gray20") +
-        geom_path(data = b_df,  aes(cum_dist_km, altitude_m),        col = "orange") +
-        { if (any(!is.na(b_df$alt_pressure_m)))
-            geom_path(data = b_df, aes(cum_dist_km, alt_pressure_m),
-                      col = "purple", linetype = "dashed")
+        geom_path(data  = elev, aes(distance_from_origin, elevation), col = "gray20") +
+        geom_path(data  = b_df, aes(cum_dist_km, altitude_m), col = "orange") +
+        { if (.has_data(b_full_df, "altitude_m"))
+            geom_point(data = b_full_df[!is.na(b_full_df$altitude_m), ],
+                       aes(cum_dist_km, altitude_m), col = "orange", size = 1.5)
         } +
         .pt() +
         ylab("Elevation / Altitude (m)") + xlab("Cumulative distance (km)")
+
+      if (any(!is.na(b_df$alt_pressure_m)))
+        p_altitude <- p_altitude +
+          geom_path(data = b_df, aes(cum_dist_km, alt_pressure_m),
+                    col = "purple", linetype = "dashed")
+
+      if (any(!is.na(b_full_df$alt_pressure_m)))
+        p_altitude <- p_altitude +
+          geom_point(data = b_full_df[!is.na(b_full_df$alt_pressure_m), ],
+                     aes(cum_dist_km, alt_pressure_m), col = "purple", size = 1.5)
 
       # ── Assemble & save ────────────────────────────────────────────────────
       n_panels  <- length(sensor_panels)
