@@ -273,9 +273,9 @@ scan_tracks <- function(
       if (.has_data(b_full_df, "barometric_pressure"))
         p_pressure <- p_pressure +
           geom_path(data  = b_full_df,
-                    aes(timestamp, barometric_pressure / 100), col = "purple") +
+                    aes(timestamp, barometric_pressure), col = "purple") +
           geom_point(data = b_full_df,
-                     aes(timestamp, barometric_pressure / 100), col = "purple", size = 1.5)
+                     aes(timestamp, barometric_pressure), col = "purple", size = 1.5)
 
       if (.has_data(b_full_df, "tinyfox_pressure_min_last_24h"))
         p_pressure <- p_pressure +
@@ -293,14 +293,13 @@ scan_tracks <- function(
       #   purple dashed — pressure-derived altitude (where pressure available)
       #
       # Pressure-derived altitude uses location-row pressure columns (b_df).
-      # tinyfox_pressure_min_last_24h is already in mbar.
-      # barometric_pressure (NanoFox) is in Pa → divide by 100.
+      # Both tinyfox_pressure_min_last_24h and barometric_pressure are in mbar.
       # Compute pressure-derived altitude for ALL sensor rows (b_full_df)
       b_full_df$alt_pressure_m <- NA_real_
       if (.has_data(b_full_df, "tinyfox_pressure_min_last_24h")) {
         b_full_df$alt_pressure_m <- .pressure_to_alt_m(b_full_df$tinyfox_pressure_min_last_24h)
       } else if (.has_data(b_full_df, "barometric_pressure")) {
-        b_full_df$alt_pressure_m <- .pressure_to_alt_m(b_full_df$barometric_pressure / 100)
+        b_full_df$alt_pressure_m <- .pressure_to_alt_m(b_full_df$barometric_pressure)
       }
 
       # Also compute for location rows (used for the path)
@@ -308,7 +307,7 @@ scan_tracks <- function(
       if (.has_data(b_df, "tinyfox_pressure_min_last_24h")) {
         b_df$alt_pressure_m <- .pressure_to_alt_m(b_df$tinyfox_pressure_min_last_24h)
       } else if (.has_data(b_df, "barometric_pressure")) {
-        b_df$alt_pressure_m <- .pressure_to_alt_m(b_df$barometric_pressure / 100)
+        b_df$alt_pressure_m <- .pressure_to_alt_m(b_df$barometric_pressure)
       }
 
       # Assign cum_dist_km to all b_full_df rows via nearest location timestamp
