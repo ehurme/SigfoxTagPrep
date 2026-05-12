@@ -2453,6 +2453,10 @@ import_nanofox_movebank <- function(
     for (obj_name in c("b", "b_loc", "b_daily2")) {
       obj <- get(obj_name)
       if (!is.null(obj) && nrow(obj) > 0) {
+        # Guarantee tag_fell_off exists on every output (FALSE if not computed)
+        if (!"tag_fell_off" %in% names(obj)) obj$tag_fell_off <- FALSE
+        obj$tag_fell_off <- as.logical(obj$tag_fell_off)
+
         obj$year <- as.character(lubridate::year(obj$timestamp))
         obj$yday <- as.character(lubridate::yday(obj$timestamp))
         obj$season <- ifelse(

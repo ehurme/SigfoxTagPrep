@@ -118,6 +118,8 @@ scan_tracks <- function(
           lon         = lon_lat[, "X"],
           lat         = lon_lat[, "Y"],
           step_m      = step_m,
+          dt_h        = c(NA_real_, as.numeric(diff(timestamp), units = "hours")),
+          speed_kmh   = step_m / 1000 / dt_h,
           cum_dist_km = cumsum(replace(step_m, is.na(step_m), 0)) / 1000,
           seq_plot    = if ("sequence_number" %in% names(.)) sequence_number else row_number()
         )
@@ -189,24 +191,40 @@ scan_tracks <- function(
       # ── Sensor panels (built dynamically) ──────────────────────────────────
       sensor_panels <- list()
 
-      # Panel: Step distance
-      sensor_panels[["distance"]] <- ggplot(b_df, aes(timestamp, step_m / 1000)) +
+      # Panel: Speed
+      sensor_panels[["distance"]] <- ggplot(b_df, aes(timestamp, speed_kmh)) +
         geom_point(aes(size = sigfox_computed_location_radius, col = seq_plot)) +
         geom_path(aes(col = seq_plot)) +
         scale_color_viridis_c(option = "A") +
-        .pt() + ylab("Step distance (km)") + xlab("Date")
+        .pt() + ylab("Speed (km/h)") + xlab("Date")
 
-      # Panel: VeDBA
+      # Panel: VeDBA — points coloured by tag_fell_off (TRUE = red, FALSE/NA = blue)
       # TinyFox: tinyfox_total_vedba (cumulative sum stored on tag) vs time
       # Others:  tinyfox_vedba_burst_sum or vedba
-      p_vedba <- ggplot() + .pt() + ylab("VeDBA") + xlab("Date")
+      if ("tag_fell_off" %in% names(b_full_df)) {
+        b_full_df$tag_fell_off <- as.logical(b_full_df$tag_fell_off)
+      } else {
+        b_full_df$tag_fell_off <- FALSE
+      }
+      b_full_df$tag_fell_off[is.na(b_full_df$tag_fell_off)] <- FALSE
+
+      .vedba_fell_scale <- scale_color_manual(
+        values = c("FALSE" = "blue", "TRUE" = "red"),
+        labels = c("FALSE" = "On bat", "TRUE" = "Fell off"),
+        name   = NULL
+      )
+
+      p_vedba <- ggplot() + .pt() + ylab("VeDBA") + xlab("Date") +
+        theme(legend.position = "right")
 
       if (is_tinyfox && .has_data(b_full_df, "tinyfox_total_vedba")) {
         p_vedba <- p_vedba +
           geom_path(data = b_full_df,
                     aes(timestamp, tinyfox_total_vedba), col = "blue") +
           geom_point(data = b_full_df,
-                     aes(timestamp, tinyfox_total_vedba), col = "blue", size = 1.5) +
+                     aes(timestamp, tinyfox_total_vedba,
+                         col = as.character(tag_fell_off)), size = 1.5) +
+          .vedba_fell_scale +
           ylab("Total VeDBA\n(cumulative)")
       } else {
         vedba_col <- dplyr::case_when(
@@ -217,8 +235,10 @@ scan_tracks <- function(
         if (!is.na(vedba_col))
           p_vedba <- p_vedba +
             geom_path(data  = b_full_df, aes(timestamp, .data[[vedba_col]]), col = "blue") +
-            geom_point(data = b_full_df, aes(timestamp, .data[[vedba_col]]),
-                       col = "blue", size = 1.5)
+            geom_point(data = b_full_df,
+                       aes(timestamp, .data[[vedba_col]],
+                           col = as.character(tag_fell_off)), size = 1.5) +
+            .vedba_fell_scale
       }
       sensor_panels[["vedba"]] <- p_vedba
 
@@ -369,7 +389,8 @@ scan_tracks <- function(
       )
 
       fig_height <- 3.5 + nrow_grid * 2.2
-      ggsave(p, filename = out_file, width = 9, height = fig_height)
+      ggsave(p, filename = out_file, width = 9, height = fig_height,
+             bg = "white")
       message("Saved: ", basename(out_file))
     })
   }
