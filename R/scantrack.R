@@ -35,7 +35,7 @@ if (!exists("extract_elevation_segments", mode = "function")) {
 #   bats_full  move2 object with all sensor rows
 #   bats_loc   move2 object with location rows only
 #   out_dir    directory to write PNG files
-#   tags       character vector of individual_local_identifier; NULL = all
+#   tags       character vector of deployment_id; NULL = all
 #   overwrite  FALSE (default) skips existing files; TRUE regenerates
 #   elev_z     zoom level for elevatr::get_elev_raster (default 5)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -51,7 +51,7 @@ scan_tracks <- function(
   if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
 
   if (is.null(tags))
-    tags <- unique(bats_full$individual_local_identifier)
+    tags <- unique(bats_full$deployment_id)
 
   # Shared minimal panel theme
   .pt <- function() {
@@ -68,8 +68,8 @@ scan_tracks <- function(
 
   for (tag in tags) {
 
-    b_full <- bats_full %>% filter(individual_local_identifier == tag)
-    b_loc  <- bats_loc  %>% filter(individual_local_identifier == tag)
+    b_full <- bats_full %>% filter(deployment_id == tag)
+    b_loc  <- bats_loc  %>% filter(deployment_id == tag)
 
     if (nrow(b_loc) < 2) {
       message("Skipping ", tag, ": fewer than 2 locations")
@@ -126,6 +126,13 @@ scan_tracks <- function(
       mdl      <- if (!is.na(b_full_df$model[1]))        b_full_df$model[1]        else "unknown"
       firmware <- if (!is.na(b_full_df$tag_firmware[1])) b_full_df$tag_firmware[1] else "unknown"
 
+      indiv_id <- if ("individual_local_identifier" %in% names(b_full_df) &&
+                      !is.na(b_full_df$individual_local_identifier[1]))
+                    b_full_df$individual_local_identifier[1] else NA_character_
+      tag_id   <- if ("tag_local_identifier" %in% names(b_full_df) &&
+                      !is.na(b_full_df$tag_local_identifier[1]))
+                    b_full_df$tag_local_identifier[1] else NA_character_
+
       n_fixes    <- nrow(b_df)
       date_start <- format(min(b_df$timestamp, na.rm = TRUE), "%Y-%m-%d")
       date_end   <- format(max(b_df$timestamp, na.rm = TRUE), "%Y-%m-%d")
@@ -166,7 +173,11 @@ scan_tracks <- function(
         geom_point(data = b_df, aes(lon, lat, col = seq_plot)) +
         scale_color_viridis_c(name = "Sequence", option = "A") +
         coord_sf(xlim = xlims, ylim = ylims, expand = FALSE) +
-        labs(title    = paste("ID:", tag, "| Species:", sp, "| Sex:", sex, "| Year:", yr),
+        labs(title    = paste0(
+               if (!is.na(indiv_id)) paste("Individual:", indiv_id) else "",
+               if (!is.na(tag_id))   paste0("  |  Tag: ", tag_id)  else "",
+               "  |  Species: ", sp, "  |  Sex: ", sex, "  |  Year: ", yr
+             ),
              subtitle = stats_sub,
              x = "Longitude", y = "Latitude") +
         theme(legend.position  = "none",
@@ -196,7 +207,7 @@ scan_tracks <- function(
                     aes(timestamp, tinyfox_total_vedba), col = "blue") +
           geom_point(data = b_full_df,
                      aes(timestamp, tinyfox_total_vedba), col = "blue", size = 1.5) +
-          ylab("Total VeDBA (cumulative)")
+          ylab("Total VeDBA\n(cumulative)")
       } else {
         vedba_col <- dplyr::case_when(
           .has_data(b_full_df, "tinyfox_vedba_burst_sum") ~ "tinyfox_vedba_burst_sum",
@@ -218,7 +229,7 @@ scan_tracks <- function(
           geom_point(aes(timestamp, tinyfox_activity_percent_last_24),
                      col = "forestgreen", size = 1.5) +
           ylim(c(0, 100)) +
-          .pt() + ylab("Activity (% above threshold)") + xlab("Date")
+          .pt() + ylab("Activity\n(% above threshold)") + xlab("Date")
       }
 
       # Panel: Temperature
@@ -329,7 +340,7 @@ scan_tracks <- function(
                        aes(cum_dist_km, altitude_m), col = "orange", size = 1.5)
         } +
         .pt() +
-        ylab("Elevation / Altitude (m)") + xlab("Cumulative distance (km)")
+        ylab("Elevation /\nAltitude (m)") + xlab("Cumulative\ndistance (km)")
 
       if (any(!is.na(b_df$alt_pressure_m)))
         p_altitude <- p_altitude +
@@ -358,8 +369,7 @@ scan_tracks <- function(
       )
 
       fig_height <- 3.5 + nrow_grid * 2.2
-      ggsave(p, filename = out_file, width = if (ncol_grid == 3) 9 else 6,
-             height = fig_height)
+      ggsave(p, filename = out_file, width = 9, height = fig_height)
       message("Saved: ", basename(out_file))
     })
   }
