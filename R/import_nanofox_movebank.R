@@ -1736,6 +1736,83 @@ import_nanofox_movebank <- function(
     target
   }
 
+  # ---------------------------------------------------------------------------
+  # .add_n_base_stations()
+  # Parse n_base_stations (number of unique Sigfox base stations that heard the
+  # transmission) from whichever raw field is present:
+  #
+  #   base_stations_id_rssi_reps — pipe-separated stations:
+  #     "148A3, -127, 1 | 099F, -132, 1"  → count(|) + 1
+  #
+  #   antennas — JSON array of station objects:
+  #     [{ID:..., RSSI:..., N:...}, ...]   → count({)
+  #
+  # NA is returned for rows where both fields are missing or empty.
+  # Only location rows are expected to have these fields; all other rows get NA.
+  # ---------------------------------------------------------------------------
+  .add_n_base_stations <- function(x) {
+    df <- sf::st_drop_geometry(x)
+
+    n <- rep(NA_integer_, nrow(df))
+
+    if ("base_stations_id_rssi_reps" %in% names(df)) {
+      bs <- as.character(df$base_stations_id_rssi_reps)
+      has <- !is.na(bs) & nzchar(trimws(bs))
+      if (any(has)) {
+        pipe_count <- nchar(bs[has]) - nchar(gsub("|", "", bs[has], fixed = TRUE))
+        n[has] <- as.integer(pipe_count + 1L)
+      }
+    }
+
+    if ("antennas" %in% names(df)) {
+      ant <- as.character(df$antennas)
+      has <- !is.na(ant) & nzchar(trimws(ant)) & ant != "[]" & is.na(n)
+      if (any(has)) {
+        brace_count <- nchar(ant[has]) - nchar(gsub("{", "", ant[has], fixed = TRUE))
+        n[has] <- as.integer(brace_count)
+      }
+    }
+
+    x$n_base_stations <- n
+    .msg("  n_base_stations: ", sum(!is.na(n)), " / ", nrow(x), " rows parsed.")
+    x
+  }
+
+  # ---------------------------------------------------------------------------
+  # .propagate_n_base_stations()
+  # Join n_base_stations from b_loc onto a target object (b_full or b_daily2)
+  # by deployment + timestamp. Only location rows get a non-NA value; all other
+  # rows receive NA.
+  # ---------------------------------------------------------------------------
+  .propagate_n_base_stations <- function(b_loc, target) {
+    if (is.null(target) || nrow(target) == 0L) return(target)
+    if (!"n_base_stations" %in% names(b_loc))   return(target)
+
+    join_col <- if ("deployment_id" %in% names(b_loc) && "deployment_id" %in% names(target)) {
+      "deployment_id"
+    } else {
+      loc_tc <- move2::mt_track_id_column(b_loc)
+      if (loc_tc %in% names(target)) loc_tc else return(target)
+    }
+
+    lookup <- sf::st_drop_geometry(b_loc) %>%
+      tibble::as_tibble() %>%
+      dplyr::select(dplyr::all_of(c(join_col, "timestamp", "n_base_stations"))) %>%
+      dplyr::filter(!is.na(.data$n_base_stations))
+
+    if (nrow(lookup) == 0L) return(target)
+
+    df_t <- sf::st_drop_geometry(target) %>%
+      tibble::as_tibble() %>%
+      dplyr::select(dplyr::all_of(c(join_col, "timestamp"))) %>%
+      dplyr::mutate(.row_id = dplyr::row_number()) %>%
+      dplyr::left_join(lookup, by = c(join_col, "timestamp"))
+
+    target$n_base_stations <- NA_integer_
+    target$n_base_stations[df_t$.row_id] <- as.integer(df_t$n_base_stations)
+    target
+  }
+
   # Produce a daily (solar-noon) location dataset + bat-night sensor summaries.
   .source_local(script_daily)
   .source_local(script_pressure_to_altitude)
@@ -2422,12 +2499,25 @@ import_nanofox_movebank <- function(
       "detect_tag_fell_off_loc"
     ) %||% b_loc
 
+    # Count Sigfox base stations per location fix.
+    b_loc <- .safe_try(
+      .add_n_base_stations(b_loc),
+      "add_n_base_stations"
+    ) %||% b_loc
+
     # Propagate tag_fell_off from b_loc to the full multi-sensor object.
     # All sensor rows (VeDBA, temp, pressure) at or after the cutoff timestamp
     # per deployment are also flagged.
     b <- .safe_try(
       .propagate_fell_off(b_loc, b),
       "propagate_fell_off_full"
+    ) %||% b
+
+    # Propagate n_base_stations from b_loc onto b (location rows only via
+    # timestamp join; all other sensor rows receive NA).
+    b <- .safe_try(
+      .propagate_n_base_stations(b_loc, b),
+      "propagate_n_base_stations_full"
     ) %||% b
 
     # Daily subset: same metrics pipeline (speed km/h, delta_altitude_m)
@@ -2446,6 +2536,10 @@ import_nanofox_movebank <- function(
       b_daily2 <- .safe_try(
         .propagate_fell_off(b_loc, b_daily2),
         "propagate_fell_off_daily"
+      ) %||% b_daily2
+      b_daily2 <- .safe_try(
+        .propagate_n_base_stations(b_loc, b_daily2),
+        "propagate_n_base_stations_daily"
       ) %||% b_daily2
     }
 
