@@ -569,14 +569,14 @@ import_nanofox_movebank <- function(
   }
 
   .set_tag_type <- function(x, study_id_current = NULL) {
-    allowed <- c("uWasp", "nanofox", "tinyfox")
+    allowed <- c("uWasp", "Nanofox", "Tinyfox")
 
     .classify_model <- function(s) {
       s <- as.character(s)
       dplyr::case_when(
-        grepl("uWasp|SigfoxGH", s, ignore.case = TRUE) ~ "uWasp",
-        grepl("Nano|NanoFox", s, ignore.case = TRUE) ~ "nanofox",
-        grepl("Tiny|TinyFox|TinyFoxBat", s, ignore.case = TRUE) ~ "tinyfox",
+        grepl("uWasp|SigfoxGH", s, ignore.case = TRUE)              ~ "uWasp",
+        grepl("Nano|NanoFox|spring2025bat", s, ignore.case = TRUE)  ~ "Nanofox",
+        grepl("Tiny|TinyFox|TinyFoxBat", s, ignore.case = TRUE)     ~ "Tinyfox",
         TRUE ~ NA_character_
       )
     }
@@ -1690,7 +1690,7 @@ import_nanofox_movebank <- function(
         if (!"vedba_sum" %in% names(sub)) next
         sub <- detect_tag_fell_off(
           sub,
-          method           = "nanofox",
+          method           = "Nanofox",
           tag_col          = track_col,
           vedba_col        = "vedba_sum",
           vedba_threshold  = nanofox_vedba_threshold,
@@ -1710,7 +1710,7 @@ import_nanofox_movebank <- function(
         }
         sub <- detect_tag_fell_off(
           sub,
-          method             = "tinyfox",
+          method             = "Tinyfox",
           tag_col            = track_col,
           vedba_col          = vedba_col,
           activity_col       = "tinyfox_activity_percent_last_24h",
@@ -1723,7 +1723,7 @@ import_nanofox_movebank <- function(
         if (!"distance" %in% names(sub)) next
         sub <- detect_tag_fell_off(
           sub,
-          method           = "uwasp",
+          method           = "uWasp",
           tag_col          = track_col,
           dist_col         = "distance",
           dist_threshold   = uwasp_dist_threshold,

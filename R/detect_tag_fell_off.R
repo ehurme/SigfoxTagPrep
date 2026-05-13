@@ -55,14 +55,14 @@
 #' @export
 detect_tag_fell_off <- function(
     df,
-    method           = c("nanofox", "tinyfox", "uwasp"),
+    method           = c("Nanofox", "Tinyfox", "uWasp"),
     tag_col          = "individual_local_identifier",
     time_col         = "timestamp",
     vedba_col        = "vedba_sum",
     activity_col     = "tinyfox_activity_percent_last_24h",
     dist_col         = "distance",
-    vedba_threshold  = 0,
-    activity_threshold = 0,
+    vedba_threshold  = 1,
+    activity_threshold = 1,
     dist_threshold   = 0.5,
     min_inactive_run = 3L,
     keep_first_inactive = TRUE,
@@ -86,20 +86,20 @@ detect_tag_fell_off <- function(
     return(df)
   }
 
-  if (method == "nanofox" && !col_exists(vedba_col)) {
-    warning("detect_tag_fell_off [nanofox]: vedba_col '", vedba_col,
+  if (method == "Nanofox" && !col_exists(vedba_col)) {
+    warning("detect_tag_fell_off [Nanofox]: vedba_col '", vedba_col,
             "' not found. Returning unchanged.")
     df$tag_fell_off <- FALSE
     return(df)
   }
-  if (method == "tinyfox" && !col_exists(vedba_col) && !col_exists(activity_col)) {
-    warning("detect_tag_fell_off [tinyfox]: neither '", vedba_col, "' nor '",
+  if (method == "Tinyfox" && !col_exists(vedba_col) && !col_exists(activity_col)) {
+    warning("detect_tag_fell_off [Tinyfox]: neither '", vedba_col, "' nor '",
             activity_col, "' found. Returning unchanged.")
     df$tag_fell_off <- FALSE
     return(df)
   }
-  if (method == "uwasp" && !col_exists(dist_col)) {
-    warning("detect_tag_fell_off [uwasp]: dist_col '", dist_col,
+  if (method == "uWasp" && !col_exists(dist_col)) {
+    warning("detect_tag_fell_off [uWasp]: dist_col '", dist_col,
             "' not found. Returning unchanged.")
     df$tag_fell_off <- FALSE
     return(df)
@@ -122,14 +122,14 @@ detect_tag_fell_off <- function(
     # ---- define active rows ----
     active <- rep(FALSE, n)
 
-    if (method == "nanofox") {
+    if (method == "Nanofox") {
       if (col_exists(vedba_col)) {
         v <- as.numeric(tag_df[[vedba_col]])
         active <- active | (!is.na(v) & v > vedba_threshold)
       }
     }
 
-    if (method == "tinyfox") {
+    if (method == "Tinyfox") {
       if (col_exists(vedba_col)) {
         v <- as.numeric(tag_df[[vedba_col]])
         active <- active | (!is.na(v) & v > vedba_threshold)
@@ -140,7 +140,7 @@ detect_tag_fell_off <- function(
       }
     }
 
-    if (method == "uwasp") {
+    if (method == "uWasp") {
       if (col_exists(dist_col)) {
         d <- as.numeric(tag_df[[dist_col]])
         active <- active | (!is.na(d) & d > dist_threshold)
@@ -217,7 +217,7 @@ tag_fell_off_nanofox <- function(
 ) {
   detect_tag_fell_off(
     df,
-    method           = "nanofox",
+    method           = "Nanofox",
     vedba_col        = vedba_col,
     vedba_threshold  = vedba_threshold,
     min_inactive_run = min_inactive_run,
@@ -241,7 +241,7 @@ tag_fell_off_tinyfox <- function(
 ) {
   detect_tag_fell_off(
     df,
-    method             = "tinyfox",
+    method             = "Tinyfox",
     vedba_col          = vedba_col,
     activity_col       = activity_col,
     vedba_threshold    = vedba_threshold,
@@ -266,7 +266,7 @@ tag_fell_off_uwasp <- function(
 ) {
   detect_tag_fell_off(
     df,
-    method           = "uwasp",
+    method           = "uWasp",
     dist_col         = dist_col,
     dist_threshold   = dist_threshold,
     min_inactive_run = min_inactive_run,
