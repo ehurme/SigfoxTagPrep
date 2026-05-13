@@ -90,6 +90,7 @@ import_nanofox_movebank <- function(
   script_mt_previous = "../SigfoxTagPrep/R/mt_previous.R",
   script_calc_displacement = "../SigfoxTagPrep/R/calc_displacement.R",
   script_pressure_to_altitude = "../SigfoxTagPrep/R/pressure_to_altitude_m.R",
+  script_detect_tag_fell_off  = "../SigfoxTagPrep/R/detect_tag_fell_off.R",
   script_daily = "../SigfoxTagPrep/R/mt_thin_daily_solar_noon.R",
   script_daily_sensor = "../SigfoxTagPrep/R/mt_add_daily_sensor_metrics.R",
   tz = "UTC"
@@ -1587,13 +1588,73 @@ import_nanofox_movebank <- function(
   }
 
   # ---------------------------------------------------------------------------
+  # .add_tinyfox_diff_vedba()
+  # Compute per-message change in tinyfox_total_vedba and the time-normalised
+  # rate (VeDBA units per hour) so that fixes with different inter-message
+  # intervals are comparable when applying an activity threshold.
+  #
+  #   tinyfox_diff_vedba     — raw counter change between consecutive fixes;
+  #                            NA for the first fix per deployment and for
+  #                            negative diffs (counter resets / overflows).
+  #
+  #   tinyfox_vedba_rate     — tinyfox_diff_vedba / dt_hours; NA wherever
+  #                            diff is NA or dt is zero / missing.
+  #
+  # Requires the `dt` column (seconds, from mt_time_lags in .make_location_metrics)
+  # to be present. Falls back to NA rate if `dt` is absent.
+  #
+  # Grouped by deployment track so re-deployments do not carry over the
+  # previous tag's cumulative total.
+  # ---------------------------------------------------------------------------
+  .add_tinyfox_diff_vedba <- function(x) {
+    if (!"tinyfox_total_vedba" %in% names(x)) return(x)
+    if (!"tag_type" %in% names(x))            return(x)
+
+    has_dt    <- "dt" %in% names(x)
+    track_col <- move2::mt_track_id_column(x)
+
+    x$tinyfox_diff_vedba <- NA_real_
+    x$tinyfox_vedba_rate <- NA_real_
+
+    tracks <- unique(as.character(x[[track_col]]))
+    for (trk in tracks) {
+      idx <- which(as.character(x[[track_col]]) == trk)
+      tt  <- tolower(as.character(na.omit(x$tag_type[idx])[1]))
+      if (length(tt) == 0L || is.na(tt) || tt != "tinyfox") next
+
+      tv <- as.numeric(x$tinyfox_total_vedba[idx])
+      d  <- c(NA_real_, diff(tv))
+      d[!is.na(d) & d < 0] <- NA_real_   # resets / overflows
+      x$tinyfox_diff_vedba[idx] <- d
+
+      if (has_dt) {
+        dt_h <- as.numeric(x$dt[idx]) / 3600   # dt is in seconds
+        rate <- d / dt_h
+        rate[!is.finite(rate)] <- NA_real_       # guard against dt == 0
+        x$tinyfox_vedba_rate[idx] <- rate
+      }
+    }
+
+    .msg(
+      "  tinyfox_diff_vedba: ", sum(!is.na(x$tinyfox_diff_vedba)),
+      "  tinyfox_vedba_rate: ", sum(!is.na(x$tinyfox_vedba_rate)),
+      " rows computed."
+    )
+    x
+  }
+
+  # ---------------------------------------------------------------------------
   # .detect_tag_fell_off_loc()
   # Per-deployment tag-fell-off detection on the location-only object.
   # Routes to detect_tag_fell_off() with method- and column-appropriate
   # arguments depending on the tag_type of each deployment track.
   #
-  # NanoFox: vedba_sum > 0 (or vedba_threshold) → active
-  # TinyFox: vedba_sum > tinyfox_vedba_threshold OR activity_percent > 0 → active
+  # NanoFox: vedba_sum > nanofox_vedba_threshold → active
+  # TinyFox: tinyfox_vedba_rate > tinyfox_vedba_rate_threshold (VeDBA / hour)
+  #          OR tinyfox_activity_percent_last_24h > tinyfox_activity_threshold → active
+  #          Rate (diff / dt_hours) is used rather than the raw diff so that
+  #          longer inter-message gaps do not unfairly suppress the activity signal.
+  #          Falls back to tinyfox_diff_vedba if rate is unavailable.
   # uWasp:   distance > dist_threshold → active (noisy; marked as best-effort)
   #
   # The first post-active location row is kept as tag_fell_off = FALSE because
@@ -1601,11 +1662,11 @@ import_nanofox_movebank <- function(
   # ---------------------------------------------------------------------------
   .detect_tag_fell_off_loc <- function(
       b_loc,
-      nanofox_vedba_threshold  = 0,
-      tinyfox_vedba_threshold  = 280800 * 3.9 / 1000 / (60 * 24),
-      tinyfox_activity_threshold = 0,
-      uwasp_dist_threshold     = 0.5,   # km — above Sigfox jitter radius
-      min_inactive_run         = 3L
+      nanofox_vedba_threshold      = 1,
+      tinyfox_vedba_rate_threshold = 2440,    # VeDBA / hour; 0 = any activity
+      tinyfox_activity_threshold   = 1,
+      uwasp_dist_threshold         = 0.5,  # km — above Sigfox jitter radius
+      min_inactive_run             = 3L
   ) {
     if (!"tag_type" %in% names(b_loc)) return(b_loc)
 
@@ -1637,13 +1698,23 @@ import_nanofox_movebank <- function(
         )
 
       } else if (tt == "tinyfox") {
+        # Prefer rate (VeDBA/hour) so threshold is interval-independent;
+        # fall back to raw diff, then vedba_sum if rate is unavailable.
+        vedba_col <- if ("tinyfox_vedba_rate" %in% names(sub) &&
+                         any(!is.na(sub$tinyfox_vedba_rate))) {
+          "tinyfox_vedba_rate"
+        } else if ("tinyfox_diff_vedba" %in% names(sub)) {
+          "tinyfox_diff_vedba"
+        } else {
+          "vedba_sum"
+        }
         sub <- detect_tag_fell_off(
           sub,
           method             = "tinyfox",
           tag_col            = track_col,
-          vedba_col          = "vedba_sum",
+          vedba_col          = vedba_col,
           activity_col       = "tinyfox_activity_percent_last_24h",
-          vedba_threshold    = tinyfox_vedba_threshold,
+          vedba_threshold    = tinyfox_vedba_rate_threshold,
           activity_threshold = tinyfox_activity_threshold,
           min_inactive_run   = min_inactive_run
         )
@@ -1739,29 +1810,41 @@ import_nanofox_movebank <- function(
   # ---------------------------------------------------------------------------
   # .add_n_base_stations()
   # Parse n_base_stations (number of unique Sigfox base stations that heard the
-  # transmission) from whichever raw field is present:
+  # transmission) from whichever raw field is present, tried in priority order:
   #
   #   base_stations_id_rssi_reps — pipe-separated stations:
   #     "148A3, -127, 1 | 099F, -132, 1"  → count(|) + 1
   #
-  #   antennas — JSON array of station objects:
+  #   antennas — JSON-like array of station objects:
   #     [{ID:..., RSSI:..., N:...}, ...]   → count({)
   #
-  # NA is returned for rows where both fields are missing or empty.
-  # Only location rows are expected to have these fields; all other rows get NA.
+  #   sigfox_duplicates — same pipe-separated format as base_stations_id_rssi_reps;
+  #     used when Movebank lacks a dedicated base_station_id column and the
+  #     station list is stored in this fallback field instead.
+  #
+  # NA is returned for rows where no field is present or parseable.
+  # Only location rows are expected to carry these fields.
   # ---------------------------------------------------------------------------
+  .count_pipe_stations <- function(s) {
+    # Count stations in a pipe-separated string: "ID, RSSI, N | ID, RSSI, N"
+    # Returns NA for missing/empty strings.
+    has <- !is.na(s) & nzchar(trimws(s))
+    out <- rep(NA_integer_, length(s))
+    if (any(has)) {
+      out[has] <- as.integer(
+        nchar(s[has]) - nchar(gsub("|", "", s[has], fixed = TRUE)) + 1L
+      )
+    }
+    out
+  }
+
   .add_n_base_stations <- function(x) {
     df <- sf::st_drop_geometry(x)
-
-    n <- rep(NA_integer_, nrow(df))
+    n  <- rep(NA_integer_, nrow(df))
 
     if ("base_stations_id_rssi_reps" %in% names(df)) {
-      bs <- as.character(df$base_stations_id_rssi_reps)
-      has <- !is.na(bs) & nzchar(trimws(bs))
-      if (any(has)) {
-        pipe_count <- nchar(bs[has]) - nchar(gsub("|", "", bs[has], fixed = TRUE))
-        n[has] <- as.integer(pipe_count + 1L)
-      }
+      cnt <- .count_pipe_stations(as.character(df$base_stations_id_rssi_reps))
+      n[!is.na(cnt)] <- cnt[!is.na(cnt)]
     }
 
     if ("antennas" %in% names(df)) {
@@ -1771,6 +1854,12 @@ import_nanofox_movebank <- function(
         brace_count <- nchar(ant[has]) - nchar(gsub("{", "", ant[has], fixed = TRUE))
         n[has] <- as.integer(brace_count)
       }
+    }
+
+    if ("sigfox_duplicates" %in% names(df)) {
+      cnt <- .count_pipe_stations(as.character(df$sigfox_duplicates))
+      fill <- !is.na(cnt) & is.na(n)
+      n[fill] <- cnt[fill]
     }
 
     x$n_base_stations <- n
@@ -1813,10 +1902,46 @@ import_nanofox_movebank <- function(
     target
   }
 
+  # ---------------------------------------------------------------------------
+  # .propagate_col_from_loc()
+  # Generic helper: join a single column from b_loc onto a target object
+  # (b_full, b_daily2) by deployment + timestamp. Rows in target that do not
+  # match a location row receive NA.
+  # ---------------------------------------------------------------------------
+  .propagate_col_from_loc <- function(b_loc, target, col) {
+    if (is.null(target) || nrow(target) == 0L) return(target)
+    if (!col %in% names(b_loc))                 return(target)
+
+    join_col <- if ("deployment_id" %in% names(b_loc) && "deployment_id" %in% names(target)) {
+      "deployment_id"
+    } else {
+      loc_tc <- move2::mt_track_id_column(b_loc)
+      if (loc_tc %in% names(target)) loc_tc else return(target)
+    }
+
+    lookup <- sf::st_drop_geometry(b_loc) %>%
+      tibble::as_tibble() %>%
+      dplyr::select(dplyr::all_of(c(join_col, "timestamp", col))) %>%
+      dplyr::filter(!is.na(.data[[col]]))
+
+    if (nrow(lookup) == 0L) return(target)
+
+    df_t <- sf::st_drop_geometry(target) %>%
+      tibble::as_tibble() %>%
+      dplyr::select(dplyr::all_of(c(join_col, "timestamp"))) %>%
+      dplyr::mutate(.row_id = dplyr::row_number()) %>%
+      dplyr::left_join(lookup, by = c(join_col, "timestamp"))
+
+    target[[col]] <- NA_real_
+    target[[col]][df_t$.row_id] <- df_t[[col]]
+    target
+  }
+
   # Produce a daily (solar-noon) location dataset + bat-night sensor summaries.
   .source_local(script_daily)
   .source_local(script_pressure_to_altitude)
   .source_local(script_daily_sensor)
+  .source_local(script_detect_tag_fell_off)
 
   # ---------------------------------------------------------------------------
   # .add_night_day_id()
@@ -2492,6 +2617,14 @@ import_nanofox_movebank <- function(
       "add_location_sensor_metrics"
     ) %||% b_loc
 
+    # TinyFox: per-message change in cumulative VeDBA counter.
+    # Must run before detect_tag_fell_off_loc so the diff column is available
+    # as the activity signal.
+    b_loc <- .safe_try(
+      .add_tinyfox_diff_vedba(b_loc),
+      "add_tinyfox_diff_vedba"
+    ) %||% b_loc
+
     # Flag likely tag-fell-off rows per deployment and tag type.
     # tag_type is still present here (dropped later in the cleanup loop).
     b_loc <- .safe_try(
@@ -2513,12 +2646,26 @@ import_nanofox_movebank <- function(
       "propagate_fell_off_full"
     ) %||% b
 
-    # Propagate n_base_stations from b_loc onto b (location rows only via
+    # Propagate b_loc-derived columns back onto b (location rows only via
     # timestamp join; all other sensor rows receive NA).
+    #
+    # vedba_sum and avg_temp are computed by .add_location_sensor_metrics() and
+    # only exist on b_loc.  mt_add_daily_sensor_metrics() receives b_all = b, so
+    # it must find these columns on b's location rows to produce non-NA daily
+    # NanoFox summaries.
     b <- .safe_try(
       .propagate_n_base_stations(b_loc, b),
       "propagate_n_base_stations_full"
     ) %||% b
+
+    for (.col in c("vedba_sum", "avg_temp",
+                   "tinyfox_diff_vedba", "tinyfox_vedba_rate")) {
+      b <- .safe_try(
+        .propagate_col_from_loc(b_loc, b, .col),
+        paste0("propagate_", .col, "_full")
+      ) %||% b
+    }
+    rm(.col)
 
     # Daily subset: same metrics pipeline (speed km/h, delta_altitude_m)
     .source_local(script_daily)
@@ -2540,6 +2687,11 @@ import_nanofox_movebank <- function(
       b_daily2 <- .safe_try(
         .propagate_n_base_stations(b_loc, b_daily2),
         "propagate_n_base_stations_daily"
+      ) %||% b_daily2
+      # Daily diff: change in cumulative VeDBA between consecutive daily fixes.
+      b_daily2 <- .safe_try(
+        .add_tinyfox_diff_vedba(b_daily2),
+        "add_tinyfox_diff_vedba_daily"
       ) %||% b_daily2
     }
 
