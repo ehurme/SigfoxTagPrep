@@ -152,8 +152,10 @@ p      <- result[[4]]   # ggplot map
 
 | Function | Description |
 |---|---|
-| `add_env_to_move2()` | Extract ERA5/ECMWF raster values at each fix location and time |
+| `add_env_to_move2()` | Extract ERA5/ECMWF raster values at each fix location and time (GRIB stacks) |
+| `annotate_era5()` | Extract ERA5 surface + pressure-level wind at each fix, compute altitude-matched wind support (NetCDF from `download_era5.py`) |
 | `calculate_wind_features()` | Wind support, crosswind, and airspeed from U/V components |
+| `altitude_to_pressure_hPa()` | Convert altitude (m) to pressure (hPa) — inverse of `pressure_to_altitude_m()` |
 | `add_moonlit_to_move2()` | Moonlight intensity and sun altitude at each fix |
 | `extract_avg_night_env()` | Average environmental values over the preceding night |
 | `extract_sunset_env()` | Environmental values at sunset for each fix |
@@ -214,12 +216,69 @@ p      <- result[[4]]   # ggplot map
 Core: `move2`, `sf`, `dplyr`, `lubridate`, `ggplot2`, `rvest`, `suncalc`, `janitor`
 
 Optional (for specific functions):
-- `terra` — ERA5 raster extraction (`add_env_to_move2`)
+- `terra` — ERA5 raster extraction (`add_env_to_move2`, `annotate_era5`)
 - `moonlit` — moonlight covariates (`add_moonlit_to_move2`):
   `devtools::install_github("msmielak/moonlit")`
 - `elevatr` — ground elevation lookup
 - `geosphere` — geodesic distance calculations
 - `lme4` — clock drift modelling (`correct_time_drift`)
+
+Python (for ERA5 downloads only):
+- `cdsapi` — Copernicus Climate Data Store API (`pip install cdsapi`)
+
+---
+
+## ERA5 pressure-level wind annotation
+
+`annotate_era5()` complements the existing `add_env_to_move2()` (which works
+with yearly GRIB stacks) by adding **pressure-level wind extraction** and
+**altitude-matched wind support**.  It is designed for the NetCDF folder
+structure produced by `inst/python/download_era5.py`.
+
+### Download ERA5 data
+
+```bash
+# Edit inst/python/era5_config.json with your study area, dates, and levels
+# then:
+pip install cdsapi
+python inst/python/download_era5.py inst/python/era5_config.json
+```
+
+Data is saved to the configured output directory (default:
+`//10.0.16.7/grpdechmann/Postdoc-EdwardHurme/EnvData`).
+
+### Annotate tracks
+
+```r
+library(SigfoxTagPrep)
+
+# Works with any move2 object — GPS, Sigfox, or mixed
+dat <- import_nanofox_movebank(study_id = 12345)
+dat$location <- annotate_era5(
+  dat$location,
+  era5_dir = "//10.0.16.7/grpdechmann/Postdoc-EdwardHurme/EnvData"
+)
+
+# GPS + Sigfox stacked together
+combined <- mt_stack(gps_data, sigfox_data)
+combined <- annotate_era5(combined, era5_dir = "path/to/EnvData")
+# GPS rows: altitude → barometric formula (with actual ERA5 MSLP) → pressure
+# Sigfox rows: tag barometric pressure used directly
+```
+
+### What it adds
+
+Surface variables (prefixed `era5_`): `msl`, `sp`, `u10`, `v10`, `u100`,
+`v100`, `t2m`, `tp`, `i10fg`, `tcc`, `cbh` (cloud base height).
+
+Per-level wind: `era5_u500` … `era5_u1000`, `era5_v500` … `era5_v1000`.
+
+Derived: `wind_support_<level>`, `crosswind_<level>`, `airspeed_<level>`,
+`wind_speed_<level>` at every pressure level and at 10 m / 100 m.
+
+Altitude-matched: `flight_pressure_hPa`, `matched_pressure_level`,
+`wind_support_flight`, `crosswind_flight`, `best_wind_level`,
+`at_best_wind`.
 
 ---
 
