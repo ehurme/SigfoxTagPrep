@@ -23,7 +23,7 @@ scan_migration_nights <- function(
     bats_loc,
     mig_nights,
     out_dir    = "Plots/ScanTrack/Migration/",
-    overwrite  = FALSE,
+    overwrite  = TRUE,
     elev_z     = 6,
     buffer_deg = 1.5,
     map_extent = c("flight", "track"),
@@ -90,9 +90,14 @@ scan_migration_nights <- function(
     indiv_id <- as.character(night$individual_local_identifier)
     t_arr    <- night$timestamp
 
-    # Departure = last daytime fix strictly before the arrival fix
+    # Departure = last fix from the calendar day BEFORE t_arr.
+    # Using as.Date() < as.Date(t_arr) ensures we step back at least one full
+    # day, which is necessary for fine-scale tags (e.g. NanoFox finescale) that
+    # have multiple fixes per day — otherwise prev_row would be a same-morning
+    # fix on the arrival day, not the evening before migration.
     prev_row <- loc_df %>%
-      filter(individual_local_identifier == indiv_id, timestamp < t_arr) %>%
+      filter(individual_local_identifier == indiv_id,
+             as.Date(timestamp) < as.Date(t_arr)) %>%
       slice_max(timestamp, n = 1)
 
     if (nrow(prev_row) == 0) {
