@@ -515,7 +515,7 @@ import_nanofox_movebank <- function(
     #   tag_firmware      — firmware version on the tag
     #   tag_local_identifier — which physical tag was on the animal
     #   deployment_id     — deployment-level grouping key
-    # NOT promoted: tag_type (removed from outputs), taxon_canonical_name (redundant).
+    # NOT promoted: taxon_canonical_name (redundant with species).
     #
     # All factor/ordered columns are coerced to character to prevent level-set
     # conflicts when stacking objects from different studies.
@@ -571,38 +571,22 @@ import_nanofox_movebank <- function(
   .set_tag_type <- function(x, study_id_current = NULL) {
     allowed <- c("uWasp", "Nanofox", "Tinyfox")
 
+    # Map any string (model name, firmware label, format_type) to a canonical
+    # tag_type.  NanoFox firmware names ("30Days", "30DaysFineScalePressure")
+    # are included because format_type in Movebank exports often carries the
+    # firmware string rather than the model name.
     .classify_model <- function(s) {
       s <- as.character(s)
       dplyr::case_when(
-        grepl("uWasp|SigfoxGH", s, ignore.case = TRUE)              ~ "uWasp",
-        grepl("Nano|NanoFox|spring2025bat", s, ignore.case = TRUE)  ~ "Nanofox",
-        grepl("Tiny|TinyFox|TinyFoxBat", s, ignore.case = TRUE)     ~ "Tinyfox",
+        grepl("uWasp|SigfoxGH", s, ignore.case = TRUE)                          ~ "uWasp",
+        grepl("Nano|NanoFox|spring2025bat|30days|30DaysFine", s,
+              ignore.case = TRUE)                                                 ~ "Nanofox",
+        grepl("Tiny|TinyFox|TinyFoxBat", s, ignore.case = TRUE)                 ~ "Tinyfox",
         TRUE ~ NA_character_
       )
     }
 
-    # 1) Prefer existing event-level tag_type if it is already valid.
-    if ("tag_type" %in% names(x) && any(!is.na(x$tag_type))) {
-      x$tag_type <- as.character(x$tag_type)
-      bad <- !is.na(x$tag_type) & !x$tag_type %in% allowed
-      if (any(bad)) {
-        x$tag_type[bad] <- NA_character_
-      }
-      if (any(!is.na(x$tag_type))) {
-        .msg(
-          "  tag_type: using existing event/data column. Distribution: ",
-          paste(
-            names(table(x$tag_type, useNA = "no")),
-            table(x$tag_type, useNA = "no"),
-            sep = "=",
-            collapse = ", "
-          )
-        )
-        return(x)
-      }
-    }
-
-    # 2) Prefer explicit per-study override only when tag_type is not inferable.
+    # Resolve explicit per-study override (validated once here).
     override <- NULL
     if (!is.null(tag_type)) {
       if (length(tag_type) == 1 && !is.na(tag_type)) {
@@ -613,97 +597,89 @@ import_nanofox_movebank <- function(
       }
       if (!is.null(override) && !is.na(override) && !override %in% allowed) {
         stop(
-          "Invalid tag_type override for study ",
-          study_id_current,
-          ": ",
-          override,
-          ". Allowed values are: ",
-          paste(allowed, collapse = ", ")
+          "Invalid tag_type override for study ", study_id_current, ": ",
+          override, ". Allowed values are: ", paste(allowed, collapse = ", ")
         )
       }
     }
 
-    # 3) Infer from format_type if available.
-    inferred <- NULL
-    if ("format_type" %in% names(x) && any(!is.na(x[["format_type"]]))) {
-      inferred <- .classify_model(x[["format_type"]])
-      if (any(!is.na(inferred))) {
-        x$tag_type <- inferred
-        .msg(
-          "  tag_type: resolved from format_type. Distribution: ",
-          paste(
-            names(table(x$tag_type, useNA = "no")),
-            table(x$tag_type, useNA = "no"),
-            sep = "=",
-            collapse = ", "
-          )
-        )
-        return(x)
+    # Build classification by filling NA slots progressively.
+    # Priority (highest to lowest):
+    #   1. Explicit override
+    #   2. model / tag_model event column  (most reliable — "NanoFox", "TinyFoxBatt")
+    #   3. model / tag_model from track data
+    #   4. format_type column              (firmware label; may omit model name)
+    #   5. Existing tag_type column        (only used to fill surviving gaps)
+    result <- rep(NA_character_, nrow(x))
+
+    # 1) Override fills everything.
+    if (!is.null(override) && !is.na(override)) {
+      result <- rep(override, nrow(x))
+    }
+
+    # 2) Event-level model column.
+    if (any(is.na(result))) {
+      for (col in c("model", "tag_model")) {
+        if (col %in% names(x) && any(!is.na(x[[col]]))) {
+          classified <- .classify_model(as.character(x[[col]]))
+          result[is.na(result)] <- classified[is.na(result)]
+          if (!any(is.na(result))) break
+        }
       }
     }
 
-    # 4) Infer from event-level or track-level model metadata.
-    model_vec <- NULL
-    for (col in c("model", "tag_model")) {
-      if (col %in% names(x) && any(!is.na(x[[col]]))) {
-        model_vec <- as.character(x[[col]])
-        .msg("  tag_type: resolved from event column '", col, "'")
-        break
-      }
-    }
-    if (is.null(model_vec)) {
+    # 3) Track-data model column.
+    if (any(is.na(result))) {
       td <- tryCatch(move2::mt_track_data(x), error = function(e) NULL)
       if (!is.null(td)) {
         td_model_cols <- intersect(c("tag_model", "model"), names(td))
         if (length(td_model_cols) > 0) {
-          td_model_col <- td_model_cols[1]
           track_id_vec <- as.character(move2::mt_track_id(x))
-          id_col <- names(td)[1]
-          td_lookup <- stats::setNames(
-            as.character(td[[td_model_col]]),
+          id_col       <- names(td)[1]
+          td_lookup    <- stats::setNames(
+            .classify_model(as.character(td[[td_model_cols[1]]])),
             as.character(td[[id_col]])
           )
-          model_vec <- td_lookup[track_id_vec]
-          .msg(
-            "  tag_type: resolved from track data column '",
-            td_model_col,
-            "'"
-          )
+          classified <- td_lookup[track_id_vec]
+          result[is.na(result)] <- classified[is.na(result)]
         }
       }
     }
-    if (!is.null(model_vec)) {
-      inferred <- .classify_model(model_vec)
-      if (any(!is.na(inferred))) {
-        x$tag_type <- inferred
-        .msg(
-          "  tag_type distribution: ",
-          paste(
-            names(table(x$tag_type, useNA = "no")),
-            table(x$tag_type, useNA = "no"),
-            sep = "=",
-            collapse = ", "
-          )
-        )
-        return(x)
-      }
+
+    # 4) format_type column (firmware / schema label).
+    if (any(is.na(result)) &&
+        "format_type" %in% names(x) &&
+        any(!is.na(x[["format_type"]]))) {
+      classified <- .classify_model(x[["format_type"]])
+      result[is.na(result)] <- classified[is.na(result)]
     }
 
-    # 5) Use explicit override only for studies where metadata are insufficient.
-    if (!is.null(override) && !is.na(override)) {
-      x$tag_type <- rep(override, nrow(x))
-      .msg("  tag_type set explicitly for unresolved study: ", override)
-      return(x)
+    # 5) Existing tag_type column (fill any remaining gaps).
+    if (any(is.na(result)) && "tag_type" %in% names(x)) {
+      existing <- as.character(x$tag_type)
+      existing[!existing %in% allowed] <- NA_character_
+      result[is.na(result) & !is.na(existing)] <- existing[is.na(result) & !is.na(existing)]
     }
 
-    stop(
-      "tag_type could not be inferred for study ",
-      as.character(study_id_current),
-      ". Supply tag_type as a named vector for only the unresolved studies. ",
-      "Allowed values are: ",
-      paste(allowed, collapse = ", "),
-      "."
+    if (!any(!is.na(result))) {
+      stop(
+        "tag_type could not be inferred for study ",
+        as.character(study_id_current),
+        ". Supply tag_type as a named vector for only the unresolved studies. ",
+        "Allowed values are: ", paste(allowed, collapse = ", "), "."
+      )
+    }
+
+    x$tag_type <- result
+    .msg(
+      "  tag_type distribution: ",
+      paste(
+        names(table(x$tag_type, useNA = "ifany")),
+        table(x$tag_type, useNA = "ifany"),
+        sep = "=", collapse = ", "
+      )
     )
+    x
   }
 
   .add_lonlat <- function(x) {
@@ -1759,7 +1735,7 @@ import_nanofox_movebank <- function(
   #     flagged when their timestamp >= cutoff, i.e. they are from a post-
   #     detachment transmission window
   # ---------------------------------------------------------------------------
-  .propagate_fell_off <- function(b_loc, target) {
+  .propagate_fell_off <- function(b_loc, target, use_date = FALSE) {
     if (is.null(target) || nrow(target) == 0L) return(target)
     target$tag_fell_off <- FALSE
     if (!"tag_fell_off" %in% names(b_loc)) return(target)
@@ -1796,7 +1772,16 @@ import_nanofox_movebank <- function(
       dplyr::mutate(.row_id = dplyr::row_number()) %>%
       dplyr::left_join(cutoffs, by = join_col)
 
-    flag_rows <- which(!is.na(df_t$cutoff_ts) & df_t$timestamp >= df_t$cutoff_ts)
+    # Daily rows use solar-noon timestamps which can be earlier on the same
+    # calendar day than the exact fell-off transmission — compare dates only
+    if (use_date) {
+      flag_rows <- which(
+        !is.na(df_t$cutoff_ts) &
+          as.Date(df_t$timestamp) >= as.Date(df_t$cutoff_ts)
+      )
+    } else {
+      flag_rows <- which(!is.na(df_t$cutoff_ts) & df_t$timestamp >= df_t$cutoff_ts)
+    }
     if (length(flag_rows) > 0L) target$tag_fell_off[flag_rows] <- TRUE
 
     n_fell  <- sum(target$tag_fell_off, na.rm = TRUE)
@@ -2681,7 +2666,7 @@ import_nanofox_movebank <- function(
       b_daily2 <- .make_location_metrics(b_daily)
       b_daily2 <- add_prev_latlon(b_daily2)
       b_daily2 <- .safe_try(
-        .propagate_fell_off(b_loc, b_daily2),
+        .propagate_fell_off(b_loc, b_daily2, use_date = TRUE),
         "propagate_fell_off_daily"
       ) %||% b_daily2
       b_daily2 <- .safe_try(
@@ -2714,11 +2699,10 @@ import_nanofox_movebank <- function(
         obj <- .fill_from_td(obj, "taxon_canonical_name", "species")
         obj$species <- as.character(obj$species)
         # Remove internal columns not needed in outputs:
-        #   tag_type             — internal inference label
         #   taxon_canonical_name — redundant with species
         drop_cols <- intersect(
           names(obj),
-          c("tag_type", "taxon_canonical_name")
+          c("taxon_canonical_name")
         )
         if (length(drop_cols) > 0) {
           obj <- obj[, !names(obj) %in% drop_cols, drop = FALSE]

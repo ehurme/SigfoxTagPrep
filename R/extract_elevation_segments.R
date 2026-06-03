@@ -25,6 +25,12 @@ extract_elevation_segments <- function(raster, tag) {
     # Extract elevation values along the segment
     extracted <- terra::extract(raster, segment_line, along = TRUE)
 
+    # Skip degenerate segments (zero-length line returns 0 rows from extract)
+    if (nrow(extracted) == 0) {
+      cumulative_distance <- cumulative_distance + segment_distance
+      next
+    }
+
     # Compute interpolated distances within the segment
     segment_relative_distances <- (1:nrow(extracted))/nrow(extracted) * segment_distance
     segment_distances_from_origin <- cumulative_distance + segment_relative_distances
@@ -33,16 +39,17 @@ extract_elevation_segments <- function(raster, tag) {
     cumulative_distance <- cumulative_distance + segment_distance
 
     # Add segment-specific data
+    seq_num   <- if ("sequence_number" %in% names(tag)) as.numeric(tag$sequence_number[i]) else NA_real_
+    ts_val    <- if ("timestamp"       %in% names(tag)) tag$timestamp[i]                   else NA
     segment_result <- data.frame(
-      start_x = segment_coords[1, 1] %>% as.numeric(),
-      start_y = segment_coords[1, 2] %>% as.numeric(),
-      end_x = segment_coords[2, 1] %>% as.numeric(),
-      end_y = segment_coords[2, 2] %>% as.numeric(),
-      #burst_id = tag$burst_id[i],
-      sequence_number = tag$sequence_number[i] %>% as.numeric(),
-      timestamp = tag$timestamp[i],
-      distance_from_origin = segment_distances_from_origin, # Interpolated distance from origin
-      elevation = extracted[[2]]  # Elevation values
+      start_x              = as.numeric(segment_coords[1, 1]),
+      start_y              = as.numeric(segment_coords[1, 2]),
+      end_x                = as.numeric(segment_coords[2, 1]),
+      end_y                = as.numeric(segment_coords[2, 2]),
+      sequence_number      = seq_num,
+      timestamp            = ts_val,
+      distance_from_origin = segment_distances_from_origin,
+      elevation            = extracted[[2]]
     )
 
     # Store the result
