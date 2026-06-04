@@ -43,6 +43,8 @@ import shutil
 import sys
 from pathlib import Path, PureWindowsPath
 
+import requests
+
 try:
     import cdsapi
 except ImportError:
@@ -115,7 +117,8 @@ def load_config(path: str) -> dict:
 
 # ── Download functions ───────────────────────────────────────────────────────
 
-def download_single_levels(client: cdsapi.Client, cfg: dict, out_root: Path):
+def download_single_levels(client: cdsapi.Client, cfg: dict, out_root: Path,
+                           skip_existing: bool = True):
     """Download ERA5 single-level reanalysis, one file per month."""
     variables = cfg.get("single_level_variables", DEFAULT_SINGLE_VARS)
     area = cfg["area"]
@@ -124,10 +127,10 @@ def download_single_levels(client: cdsapi.Client, cfg: dict, out_root: Path):
     out_dir = out_root / "single_levels"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    for year in cfg["years"]:
-        for month in cfg["months"]:
-            fname = out_dir / f"era5_single_{year}_{month:02d}.nc"
-            if fname.exists():
+    for year in sorted(cfg["years"], reverse=True):
+        for month in sorted(cfg["months"], reverse=True):
+            fname = out_dir / f"era5_single_{year}_{month:02d}.grib"
+            if skip_existing and fname.exists():
                 print(f"  [skip] {fname.name} already exists")
                 continue
 
@@ -143,13 +146,17 @@ def download_single_levels(client: cdsapi.Client, cfg: dict, out_root: Path):
                 "download_format": "unarchived",
                 "area": area,
             }
-            client.retrieve("reanalysis-era5-single-levels", request).download(
-                target=str(fname)
-            )
-            print(f"  [done] {fname.name}")
+            try:
+                client.retrieve("reanalysis-era5-single-levels", request).download(
+                    target=str(fname)
+                )
+                print(f"  [done] {fname.name}")
+            except requests.exceptions.HTTPError as e:
+                print(f"  [skip] {year}-{month:02d}: {e}")
 
 
-def download_pressure_levels(client: cdsapi.Client, cfg: dict, out_root: Path):
+def download_pressure_levels(client: cdsapi.Client, cfg: dict, out_root: Path,
+                             skip_existing: bool = True):
     """
     Download ERA5 pressure-level wind data.
 
@@ -165,11 +172,11 @@ def download_pressure_levels(client: cdsapi.Client, cfg: dict, out_root: Path):
     out_dir = out_root / "pressure_levels"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    for year in cfg["years"]:
-        for month in cfg["months"]:
+    for year in sorted(cfg["years"], reverse=True):
+        for month in sorted(cfg["months"], reverse=True):
             for level in levels:
-                fname = out_dir / f"era5_wind_{level}hPa_{year}_{month:02d}.nc"
-                if fname.exists():
+                fname = out_dir / f"era5_wind_{level}hPa_{year}_{month:02d}.grib"
+                if skip_existing and fname.exists():
                     print(f"  [skip] {fname.name}")
                     continue
 
@@ -186,10 +193,13 @@ def download_pressure_levels(client: cdsapi.Client, cfg: dict, out_root: Path):
                     "download_format": "unarchived",
                     "area": area,
                 }
-                client.retrieve(
-                    "reanalysis-era5-pressure-levels", request
-                ).download(target=str(fname))
-                print(f"  [done] {fname.name}")
+                try:
+                    client.retrieve(
+                        "reanalysis-era5-pressure-levels", request
+                    ).download(target=str(fname))
+                    print(f"  [done] {fname.name}")
+                except requests.exceptions.HTTPError as e:
+                    print(f"  [skip] {level} hPa {year}-{month:02d}: {e}")
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
@@ -211,6 +221,12 @@ def main():
         help="Override output_dir from config "
              "(supports UNC paths, e.g. //server/share/era5)",
     )
+    ap.add_argument(
+        "--overwrite",
+        action="store_true",
+        default=False,
+        help="Re-download files that already exist (default: skip existing)",
+    )
     args = ap.parse_args()
 
     cfg = load_config(args.config)
@@ -225,14 +241,14 @@ def main():
     if args.dataset in ("single", "both"):
         n_files = len(cfg["years"]) * len(cfg["months"])
         print(f"=== Single-level variables ({n_files} monthly files) ===")
-        download_single_levels(client, cfg, out_root)
+        download_single_levels(client, cfg, out_root, skip_existing=not args.overwrite)
 
     if args.dataset in ("pressure", "both"):
         levels = cfg.get("pressure_levels", DEFAULT_LEVELS)
         n_files = len(cfg["years"]) * len(cfg["months"]) * len(levels)
         print(f"=== Pressure-level wind ({n_files} files: "
               f"{len(levels)} levels x months) ===")
-        download_pressure_levels(client, cfg, out_root)
+        download_pressure_levels(client, cfg, out_root, skip_existing=not args.overwrite)
 
     print(f"\nAll files saved to: {out_root}")
     print("Use SigfoxTagPrep::annotate_era5() in R to extract at animal locations.")

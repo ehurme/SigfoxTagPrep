@@ -2,8 +2,8 @@
   "_comment": "ERA5 download config for movement ecology annotation (SigfoxTagPrep)",
   "_usage": "python download_era5.py era5_config.json",
 
-  "years": [2024],
-  "months": [7, 8, 9, 10],
+  "years": [2022, 2023, 2024, 2025, 2026],
+  "months": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
   "area": [57, -11, 33, 24],
   "output_dir": "//10.0.16.7/grpdechmann/Postdoc-EdwardHurme/EnvData",
 
@@ -21,13 +21,16 @@
     "cloud_base_height"
   ],
 
-  "pressure_levels": [500, 600, 700, 800, 850, 900, 925, 950, 1000],
+  "pressure_levels": [500, 550, 600, 650, 700, 750, 800, 825, 850, 875, 900, 925, 950, 1000],
 
+  
   "pressure_level_variables": [
+    "temperature",
     "u_component_of_wind",
-    "v_component_of_wind"
+    "v_component_of_wind",
+    "vertical_velocity"
   ],
 
   "hours": "all",
-  "data_format": "netcdf"
+  "data_format": "grib"
 }

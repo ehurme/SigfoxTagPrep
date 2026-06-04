@@ -1,0 +1,15 @@
+# ERA5 download
+cdsapi
+
+# ERA5 animation (animate_tracks_weather.py)
+xarray
+netCDF4
+cfgrib          # for reading .grib files
+numpy
+pandas
+matplotlib
+cartopy
+Pillow          # for GIF output
+# ffmpeg must be installed separately for .mp4 output
+# Windows: https://ffmpeg.org/download.html  (add to PATH)
+# Linux/macOS: apt/brew install ffmpeg

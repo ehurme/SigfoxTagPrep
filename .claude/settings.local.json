@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls ~/Dropbox/MPI/Noctule/Data/*.csv)",
+      "Bash(ls ~/Dropbox/MPI/Noctule/Data/2025/*.csv)",
+      "Bash(python -c \"import pyreadr; print\\('pyreadr ok'\\)\")",
+      "Bash(py --version)",
+      "Bash(python3 -c \"import pyreadr; print\\('ok'\\)\")",
+      "Bash(python3 -c \"import pandas; print\\(pandas.__version__\\)\")",
+      "Bash(python3 -c \"import xarray; print\\(xarray.__version__\\)\")",
+      "Bash(conda run:*)",
+      "Bash(conda info:*)",
+      "Bash(python -c ':*)",
+      "Bash(grep -v \"^$\")",
+      "Bash(echo \"not found\" ls ~/Desktop/era5*)",
+      "WebFetch(domain:link.springer.com)",
+      "WebFetch(domain:movementecologyjournal.biomedcentral.com)"
+    ]
+  }
+}

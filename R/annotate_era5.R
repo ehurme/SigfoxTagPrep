@@ -144,10 +144,10 @@ annotate_era5 <- function(
   # ── Single-level extraction ───────────────────────────────────────────────
   single_dir <- file.path(era5_dir, "single_levels")
   if (dir.exists(single_dir)) {
-    nc_files <- sort(list.files(single_dir, "\\.nc$", full.names = TRUE))
-    if (length(nc_files) > 0) {
+    grib_files <- sort(list.files(single_dir, "\\.grib$", full.names = TRUE))
+    if (length(grib_files) > 0) {
       if (verbose) message("Extracting single-level variables ...")
-      data <- .era5_extract_single(data, nc_files, timestamps,
+      data <- .era5_extract_single(data, grib_files, timestamps,
                                     coords_mat, max_time_gap_hours, verbose)
     }
   } else if (verbose) {
@@ -214,34 +214,54 @@ annotate_era5 <- function(
 
 # ── Single-level extraction ──────────────────────────────────────────────────
 
-.era5_extract_single <- function(data, nc_files, timestamps,
+.era5_extract_single <- function(data, grib_files, timestamps,
                                   coords_mat, max_gap, verbose) {
-  # ERA5 short names → output column names
-  var_map <- c(
-    msl   = "msl",    sp    = "sp",
-    u10   = "u10",    v10   = "v10",
-    u100  = "u100",   v100  = "v100",
-    t2m   = "t2m",    tp    = "tp",
-    i10fg = "i10fg",  tcc   = "tcc",
-    cbh   = "cbh"
+  # GRIB layer positions within each time-step block.
+  # Order confirmed from terra output — positions 3, 4, 11 are "undefined" in
+  # GRIB names so must be identified by position, not name.
+  var_positions <- c(
+    era5_u10   = 1L,  # 10 metre u wind component
+    era5_v10   = 2L,  # 10 metre v wind component
+    era5_u100  = 3L,  # 100 metre u wind component (listed as "undefined")
+    era5_v100  = 4L,  # 100 metre v wind component (listed as "undefined")
+    era5_t2m   = 5L,  # 2 metre temperature
+    era5_msl   = 6L,  # Mean sea level pressure
+    era5_sp    = 7L,  # Surface pressure
+    era5_tp    = 8L,  # Total precipitation
+    era5_i10fg = 9L,  # Instantaneous 10 metre wind gust
+    era5_tcc   = 10L, # Total cloud cover
+    era5_cbh   = 11L  # Cloud base height (listed as "undefined")
   )
 
-  for (short_nm in names(var_map)) {
-    col_nm <- paste0("era5_", var_map[short_nm])
+  r <- tryCatch(rast(grib_files), error = function(e) NULL)
+  if (is.null(r)) return(data)
 
-    r <- tryCatch(rast(nc_files, subds = short_nm), error = function(e) NULL)
-    if (is.null(r)) next
+  rt <- time(r)
+  if (is.null(rt) || length(rt) == 0) return(data)
 
-    rt <- time(r)
-    if (is.null(rt) || length(rt) == 0) {
-      if (verbose) message("    [skip] ", short_nm, " — no time dimension")
-      next
-    }
+  # GRIB layers are interleaved: [var1_t1, var2_t1, ..., varN_t1, var1_t2, ...]
+  n_vars       <- sum(rt == rt[1])
+  unique_times <- rt[seq(1L, length(rt), by = n_vars)]
 
-    idx <- .era5_nearest_layer(rt, timestamps, max_gap, verbose = FALSE)
-    vals <- terra::extract(r, coords_mat, layer = idx)
+  obs_num  <- as.numeric(timestamps)
+  time_num <- as.numeric(unique_times)
+  nearest_t <- vapply(obs_num, function(t) which.min(abs(time_num - t)), integer(1))
+
+  gaps_h <- abs(time_num[nearest_t] - obs_num) / 3600
+  bad <- which(gaps_h > max_gap)
+  if (length(bad) > 0 && verbose) {
+    message("    [warn] ", length(bad), " fixes >", max_gap,
+            "h from nearest ERA5 step (max gap: ",
+            round(max(gaps_h[bad]), 1), "h)")
+  }
+
+  for (col_nm in names(var_positions)) {
+    pos <- var_positions[[col_nm]]
+    if (pos > n_vars) next
+
+    layer_idx <- (nearest_t - 1L) * n_vars + pos
+    vals <- terra::extract(r, coords_mat, layer = layer_idx)
     data[[col_nm]] <- vals[, 2]
-
     if (verbose) message("    + ", col_nm)
   }
 
@@ -258,7 +278,7 @@ annotate_era5 <- function(
   reported_gap <- FALSE
 
   for (level in pressure_levels) {
-    pattern <- paste0("era5_wind_", level, "hPa_.*\\.nc$")
+    pattern <- paste0("era5_wind_", level, "hPa_.*\\.grib$")
     level_files <- sort(list.files(pressure_dir, pattern, full.names = TRUE))
 
     if (length(level_files) == 0) {
@@ -266,32 +286,52 @@ annotate_era5 <- function(
       next
     }
 
-    for (var in c("u", "v")) {
-      r <- tryCatch(
-        rast(level_files, subds = var),
-        error = function(e) {
-          tryCatch(
-            rast(level_files, subds = paste0(var, "_component_of_wind")),
-            error = function(e2) NULL
-          )
-        }
-      )
-      if (is.null(r)) {
-        if (verbose) message("    [skip] ", var, " at ", level, " hPa")
+    r <- tryCatch(rast(level_files), error = function(e) NULL)
+    if (is.null(r)) {
+      if (verbose) message("    [skip] Could not load ", level, " hPa")
+      next
+    }
+
+    rt <- time(r)
+    if (is.null(rt) || length(rt) == 0) next
+
+    # GRIB interleaved structure: n_vars layers per time step
+    n_vars       <- sum(rt == rt[1])
+    unique_times <- rt[seq(1L, length(rt), by = n_vars)]
+    layer_names  <- names(r)[seq_len(n_vars)]
+
+    obs_num  <- as.numeric(timestamps)
+    time_num <- as.numeric(unique_times)
+    nearest_t <- vapply(obs_num, function(t) which.min(abs(time_num - t)), integer(1))
+
+    if (!reported_gap) {
+      gaps_h <- abs(time_num[nearest_t] - obs_num) / 3600
+      bad <- which(gaps_h > max_gap)
+      if (length(bad) > 0 && verbose) {
+        message("    [warn] ", length(bad), " fixes >", max_gap,
+                "h from nearest ERA5 step (max gap: ",
+                round(max(gaps_h[bad]), 1), "h)")
+      }
+      reported_gap <- TRUE
+    }
+
+    # Find u and v layer positions by name matching
+    u_pos <- grep("(?i)\\bu.{0,10}wind|u.{0,5}component", layer_names, perl = TRUE)[1]
+    v_pos <- grep("(?i)\\bv.{0,10}wind|v.{0,5}component", layer_names, perl = TRUE)[1]
+
+    for (var_info in list(list(pos = u_pos, nm = "u"),
+                          list(pos = v_pos, nm = "v"))) {
+      pos <- var_info$pos
+      var <- var_info$nm
+      if (is.na(pos)) {
+        if (verbose) message("    [skip] ", var, " at ", level, " hPa — layer not found")
         next
       }
 
-      rt <- time(r)
-      if (is.null(rt) || length(rt) == 0) next
-
-      idx <- .era5_nearest_layer(rt, timestamps, max_gap,
-                                  verbose = verbose && !reported_gap)
-      reported_gap <- TRUE
-      vals <- terra::extract(r, coords_mat, layer = idx)
-
+      layer_idx <- (nearest_t - 1L) * n_vars + pos
+      vals <- terra::extract(r, coords_mat, layer = layer_idx)
       col_nm <- paste0("era5_", var, level)
       data[[col_nm]] <- vals[, 2]
-
       if (verbose) message("    + ", col_nm)
     }
   }
@@ -396,6 +436,11 @@ annotate_era5 <- function(
       data$wind_support_flight <- ws_mat[idx]
       data$crosswind_flight    <- cs_mat[idx]
       data$wind_speed_flight   <- spd_mat[idx]
+      data$airspeed_flight     <- airspeed(
+        as.numeric(ground_speed),
+        data$wind_support_flight,
+        data$crosswind_flight
+      )
 
       # Best available wind level
       best_col <- apply(ws_mat, 1, function(row) {
