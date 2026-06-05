@@ -39,3 +39,5 @@ rsconnect/
 .quarto
 migration_hmm.stan
 .positai
+# Animation outputs
+*.gif

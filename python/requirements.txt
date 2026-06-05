@@ -10,6 +10,7 @@ pandas
 matplotlib
 cartopy
 Pillow          # for GIF output
+tqdm            # progress bar during rendering
 # ffmpeg must be installed separately for .mp4 output
 # Windows: https://ffmpeg.org/download.html  (add to PATH)
 # Linux/macOS: apt/brew install ffmpeg

@@ -260,8 +260,13 @@ annotate_era5 <- function(
     if (pos > n_vars) next
 
     layer_idx <- (nearest_t - 1L) * n_vars + pos
-    vals <- terra::extract(r, coords_mat, layer = layer_idx)
-    data[[col_nm]] <- vals[, 2]
+    out_vals <- numeric(length(layer_idx))
+    for (li in unique(layer_idx)) {
+      idx <- which(layer_idx == li)
+      ex  <- terra::extract(r[[li]], coords_mat[idx, , drop = FALSE])
+      out_vals[idx] <- ex[, 2]
+    }
+    data[[col_nm]] <- out_vals
     if (verbose) message("    + ", col_nm)
   }
 
@@ -329,9 +334,14 @@ annotate_era5 <- function(
       }
 
       layer_idx <- (nearest_t - 1L) * n_vars + pos
-      vals <- terra::extract(r, coords_mat, layer = layer_idx)
+      out_vals <- numeric(length(layer_idx))
+      for (li in unique(layer_idx)) {
+        idx <- which(layer_idx == li)
+        ex  <- terra::extract(r[[li]], coords_mat[idx, , drop = FALSE])
+        out_vals[idx] <- ex[, 2]
+      }
       col_nm <- paste0("era5_", var, level)
-      data[[col_nm]] <- vals[, 2]
+      data[[col_nm]] <- out_vals
       if (verbose) message("    + ", col_nm)
     }
   }

@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -46,11 +47,17 @@ try:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     import matplotlib.ticker as mticker
-    from matplotlib.animation import FuncAnimation, PillowWriter, FFMpegWriter
+    from matplotlib.animation import FFMpegWriter
     from matplotlib.lines import Line2D
     from matplotlib.patches import Patch
 except ImportError:
     sys.exit("matplotlib not installed.  Run:  pip install matplotlib")
+
+try:
+    from tqdm.auto import tqdm as _tqdm
+    _HAS_TQDM = True
+except ImportError:
+    _HAS_TQDM = False
 
 try:
     import cartopy.crs as ccrs
@@ -182,11 +189,14 @@ def load_era5_single(era5_dir: Path, date_range: pd.DatetimeIndex,
 
         # cfgrib splits multi-message GRIBs into one dataset per hypercube.
         # Reindex each piece by valid_time, then merge all variables together.
+        # Use a local temp dir for .idx files so cfgrib doesn't re-scan the
+        # entire GRIB from a network share on every open (which hangs).
         xr.set_options(use_new_combine_kwarg_defaults=True)  # silence FutureWarning
+        _idx_dir = tempfile.mkdtemp(prefix="cfgrib_idx_")
         reindexed = []
         for f in files:
             try:
-                for piece in cfgrib.open_datasets(f, indexpath=""):
+                for piece in cfgrib.open_datasets(f, indexpath=_idx_dir):
                     reindexed.append(_cfgrib_reindex(piece))
             except Exception as e:
                 print(f"  [warn] could not open {Path(f).name}: {e}", file=sys.stderr)
@@ -301,12 +311,13 @@ def animate_tracks_weather(
     color_col: str | None = None,   # column to colour by (e.g. "species")
     # ── Track styling ────────────────────────────────────────────────────────
     palette: list[str] | None = None,
-    point_size:      float = 40,
-    path_linewidth:  float = 1.2,
-    path_alpha:      float = 0.85,
+    point_size:       float = 40,
+    path_linewidth:   float = 1.5,
+    path_alpha:       float = 0.85,
+    comet_trail_hours: int  = 72,   # hours of fading trail behind each head
     # ── Weather layers ───────────────────────────────────────────────────────
     show_pressure:     bool = True,
-    show_temperature:  bool = False,
+    show_temperature:  bool = True,
     show_precipitation: bool = False,
     show_wind_barbs:   bool = False,
     # ── Pressure / isobar options ────────────────────────────────────────────
@@ -492,8 +503,10 @@ def animate_tracks_weather(
         subplot_kw={"projection": data_crs},
     )
     fig.patch.set_facecolor(bg)
+    ax.set_facecolor(ocean)
 
-    # Coastlines/borders only (no land fill) so temperature shows through
+    # ── Static map features — added ONCE, never cleared ──────────────────────
+    # No land fill so the temperature heatmap shows through on both land & sea.
     feat_coastline = cfeature.NaturalEarthFeature(
         "physical", "coastline", "50m",
         facecolor="none", edgecolor=border, linewidth=0.7, zorder=6,
@@ -502,8 +515,28 @@ def animate_tracks_weather(
         "cultural", "admin_0_countries", "50m",
         facecolor="none", edgecolor=border, linewidth=0.35, zorder=6,
     )
+    ax.add_feature(feat_coastline)
+    ax.add_feature(feat_borders)
 
-    # ── Static legend handles (colour groups / species) ───────────────────────
+    # Map extent & gridlines set once; autoscale disabled so extent never drifts
+    ax.set_extent([xlim[0], xlim[1], ylim[0], ylim[1]], crs=data_crs)
+    ax.autoscale(False)
+    gl = ax.gridlines(
+        crs=data_crs, draw_labels=True,
+        linewidth=0.3, color=grid_c, linestyle="--", alpha=0.6,
+        x_inline=False, y_inline=False,
+    )
+    gl.top_labels = False
+    gl.right_labels = False
+    gl.xlocator = mticker.MaxNLocator(5)
+    gl.ylocator = mticker.MaxNLocator(5)
+    gl.xlabel_style = {"size": 6, "color": txt}
+    gl.ylabel_style = {"size": 6, "color": txt}
+
+    # Title text object — updated in-place each frame
+    title_obj = ax.set_title("", color=txt, fontsize=9, fontweight="bold", pad=5)
+
+    # ── Static legend handles ─────────────────────────────────────────────────
     def _short(name: str) -> str:
         return _SPECIES_SHORT.get(name, name)
 
@@ -527,155 +560,205 @@ def animate_tracks_weather(
             Patch(facecolor=plt.colormaps[precip_cmap](0.7), alpha=0.8, label="Precip (mm/h)")
         )
 
+    # Legend — bottom-right (swapped with scale bar)
+    ax.legend(
+        handles=legend_handles,
+        loc="lower right",
+        fontsize=6,
+        markerscale=0.85,
+        handlelength=1.5,
+        handleheight=0.9,
+        borderpad=0.5,
+        labelspacing=0.3,
+        framealpha=0.4,
+        labelcolor=txt,
+        facecolor=bg,
+        edgecolor="#555555",
+        zorder=20,
+    )
+
+    # ── Helper: remove per-frame artists without touching static ones ─────────
+    def _remove_artists(artists: list) -> None:
+        for a in artists:
+            try:
+                a.remove()
+            except Exception:
+                # ContourSet in older matplotlib — iterate collections
+                for sub in getattr(a, "collections", []):
+                    try: sub.remove()
+                    except Exception: pass
+                for sub in getattr(a, "labelTexts", []):
+                    try: sub.remove()
+                    except Exception: pass
+        artists.clear()
+
+    # ── ERA5 array extraction helper ──────────────────────────────────────────
+    def _era5_array(sl: xr.Dataset, varname: str) -> np.ndarray | None:
+        """Return 2-D (n_lat × n_lon) numpy array for *varname* from a time slice."""
+        if varname not in sl:
+            return None
+        arr = np.asarray(sl[varname]).squeeze()
+        if arr.ndim != 2:
+            return None
+        # cfgrib returns (latitude, longitude) → shape (n_lat, n_lon) = LON.shape.
+        # If transposed (n_lon, n_lat), fix it.
+        if arr.shape == (len(lons), len(lats)):
+            arr = arr.T
+        return arr
+
+    # ── Comet trail configuration ─────────────────────────────────────────────
+    # Each entry: (hours_back | None-for-all, linewidth_multiplier, alpha)
+    # Segments drawn oldest→newest; path_alpha scales overall brightness.
+    _comet_segs = [
+        (None,                   0.35, 0.10 * path_alpha),  # full ghost history
+        (comet_trail_hours,      0.70, 0.26 * path_alpha),  # comet window, faint
+        (comet_trail_hours // 3, 1.20, 0.60 * path_alpha),  # inner third, medium
+        (comet_trail_hours // 8, 1.80, path_alpha),          # tip, full alpha
+    ]
+
+    # ── Per-frame artists list (cleared at start of each frame) ───────────────
+    _frame_artists: list = []
+
     # ── Per-frame draw ────────────────────────────────────────────────────────
     def draw_frame(fi: int):
-        ax.cla()
-        ax.set_facecolor(ocean)
+        _remove_artists(_frame_artists)
 
         era5_idx = frame_era5_idx[fi]
         t_now = frame_times[fi]
         sl = ds.isel(time=era5_idx)
 
-        # — Temperature heatmap (background, below everything) —
-        if show_temperature and "t2m" in sl:
-            t2m = sl["t2m"].values.squeeze() - 273.15
-            # Ensure (lat, lon) orientation matches meshgrid
-            if t2m.shape == LON.T.shape:
-                t2m = t2m.T
-            ax.pcolormesh(
-                LON, LAT, t2m,
-                cmap=temp_cmap, alpha=temp_alpha,
-                vmin=temp_vmin, vmax=temp_vmax,
-                transform=data_crs, zorder=2,
-                shading="auto",
-            )
-
-        # — Precipitation (above temperature) —
-        if show_precipitation and "tp" in sl:
-            tp_mm = sl["tp"].values.squeeze() * 1000.0
-            if tp_mm.shape == LON.T.shape:
-                tp_mm = tp_mm.T
-            tp_plot = np.where(tp_mm < precip_threshold_mm, np.nan, tp_mm)
-            if not np.all(np.isnan(tp_plot)):
-                ax.contourf(
-                    LON, LAT, tp_plot,
-                    levels=precip_levels, cmap=precip_cmap,
-                    alpha=precip_alpha, transform=data_crs,
-                    zorder=3, extend="max",
+        # — Temperature heatmap (lowest zorder, background) —
+        if show_temperature:
+            t2m = _era5_array(sl, "t2m")
+            if t2m is not None:
+                mesh = ax.pcolormesh(
+                    LON, LAT, t2m - 273.15,
+                    cmap=temp_cmap, alpha=temp_alpha,
+                    vmin=temp_vmin, vmax=temp_vmax,
+                    transform=data_crs, zorder=2,
+                    shading="auto",
                 )
+                _frame_artists.append(mesh)
 
-        # — Coastlines & borders (on top of weather layers) —
-        ax.add_feature(feat_coastline)
-        ax.add_feature(feat_borders)
+        # — Precipitation —
+        if show_precipitation:
+            tp = _era5_array(sl, "tp")
+            if tp is not None:
+                tp_mm = tp * 1000.0
+                tp_plot = np.where(tp_mm < precip_threshold_mm, np.nan, tp_mm)
+                if not np.all(np.isnan(tp_plot)):
+                    cf = ax.contourf(
+                        LON, LAT, tp_plot,
+                        levels=precip_levels, cmap=precip_cmap,
+                        alpha=precip_alpha, transform=data_crs,
+                        zorder=3, extend="max",
+                    )
+                    _frame_artists.append(cf)
 
         # — MSLP isobars —
-        if show_pressure and "msl" in sl and isobar_lvls:
-            msl_hpa = sl["msl"].values.squeeze() / 100.0
-            if msl_hpa.shape == LON.T.shape:
-                msl_hpa = msl_hpa.T
-            cs = ax.contour(
-                LON, LAT, msl_hpa,
-                levels=isobar_lvls, colors=iso_c,
-                linewidths=isobar_linewidth,
-                transform=data_crs, zorder=7,
-            )
-            bold_lvls = [l for l in isobar_lvls if l % isobar_bold_interval == 0]
-            if bold_lvls:
-                ax.contour(
+        if show_pressure and isobar_lvls:
+            msl = _era5_array(sl, "msl")
+            if msl is not None:
+                msl_hpa = msl / 100.0
+                cs = ax.contour(
                     LON, LAT, msl_hpa,
-                    levels=bold_lvls, colors=iso_c,
-                    linewidths=isobar_linewidth * 2.2,
+                    levels=isobar_lvls, colors=iso_c,
+                    linewidths=isobar_linewidth,
                     transform=data_crs, zorder=7,
                 )
-            ax.clabel(cs, fmt="%d", fontsize=isobar_label_size,
-                      colors=iso_c, inline=True, inline_spacing=2)
+                bold_lvls = [lv for lv in isobar_lvls if lv % isobar_bold_interval == 0]
+                if bold_lvls:
+                    cs_bold = ax.contour(
+                        LON, LAT, msl_hpa,
+                        levels=bold_lvls, colors=iso_c,
+                        linewidths=isobar_linewidth * 2.2,
+                        transform=data_crs, zorder=7,
+                    )
+                    _frame_artists.append(cs_bold)
+                ax.clabel(cs, fmt="%d", fontsize=isobar_label_size,
+                          colors=iso_c, inline=True, inline_spacing=2)
+                _frame_artists.append(cs)
 
         # — Wind barbs —
-        if show_wind_barbs and "u10" in sl and "v10" in sl:
-            n = wind_density
-            u10 = sl["u10"].values.squeeze()
-            v10 = sl["v10"].values.squeeze()
-            if u10.shape == LON.T.shape:
-                u10, v10 = u10.T, v10.T
-            ax.barbs(
-                LON[::n, ::n], LAT[::n, ::n],
-                u10[::n, ::n], v10[::n, ::n],
-                length=wind_barb_length, color=wind_barb_color,
-                linewidth=0.5, transform=data_crs, zorder=8,
-                barbcolor=wind_barb_color, flagcolor=wind_barb_color,
-            )
+        if show_wind_barbs:
+            u10 = _era5_array(sl, "u10")
+            v10 = _era5_array(sl, "v10")
+            if u10 is not None and v10 is not None:
+                n = wind_density
+                barbs = ax.barbs(
+                    LON[::n, ::n], LAT[::n, ::n],
+                    u10[::n, ::n], v10[::n, ::n],
+                    length=wind_barb_length, color=wind_barb_color,
+                    linewidth=0.5, transform=data_crs, zorder=8,
+                    barbcolor=wind_barb_color, flagcolor=wind_barb_color,
+                )
+                _frame_artists.append(barbs)
 
-        # — Tracks (cumulative reveal) —
+        # — Comet tracks —
         tracks_so_far = df[df["time"] <= t_now]
         for ind in individuals:
-            ind_df = tracks_so_far[tracks_so_far["individual_id"] == ind].sort_values("time")
+            ind_df = (
+                tracks_so_far[tracks_so_far["individual_id"] == ind]
+                .sort_values("time")
+            )
+            if len(ind_df) == 0:
+                continue
             c = ind_to_color.get(ind, "#ffffff")
-            if len(ind_df) > 1:
-                ax.plot(
-                    ind_df["lon"].values, ind_df["lat"].values,
-                    color=c, linewidth=path_linewidth, alpha=path_alpha,
-                    transform=data_crs, zorder=9, solid_capstyle="round",
-                )
-            if len(ind_df) > 0:
-                last = ind_df.iloc[-1]
-                ax.scatter(
-                    last["lon"], last["lat"],
-                    color=c, s=point_size,
-                    edgecolors="white", linewidths=0.5,
-                    transform=data_crs, zorder=10,
-                )
 
-        # — Map extent & gridlines —
-        ax.set_extent([xlim[0], xlim[1], ylim[0], ylim[1]], crs=data_crs)
-        gl = ax.gridlines(
-            crs=data_crs, draw_labels=True,
-            linewidth=0.3, color=grid_c, linestyle="--", alpha=0.6,
-            x_inline=False, y_inline=False,
-        )
-        gl.top_labels = False
-        gl.right_labels = False
-        gl.xlocator = mticker.MaxNLocator(5)
-        gl.ylocator = mticker.MaxNLocator(5)
-        gl.xlabel_style = {"size": 6, "color": txt}
-        gl.ylabel_style = {"size": 6, "color": txt}
+            for hours_back, lw_mul, alpha in _comet_segs:
+                if hours_back is None:
+                    seg = ind_df
+                else:
+                    t_start = t_now - pd.Timedelta(hours=max(1, hours_back))
+                    seg = ind_df[ind_df["time"] >= t_start]
+                if len(seg) < 2:
+                    continue
+                line, = ax.plot(
+                    seg["lon"].values, seg["lat"].values,
+                    color=c, linewidth=lw_mul * path_linewidth, alpha=alpha,
+                    transform=data_crs, zorder=9,
+                    solid_capstyle="round", solid_joinstyle="round",
+                )
+                _frame_artists.append(line)
 
-        # — Scale bar (bottom-right) —
-        sb_x1 = xlim[1] - 0.8
-        sb_x0 = sb_x1 - scale_deg
-        sb_y  = ylim[0] + 0.5
+            # Head: soft glow halo + bright centre dot
+            last = ind_df.iloc[-1]
+            glow = ax.scatter(
+                last["lon"], last["lat"],
+                s=point_size * 4, color=c, alpha=0.25,
+                edgecolors="none", transform=data_crs, zorder=10,
+            )
+            head = ax.scatter(
+                last["lon"], last["lat"],
+                s=point_size, color=c,
+                edgecolors="white", linewidths=0.6,
+                transform=data_crs, zorder=11,
+            )
+            _frame_artists.extend([glow, head])
+
+        # — Scale bar (bottom-left, swapped with legend) —
+        sb_x0  = xlim[0] + 0.8
+        sb_x1  = sb_x0 + scale_deg
+        sb_y   = ylim[0] + 0.5
         tick_h = (ylim[1] - ylim[0]) * 0.008
-        ax.plot([sb_x0, sb_x1], [sb_y, sb_y],
-                color=txt, linewidth=2, transform=data_crs, zorder=11,
-                solid_capstyle="butt")
+        ln, = ax.plot([sb_x0, sb_x1], [sb_y, sb_y],
+                      color=txt, linewidth=2, transform=data_crs, zorder=12,
+                      solid_capstyle="butt")
+        _frame_artists.append(ln)
         for xk in [sb_x0, sb_x1]:
-            ax.plot([xk, xk], [sb_y - tick_h, sb_y + tick_h],
-                    color=txt, linewidth=2, transform=data_crs, zorder=11)
-        ax.text((sb_x0 + sb_x1) / 2, sb_y + tick_h * 1.8,
-                f"{scale_bar_km} km",
-                ha="center", va="bottom", fontsize=6, color=txt,
-                transform=data_crs, zorder=11)
-
-        # — Title —
-        ax.set_title(
-            title_format.format(time=t_now.to_pydatetime()),
-            color=txt, fontsize=9, fontweight="bold", pad=5,
+            tk, = ax.plot([xk, xk], [sb_y - tick_h, sb_y + tick_h],
+                          color=txt, linewidth=2, transform=data_crs, zorder=12)
+            _frame_artists.append(tk)
+        lbl = ax.text(
+            (sb_x0 + sb_x1) / 2, sb_y + tick_h * 1.8,
+            f"{scale_bar_km} km",
+            ha="center", va="bottom", fontsize=6, color=txt,
+            transform=data_crs, zorder=12,
         )
+        _frame_artists.append(lbl)
 
-        # — Legend (compact) —
-        ax.legend(
-            handles=legend_handles,
-            loc="lower left",
-            fontsize=6,
-            markerscale=0.85,
-            handlelength=1.5,
-            handleheight=0.9,
-            borderpad=0.5,
-            labelspacing=0.3,
-            framealpha=0.4,
-            labelcolor=txt,
-            facecolor=bg,
-            edgecolor="#555555",
-        )
+        # — Update title in-place —
+        title_obj.set_text(title_format.format(time=t_now.to_pydatetime()))
 
         if verbose and (fi % 20 == 0 or fi == n_frames - 1):
             print(f"  Frame {fi + 1:>4d}/{n_frames}: {t_now:%Y-%m-%d %H:%M UTC}")
@@ -684,13 +767,42 @@ def animate_tracks_weather(
     if verbose:
         print(f"Rendering {n_frames} frames …")
 
-    anim = FuncAnimation(fig, draw_frame, frames=n_frames, blit=False)
-
     ext = Path(out_file).suffix.lower()
-    writer = FFMpegWriter(fps=fps, bitrate=2000) if ext == ".mp4" else PillowWriter(fps=fps)
-    anim.save(out_file, writer=writer)
-    plt.close(fig)
+    frame_iter = range(n_frames)
+    if _HAS_TQDM:
+        frame_iter = _tqdm(frame_iter, desc="Animating", unit="frame",
+                           dynamic_ncols=True, leave=True)
 
+    if ext == ".mp4":
+        writer = FFMpegWriter(fps=fps, bitrate=2000)
+        with writer.saving(fig, out_file, dpi=dpi):
+            for fi in frame_iter:
+                draw_frame(fi)
+                writer.grab_frame()
+    else:
+        # GIF: collect PIL images, save in one shot
+        try:
+            from PIL import Image
+        except ImportError:
+            sys.exit("Pillow not installed.  Run:  pip install Pillow")
+        import io as _io
+        frames_pil = []
+        for fi in frame_iter:
+            draw_frame(fi)
+            buf = _io.BytesIO()
+            fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight")
+            buf.seek(0)
+            frames_pil.append(Image.open(buf).copy())
+        frames_pil[0].save(
+            out_file,
+            save_all=True,
+            append_images=frames_pil[1:],
+            loop=0,
+            duration=int(1000 / fps),
+            optimize=False,
+        )
+
+    plt.close(fig)
     if verbose:
         print(f"Saved: {out_file}")
 
