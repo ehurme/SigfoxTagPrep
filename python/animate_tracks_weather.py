@@ -20,8 +20,9 @@ era5_dir — Directory produced by download_era5.py, must contain:
 
 Output
 ------
-.gif  — animated GIF  (requires Pillow: pip install Pillow)
-.mp4  — H.264 video   (requires ffmpeg accessible from PATH)
+.gif  — animated GIF       (requires Pillow: pip install Pillow)
+.mp4  — H.264 video        (requires ffmpeg accessible from PATH)
+.pdf  — multi-page PDF, one page per frame (handy for print/figure review)
 
 Part of the SigfoxTagPrep package:
     https://github.com/ehurme/SigfoxTagPrep
@@ -48,6 +49,7 @@ try:
     import matplotlib.pyplot as plt
     import matplotlib.ticker as mticker
     from matplotlib.animation import FFMpegWriter
+    from matplotlib.backends.backend_pdf import PdfPages
     from matplotlib.lines import Line2D
     from matplotlib.patches import Patch
 except ImportError:
@@ -69,7 +71,7 @@ except ImportError:
 # ── Default colour palettes ───────────────────────────────────────────────────
 
 _DEFAULT_PALETTE = [
-    "#e41a1c", "#377eb8", "#4daf4a", "#ff7f00",
+    "#e41a1c", "#8e44ad", "#4daf4a", "#ff7f00",
     "#984ea3", "#a65628", "#f781bf", "#ffff33",
     "#00e5ff", "#ff6b35", "#b5e61d", "#c8a2c8",
 ]
@@ -155,6 +157,8 @@ def _cfgrib_reindex(piece: xr.Dataset) -> xr.Dataset:
     # assign valid_time as coordinate, drop NaT, sort, deduplicate.
     piece = piece.stack(record=("time", "step"))
     vt = pd.to_datetime(piece["valid_time"].values)
+    # Drop the PandasMultiIndex coords before assigning new values (xarray ≥2024)
+    piece = piece.drop_vars(["record", "time", "step"], errors="ignore")
     piece = piece.assign_coords(record=vt)
     # Drop records with no valid time (NaT)
     ok = ~pd.isnull(vt)
@@ -188,23 +192,60 @@ def load_era5_single(era5_dir: Path, date_range: pd.DatetimeIndex,
             sys.exit("cfgrib not installed.  Run:  pip install cfgrib")
 
         # cfgrib splits multi-message GRIBs into one dataset per hypercube.
-        # Reindex each piece by valid_time, then merge all variables together.
-        # Use a local temp dir for .idx files so cfgrib doesn't re-scan the
-        # entire GRIB from a network share on every open (which hangs).
+        # Strategy:
+        #   1. For each file: merge all its variable-pieces together
+        #      (different variables, same time grid → no conflicts).
+        #   2. Concatenate monthly files along the time axis.
+        # This avoids the compat="override" trap where xarray keeps only the
+        # FIRST file's version of each variable (e.g. March t2m only).
         xr.set_options(use_new_combine_kwarg_defaults=True)  # silence FutureWarning
         _idx_dir = tempfile.mkdtemp(prefix="cfgrib_idx_")
-        reindexed = []
+        file_datasets = []
         for f in files:
+            idx_path = str(Path(_idx_dir) / (Path(f).stem + ".idx"))
+            pieces = []
             try:
-                for piece in cfgrib.open_datasets(f, indexpath=_idx_dir):
-                    reindexed.append(_cfgrib_reindex(piece))
+                for piece in cfgrib.open_datasets(f, indexpath=idx_path):
+                    pieces.append(_cfgrib_reindex(piece))
             except Exception as e:
                 print(f"  [warn] could not open {Path(f).name}: {e}", file=sys.stderr)
+            if not pieces:
+                continue
+            # Merge pieces within one file: each piece is a different variable,
+            # so no conflicts; outer join keeps all valid-time timestamps.
+            try:
+                file_ds = xr.merge(pieces, compat="no_conflicts", join="outer")
+            except Exception as e_merge:
+                print(f"  [warn] within-file merge fell back to override: {e_merge}",
+                      file=sys.stderr)
+                file_ds = xr.merge(pieces, compat="override", join="outer")
+            file_datasets.append(file_ds)
 
-        if not reindexed:
+        if not file_datasets:
             sys.exit("cfgrib returned no datasets from the GRIB files.")
 
-        ds = xr.merge(reindexed, compat="override", join="outer")
+        # Concatenate months along time; fall back to outer merge if variables differ
+        if len(file_datasets) == 1:
+            ds = file_datasets[0]
+        else:
+            try:
+                ds = xr.concat(file_datasets, dim="time")
+            except Exception as e_cat:
+                print(f"  [warn] xr.concat failed ({e_cat}), trying merge fallback",
+                      file=sys.stderr)
+                ds = xr.merge(file_datasets, compat="no_conflicts", join="outer")
+
+        # Drop any residual NaN-only time steps (accumulated-piece boundary hours)
+        _inst_var = next(
+            (v for v in ["t2m", "msl", "u10", "sp"] if v in ds.data_vars), None
+        )
+        if _inst_var and "time" in ds.dims:
+            flat = np.asarray(ds[_inst_var]).reshape(ds.sizes["time"], -1)
+            valid_mask = ~np.all(np.isnan(flat), axis=1)
+            n_dropped = int((~valid_mask).sum())
+            if n_dropped:
+                print(f"  Dropped {n_dropped} NaN-only boundary time steps")
+                ds = ds.isel(time=np.where(valid_mask)[0])
 
     else:
         ds = xr.open_mfdataset(files, combine="by_coords", engine="netcdf4")
@@ -314,12 +355,12 @@ def animate_tracks_weather(
     point_size:       float = 40,
     path_linewidth:   float = 1.5,
     path_alpha:       float = 0.85,
-    comet_trail_hours: int  = 72,   # hours of fading trail behind each head
+    comet_trail_hours: int  = 360,  # hours of fading trail behind each head
     # ── Weather layers ───────────────────────────────────────────────────────
     show_pressure:     bool = True,
     show_temperature:  bool = True,
     show_precipitation: bool = False,
-    show_wind_barbs:   bool = False,
+    show_wind_barbs:   bool = True,
     # ── Pressure / isobar options ────────────────────────────────────────────
     isobar_interval:      int   = 4,
     isobar_bold_interval: int   = 20,
@@ -327,10 +368,11 @@ def animate_tracks_weather(
     isobar_linewidth:     float = 0.7,
     isobar_label_size:    int   = 7,
     # ── Temperature options ──────────────────────────────────────────────────
-    temp_cmap:    str          = "RdYlBu_r",
-    temp_alpha:   float        = 0.75,
-    temp_vmin:    float | None = None,
-    temp_vmax:    float | None = None,
+    temp_cmap:             str          = "RdYlBu_r",
+    temp_alpha:            float        = 0.75,
+    temp_vmin:             float | None = None,
+    temp_vmax:             float | None = None,
+    snap_temp_to_midnight: bool         = True,   # use midnight UTC temp to avoid diurnal flicker
     # ── Precipitation options ────────────────────────────────────────────────
     precip_cmap:           str         = "YlGnBu",
     precip_alpha:          float       = 0.65,
@@ -350,10 +392,11 @@ def animate_tracks_weather(
     dark_theme: bool = True,
     # ── Animation parameters ─────────────────────────────────────────────────
     time_resolution_hours: int = 6,
-    fps:       int = 8,
-    width_px:  int = 1200,
-    height_px: int = 800,
-    dpi:       int = 100,
+    fps:          int = 8,
+    width_px:     int = 1200,
+    height_px:    int = 800,
+    dpi:          int = 100,
+    video_bitrate: int = 6000,  # kbps for .mp4 output (ignored for .gif)
     title_format: str = "{time:%Y-%m-%d %H:%M UTC}",
     verbose: bool = True,
 ) -> str:
@@ -469,6 +512,18 @@ def animate_tracks_weather(
     if verbose:
         print(f"  {n_frames} frames at {time_resolution_hours}h resolution")
 
+    # ── Temperature time index (optionally snapped to nearest midnight) ───────
+    # Snapping avoids the dramatic diurnal flicker in 2-m temperature.
+    if snap_temp_to_midnight and "t2m" in ds.data_vars:
+        frame_era5_temp_idx = []
+        for ft in frame_times:
+            midnight = ft.floor("D")                          # 00:00 same day
+            next_midnight = midnight + pd.Timedelta(days=1)
+            best = next_midnight if abs(ft - next_midnight) < abs(ft - midnight) else midnight
+            frame_era5_temp_idx.append(int(np.argmin(np.abs(era5_times - best))))
+    else:
+        frame_era5_temp_idx = frame_era5_idx
+
     # ── Colour assignment (by color_id, e.g. species) ─────────────────────────
     color_groups = sorted(df["color_id"].unique())
     colors = palette or _DEFAULT_PALETTE
@@ -518,9 +573,10 @@ def animate_tracks_weather(
     ax.add_feature(feat_coastline)
     ax.add_feature(feat_borders)
 
-    # Map extent & gridlines set once; autoscale disabled so extent never drifts
+    # Set initial extent so static features render correctly; extent is also
+    # re-applied inside draw_frame so Cartopy recalculates clip paths after
+    # adding each frame's dynamic artists (pcolormesh / contour).
     ax.set_extent([xlim[0], xlim[1], ylim[0], ylim[1]], crs=data_crs)
-    ax.autoscale(False)
     gl = ax.gridlines(
         crs=data_crs, draw_labels=True,
         linewidth=0.3, color=grid_c, linestyle="--", alpha=0.6,
@@ -561,7 +617,7 @@ def animate_tracks_weather(
         )
 
     # Legend — bottom-right (swapped with scale bar)
-    ax.legend(
+    _leg = ax.legend(
         handles=legend_handles,
         loc="lower right",
         fontsize=6,
@@ -574,8 +630,8 @@ def animate_tracks_weather(
         labelcolor=txt,
         facecolor=bg,
         edgecolor="#555555",
-        zorder=20,
     )
+    _leg.set_zorder(20)
 
     # ── Helper: remove per-frame artists without touching static ones ─────────
     def _remove_artists(artists: list) -> None:
@@ -592,6 +648,13 @@ def animate_tracks_weather(
                     except Exception: pass
         artists.clear()
 
+    # Precompute temperature contour levels for consistent colouring across frames
+    # temp_vmin/vmax are guaranteed non-None here when show_temperature=True
+    # (computed in the block above); fall back to 20 levels if somehow still None.
+    _temp_vmin = temp_vmin if temp_vmin is not None else -20.0
+    _temp_vmax = temp_vmax if temp_vmax is not None else  40.0
+    _temp_levels = np.linspace(_temp_vmin, _temp_vmax, 20)
+
     # ── ERA5 array extraction helper ──────────────────────────────────────────
     def _era5_array(sl: xr.Dataset, varname: str) -> np.ndarray | None:
         """Return 2-D (n_lat × n_lon) numpy array for *varname* from a time slice."""
@@ -599,6 +662,9 @@ def animate_tracks_weather(
             return None
         arr = np.asarray(sl[varname]).squeeze()
         if arr.ndim != 2:
+            if verbose:
+                print(f"  [warn] {varname} has ndim={arr.ndim} after squeeze "
+                      f"(shape={arr.shape}) — skipping", file=sys.stderr)
             return None
         # cfgrib returns (latitude, longitude) → shape (n_lat, n_lon) = LON.shape.
         # If transposed (n_lon, n_lat), fix it.
@@ -626,19 +692,24 @@ def animate_tracks_weather(
         era5_idx = frame_era5_idx[fi]
         t_now = frame_times[fi]
         sl = ds.isel(time=era5_idx)
+        # Temperature uses its own (possibly midnight-snapped) time slice
+        sl_temp = ds.isel(time=frame_era5_temp_idx[fi])
 
-        # — Temperature heatmap (lowest zorder, background) —
+        # — Temperature heatmap background (contourf fills entire domain) —
         if show_temperature:
-            t2m = _era5_array(sl, "t2m")
+            t2m = _era5_array(sl_temp, "t2m")
             if t2m is not None:
-                mesh = ax.pcolormesh(
+                cf_t = ax.contourf(
                     LON, LAT, t2m - 273.15,
+                    levels=_temp_levels,
                     cmap=temp_cmap, alpha=temp_alpha,
-                    vmin=temp_vmin, vmax=temp_vmax,
                     transform=data_crs, zorder=2,
-                    shading="auto",
+                    extend="both",
                 )
-                _frame_artists.append(mesh)
+                _frame_artists.append(cf_t)
+                if fi == 0 and verbose:
+                    print(f"  [dbg] t2m shape={t2m.shape} min={np.nanmin(t2m-273.15):.1f} "
+                          f"max={np.nanmax(t2m-273.15):.1f} °C  levels={_temp_levels[[0,-1]]}")
 
         # — Precipitation —
         if show_precipitation:
@@ -658,6 +729,8 @@ def animate_tracks_weather(
         # — MSLP isobars —
         if show_pressure and isobar_lvls:
             msl = _era5_array(sl, "msl")
+            if fi == 0 and verbose:
+                print(f"  [dbg] msl={'None' if msl is None else f'shape={msl.shape} range={np.nanmin(msl/100):.0f}–{np.nanmax(msl/100):.0f} hPa'}")
             if msl is not None:
                 msl_hpa = msl / 100.0
                 cs = ax.contour(
@@ -774,11 +847,19 @@ def animate_tracks_weather(
                            dynamic_ncols=True, leave=True)
 
     if ext == ".mp4":
-        writer = FFMpegWriter(fps=fps, bitrate=2000)
+        writer = FFMpegWriter(fps=fps, bitrate=video_bitrate,
+                              codec="libx264",
+                              extra_args=["-pix_fmt", "yuv420p"])
         with writer.saving(fig, out_file, dpi=dpi):
             for fi in frame_iter:
                 draw_frame(fi)
                 writer.grab_frame()
+    elif ext == ".pdf":
+        # Multi-page PDF: one page per frame (handy for print/figure review)
+        with PdfPages(out_file) as pdf:
+            for fi in frame_iter:
+                draw_frame(fi)
+                pdf.savefig(fig, dpi=dpi, bbox_inches="tight")
     else:
         # GIF: collect PIL images, save in one shot
         try:
@@ -821,7 +902,7 @@ def main():
     )
     ap.add_argument("tracks",   help="CSV or Parquet file of animal fixes")
     ap.add_argument("era5_dir", help="ERA5 data directory (contains single_levels/)")
-    ap.add_argument("out_file", help="Output file (.gif or .mp4)")
+    ap.add_argument("out_file", help="Output file (.gif, .mp4, or .pdf)")
 
     ap.add_argument("--time-col",  default="timestamp")
     ap.add_argument("--lon-col",   default="location_long")

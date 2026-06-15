@@ -111,9 +111,17 @@ find_complete_nights <- function(
   }
 
   # ── Per-individual, per-consecutive-date-pair assessment ─────────────────
-  results <- list()
+  results  <- list()
+  indivs   <- unique(df$.individual)
 
-  for (indiv in unique(df$.individual)) {
+  if (verbose) {
+    cat("  Scanning individuals: ")
+    pb <- utils::txtProgressBar(min = 0, max = length(indivs), style = 3)
+  }
+
+  for (i_ind in seq_along(indivs)) {
+    indiv <- indivs[i_ind]
+    if (verbose) utils::setTxtProgressBar(pb, i_ind)
     idf <- df %>% filter(.individual == indiv) %>% arrange(timestamp)
 
     dates <- sort(unique(idf$.date))
@@ -182,6 +190,8 @@ find_complete_nights <- function(
       )
     }
   }
+
+  if (verbose) { close(pb); cat("\n") }
 
   if (length(results) == 0) {
     if (verbose) message("No qualifying nights found.")

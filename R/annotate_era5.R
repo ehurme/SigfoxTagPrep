@@ -255,20 +255,25 @@ annotate_era5 <- function(
             round(max(gaps_h[bad]), 1), "h)")
   }
 
+  coords_xy <- coords_mat[, 1:2, drop = FALSE]
+
   for (col_nm in names(var_positions)) {
     pos <- var_positions[[col_nm]]
     if (pos > n_vars) next
 
     layer_idx <- (nearest_t - 1L) * n_vars + pos
-    out_vals <- numeric(length(layer_idx))
+    out_vals  <- rep(NA_real_, length(layer_idx))
     for (li in unique(layer_idx)) {
       idx <- which(layer_idx == li)
-      ex  <- terra::extract(r[[li]], coords_mat[idx, , drop = FALSE])
-      out_vals[idx] <- ex[, 2]
+      ex  <- terra::extract(r[[li]], coords_xy[idx, , drop = FALSE])
+      if (ncol(ex) >= 1) out_vals[idx] <- ex[[1]]
     }
     data[[col_nm]] <- out_vals
     if (verbose) message("    + ", col_nm)
   }
+
+  rm(r)
+  gc(verbose = FALSE)
 
   data
 }
@@ -280,7 +285,14 @@ annotate_era5 <- function(
                                     coords_mat, pressure_levels,
                                     max_gap, verbose) {
 
+  coords_xy <- coords_mat[, 1:2, drop = FALSE]
   reported_gap <- FALSE
+
+  if (verbose) {
+    cat("  Pressure levels: ")
+    pb <- utils::txtProgressBar(min = 0, max = length(pressure_levels), style = 3)
+    pb_i <- 0L
+  }
 
   for (level in pressure_levels) {
     pattern <- paste0("era5_wind_", level, "hPa_.*\\.grib$")
@@ -321,8 +333,12 @@ annotate_era5 <- function(
     }
 
     # Find u and v layer positions by name matching
-    u_pos <- grep("(?i)\\bu.{0,10}wind|u.{0,5}component", layer_names, perl = TRUE)[1]
-    v_pos <- grep("(?i)\\bv.{0,10}wind|v.{0,5}component", layer_names, perl = TRUE)[1]
+    # ERA5 GRIB short names are often bare "u" / "v"; NetCDF uses "u_component_of_wind"
+    u_pos <- grep("(?i)(^u$|U-velocity|U_velocity|\\bu.{0,10}wind|u.{0,5}component)", layer_names, perl = TRUE)[1]
+    v_pos <- grep("(?i)(^v$|V-velocity|V_velocity|\\bv.{0,10}wind|v.{0,5}component)", layer_names, perl = TRUE)[1]
+
+    if (verbose && (is.na(u_pos) || is.na(v_pos)))
+      message("    [debug] layer names: ", paste(layer_names, collapse = ", "))
 
     for (var_info in list(list(pos = u_pos, nm = "u"),
                           list(pos = v_pos, nm = "v"))) {
@@ -334,17 +350,24 @@ annotate_era5 <- function(
       }
 
       layer_idx <- (nearest_t - 1L) * n_vars + pos
-      out_vals <- numeric(length(layer_idx))
+      out_vals  <- rep(NA_real_, length(layer_idx))
       for (li in unique(layer_idx)) {
         idx <- which(layer_idx == li)
-        ex  <- terra::extract(r[[li]], coords_mat[idx, , drop = FALSE])
-        out_vals[idx] <- ex[, 2]
+        ex  <- terra::extract(r[[li]], coords_xy[idx, , drop = FALSE])
+        if (ncol(ex) >= 1) out_vals[idx] <- ex[[1]]
       }
       col_nm <- paste0("era5_", var, level)
       data[[col_nm]] <- out_vals
       if (verbose) message("    + ", col_nm)
     }
+
+    rm(r)
+    gc(verbose = FALSE)
+
+    if (verbose) { pb_i <- pb_i + 1L; utils::setTxtProgressBar(pb, pb_i) }
   }
+
+  if (verbose) { close(pb); cat("\n") }
 
   data
 }
