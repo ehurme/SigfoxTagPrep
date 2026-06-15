@@ -387,6 +387,7 @@ import_nanofox_movebank <- function(
         any_idx
       }
       start_row <- sf::st_as_sf(x[base_idx, , drop = FALSE])
+      class(start_row) <- class(start_row)[!class(start_row) %in% "move2"]
 
       # Override the deployment-specific fields
       start_row$timestamp <- dep_ts
