@@ -90,15 +90,27 @@ scan_migration_nights <- function(
     indiv_id <- as.character(night$individual_local_identifier)
     t_arr    <- night$timestamp
 
-    # Departure = last fix from the calendar day BEFORE t_arr.
-    # Using as.Date() < as.Date(t_arr) ensures we step back at least one full
-    # day, which is necessary for fine-scale tags (e.g. NanoFox finescale) that
-    # have multiple fixes per day — otherwise prev_row would be a same-morning
-    # fix on the arrival day, not the evening before migration.
+    # Departure = fix closest to solar noon on the calendar day BEFORE t_arr.
+    # slice_max(timestamp) would grab the last fix of that day, which for tags
+    # with intra-night location fixes (NanoFox, TinyFox) is a nighttime fix
+    # already into the migration — placing the departure vline in the middle of
+    # the flight. Anchoring to noon captures the pre-departure roost state.
+    dep_date       <- as.Date(t_arr) - 1L
+    t_noon_dep_ref <- as.POSIXct(paste0(dep_date, " 12:00:00"), tz = "UTC")
     prev_row <- loc_df %>%
       filter(individual_local_identifier == indiv_id,
-             as.Date(timestamp) < as.Date(t_arr)) %>%
-      slice_max(timestamp, n = 1)
+             as.Date(timestamp) == dep_date) %>%
+      mutate(.noon_diff = abs(as.numeric(
+        difftime(timestamp, t_noon_dep_ref, units = "secs")))) %>%
+      slice_min(.noon_diff, n = 1, with_ties = FALSE) %>%
+      select(-.noon_diff)
+    # Fallback: no fix on dep_date (gap in data) → reach back to most recent prior fix
+    if (nrow(prev_row) == 0) {
+      prev_row <- loc_df %>%
+        filter(individual_local_identifier == indiv_id,
+               as.Date(timestamp) < as.Date(t_arr)) %>%
+        slice_max(timestamp, n = 1)
+    }
 
     if (nrow(prev_row) == 0) {
       message("Skipping ", indiv_id, " ", as.Date(t_arr), ": no prior location")

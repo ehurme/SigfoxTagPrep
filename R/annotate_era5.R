@@ -117,6 +117,7 @@ annotate_era5 <- function(
   require(terra)
 
   # ── Validate ──────────────────────────────────────────────────────────────
+  era5_dir <- gsub("\\\\", "/", era5_dir)   # UNC paths need forward slashes for GDAL
   stopifnot(inherits(data, "sf"))
   stopifnot(dir.exists(era5_dir))
   n <- nrow(data)
@@ -233,6 +234,7 @@ annotate_era5 <- function(
     era5_cbh   = 11L  # Cloud base height (listed as "undefined")
   )
 
+  grib_files <- gsub("\\\\", "/", grib_files)
   r <- tryCatch(rast(grib_files), error = function(e) NULL)
   if (is.null(r)) return(data)
 
@@ -265,8 +267,14 @@ annotate_era5 <- function(
     out_vals  <- rep(NA_real_, length(layer_idx))
     for (li in unique(layer_idx)) {
       idx <- which(layer_idx == li)
-      ex  <- terra::extract(r[[li]], coords_xy[idx, , drop = FALSE])
-      if (ncol(ex) >= 1) out_vals[idx] <- ex[[1]]
+      ex  <- tryCatch(
+        terra::extract(r[[li]], coords_xy[idx, , drop = FALSE]),
+        error = function(e) {
+          if (verbose) message("    [warn] layer ", li, " unreadable — skipping (", conditionMessage(e), ")")
+          NULL
+        }
+      )
+      if (!is.null(ex) && ncol(ex) >= 1) out_vals[idx] <- ex[[1]]
     }
     data[[col_nm]] <- out_vals
     if (verbose) message("    + ", col_nm)
@@ -296,7 +304,7 @@ annotate_era5 <- function(
 
   for (level in pressure_levels) {
     pattern <- paste0("era5_wind_", level, "hPa_.*\\.grib$")
-    level_files <- sort(list.files(pressure_dir, pattern, full.names = TRUE))
+    level_files <- gsub("\\\\", "/", sort(list.files(pressure_dir, pattern, full.names = TRUE)))
 
     if (length(level_files) == 0) {
       if (verbose) message("    [skip] No files for ", level, " hPa")
@@ -353,8 +361,14 @@ annotate_era5 <- function(
       out_vals  <- rep(NA_real_, length(layer_idx))
       for (li in unique(layer_idx)) {
         idx <- which(layer_idx == li)
-        ex  <- terra::extract(r[[li]], coords_xy[idx, , drop = FALSE])
-        if (ncol(ex) >= 1) out_vals[idx] <- ex[[1]]
+        ex  <- tryCatch(
+          terra::extract(r[[li]], coords_xy[idx, , drop = FALSE]),
+          error = function(e) {
+            if (verbose) message("    [warn] layer ", li, " unreadable — skipping (", conditionMessage(e), ")")
+            NULL
+          }
+        )
+        if (!is.null(ex) && ncol(ex) >= 1) out_vals[idx] <- ex[[1]]
       }
       col_nm <- paste0("era5_", var, level)
       data[[col_nm]] <- out_vals
@@ -459,9 +473,12 @@ annotate_era5 <- function(
     avail    <- ws_cols %in% names(data)
 
     if (any(avail)) {
-      ws_mat  <- as.matrix(data[, ws_cols[avail],  drop = FALSE])
-      cs_mat  <- as.matrix(data[, cs_cols[avail],  drop = FALSE])
-      spd_mat <- as.matrix(data[, spd_cols[avail], drop = FALSE])
+      # Drop sf geometry before as.matrix(): the sticky geometry column would
+      # otherwise coerce the entire matrix to character.
+      .data_df <- sf::st_drop_geometry(data)
+      ws_mat  <- as.matrix(.data_df[, ws_cols[avail],  drop = FALSE])
+      cs_mat  <- as.matrix(.data_df[, cs_cols[avail],  drop = FALSE])
+      spd_mat <- as.matrix(.data_df[, spd_cols[avail], drop = FALSE])
 
       matched_col <- match(nearest_level, pressure_levels[avail])
       idx <- cbind(seq_len(n), matched_col)
