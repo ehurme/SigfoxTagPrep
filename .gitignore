@@ -41,3 +41,4 @@ migration_hmm.stan
 .positai
 # Animation outputs
 *.gif
+*.mp4

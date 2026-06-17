@@ -387,6 +387,7 @@ import_nanofox_movebank <- function(
         any_idx
       }
       start_row <- sf::st_as_sf(x[base_idx, , drop = FALSE])
+      class(start_row) <- class(start_row)[!class(start_row) %in% "move2"]
 
       # Override the deployment-specific fields
       start_row$timestamp <- dep_ts
@@ -402,6 +403,19 @@ import_nanofox_movebank <- function(
         ),
         error = function(e) NULL # geometry assignment failed — keep original
       )
+
+      # After assigning start-row geometry, refresh lon/lat columns
+      if (all(c("lon", "lat") %in% names(start_row))) {
+        xy <- sf::st_coordinates(start_row)
+
+        if (nrow(xy) > 0) {
+          start_row$lon <- as.numeric(xy[1, "X"])
+          start_row$lat <- as.numeric(xy[1, "Y"])
+        } else {
+          start_row$lon <- NA_real_
+          start_row$lat <- NA_real_
+        }
+      }
 
       # Ensure deployment_id is on the start row (may have been promoted from track data)
       if (has_dep_id && "deployment_id" %in% names(start_row)) {
@@ -444,7 +458,11 @@ import_nanofox_movebank <- function(
     class(x_plain) <- class(x_plain)[!class(x_plain) %in% "move2"]
 
     combined <- dplyr::bind_rows(new_rows, x_plain) %>%
-      dplyr::arrange(.data[[track_col]], .data$timestamp)
+    dplyr::arrange(.data[[track_col]], .data$timestamp)
+
+    xy <- sf::st_coordinates(combined)
+    combined$lon <- as.numeric(xy[, "X"])
+    combined$lat <- as.numeric(xy[, "Y"])
 
     class(combined) <- c("move2", class(combined))
     attr(combined, "track_id_column") <- track_col
