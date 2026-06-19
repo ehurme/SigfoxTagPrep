@@ -197,6 +197,21 @@ annotate_era5 <- function(
 }
 
 
+# Haversine bearing (degrees, 0–360) from (lon1, lat1) to (lon2, lat2).
+# Returns NA wherever either endpoint is missing.
+.era5_bearing <- function(lon1, lat1, lon2, lat2) {
+  to_rad <- pi / 180
+  d_lon  <- (lon2 - lon1) * to_rad
+  lat1r  <- lat1 * to_rad
+  lat2r  <- lat2 * to_rad
+  y   <- sin(d_lon) * cos(lat2r)
+  x   <- cos(lat1r) * sin(lat2r) - sin(lat1r) * cos(lat2r) * cos(d_lon)
+  out <- (atan2(y, x) / to_rad + 360) %% 360
+  out[is.na(lon1) | is.na(lat1) | is.na(lon2) | is.na(lat2)] <- NA_real_
+  out
+}
+
+
 .era5_nearest_layer <- function(raster_times, obs_times, max_gap_h, verbose) {
   obs_num  <- as.numeric(obs_times)
   rast_num <- as.numeric(raster_times)
@@ -394,31 +409,61 @@ annotate_era5 <- function(
 
   n <- nrow(data)
 
-  # ── Heading (degrees, lagged to preceding segment) ─────────────────────
-  if (inherits(data, "move2")) {
-    heading_deg <- as.numeric(mt_azimuth(data))
-    tid_col <- mt_track_id_column(data)
-    data$.heading_deg <- heading_deg
-    data <- data %>%
-      dplyr::group_by(dplyr::across(dplyr::all_of(tid_col))) %>%
-      dplyr::mutate(.heading_deg = dplyr::lag(.heading_deg)) %>%
-      dplyr::ungroup()
-    heading <- data$.heading_deg
+  # ── Heading (bearing of preceding segment, degrees 0–360) ──────────────
+  # Prefer lon_prev/lat_prev → lon/lat (daily solar-noon data): direct
+  # bearing with no lag needed and robust to empty geometries.
+  # Falls back to mt_azimuth() on the non-empty subset only.
+  coords <- sf::st_coordinates(data)
+  lon    <- coords[, 1]
+  lat    <- coords[, 2]
 
-    # Ground speed for airspeed calc (m/s → m/h not needed; wind_support is m/s)
-    ground_speed <- tryCatch(
-      as.numeric(mt_speed(data)),
-      error = function(e) rep(NA_real_, n)
+  if (all(c("lon_prev", "lat_prev") %in% names(data))) {
+    heading <- .era5_bearing(
+      as.numeric(data$lon_prev), as.numeric(data$lat_prev), lon, lat
     )
-    data$.gs <- ground_speed
-    data <- data %>%
-      dplyr::group_by(dplyr::across(dplyr::all_of(tid_col))) %>%
-      dplyr::mutate(.gs = dplyr::lag(.gs)) %>%
-      dplyr::ungroup()
-    ground_speed <- data$.gs
-    data$.gs <- NULL
+  } else if (inherits(data, "move2")) {
+    non_empty <- !sf::st_is_empty(data)
+    heading   <- rep(NA_real_, n)
+    if (any(non_empty)) {
+      sub    <- data[non_empty, ]
+      tid_col <- mt_track_id_column(sub)
+      az <- tryCatch(as.numeric(mt_azimuth(sub)),
+                     error = function(e) rep(NA_real_, sum(non_empty)))
+      sub$.az <- az
+      sub <- sub %>%
+        dplyr::group_by(dplyr::across(dplyr::all_of(tid_col))) %>%
+        dplyr::mutate(.az = dplyr::lag(.az)) %>%
+        dplyr::ungroup()
+      heading[non_empty] <- sub$.az
+    }
   } else {
     heading <- rep(NA_real_, n)
+  }
+
+  # ── Ground speed (m/s, preceding segment) ──────────────────────────────
+  # Prefer dist_prev (km) / diff_date (days): directly encodes the overnight
+  # displacement without being contaminated by empty-point gaps.
+  if (all(c("dist_prev", "diff_date") %in% names(data))) {
+    dist_m       <- as.numeric(data$dist_prev) * 1000   # km → m
+    time_s       <- as.numeric(data$diff_date) * 86400  # days → s
+    ground_speed <- ifelse(!is.na(dist_m) & time_s > 0,
+                           dist_m / time_s, NA_real_)
+  } else if (inherits(data, "move2")) {
+    non_empty    <- !sf::st_is_empty(data)
+    ground_speed <- rep(NA_real_, n)
+    if (any(non_empty)) {
+      sub    <- data[non_empty, ]
+      tid_col <- mt_track_id_column(sub)
+      gs <- tryCatch(as.numeric(mt_speed(sub)),
+                     error = function(e) rep(NA_real_, sum(non_empty)))
+      sub$.gs <- gs
+      sub <- sub %>%
+        dplyr::group_by(dplyr::across(dplyr::all_of(tid_col))) %>%
+        dplyr::mutate(.gs = dplyr::lag(.gs)) %>%
+        dplyr::ungroup()
+      ground_speed[non_empty] <- sub$.gs
+    }
+  } else {
     ground_speed <- rep(NA_real_, n)
   }
 
@@ -502,7 +547,6 @@ annotate_era5 <- function(
     }
   }
 
-  data$.heading_deg <- NULL
   data
 }
 

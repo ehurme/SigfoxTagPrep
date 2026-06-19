@@ -35,10 +35,14 @@ po/*~
 rsconnect/
 .Rproj.user
 .Rdata
+.rds
+.RDS
 .DS_Store
 .quarto
 migration_hmm.stan
 .positai
 # Animation outputs
 *.gif
+*/*.gif
 *.mp4
+*/*.mp4
