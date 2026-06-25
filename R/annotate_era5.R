@@ -250,21 +250,39 @@ annotate_era5 <- function(
   )
 
   grib_files <- gsub("\\\\", "/", grib_files)
-  r <- tryCatch(rast(grib_files), error = function(e) NULL)
-  if (is.null(r)) return(data)
+  coords_xy  <- coords_mat[, 1:2, drop = FALSE]
 
-  rt <- time(r)
-  if (is.null(rt) || length(rt) == 0) return(data)
+  # ── Step 1: metadata scan — one open per file, keep only timestamps ─────────
+  if (verbose) message("  Scanning ", length(grib_files), " single-level file(s) ...")
+  catalog <- vector("list", length(grib_files))
+  for (fi in seq_along(grib_files)) {
+    r_tmp <- tryCatch(rast(grib_files[fi]), error = function(e) NULL)
+    if (is.null(r_tmp)) next
+    rt <- time(r_tmp)
+    rm(r_tmp); gc(verbose = FALSE)
+    if (length(rt) == 0) next
+    n_v <- sum(rt == rt[1])
+    ut  <- rt[seq(1L, length(rt), by = n_v)]
+    catalog[[fi]] <- list(file = grib_files[fi], n_vars = n_v, unique_times = ut)
+  }
+  catalog <- Filter(Negate(is.null), catalog)
+  if (length(catalog) == 0) return(data)
 
-  # GRIB layers are interleaved: [var1_t1, var2_t1, ..., varN_t1, var1_t2, ...]
-  n_vars       <- sum(rt == rt[1])
-  unique_times <- rt[seq(1L, length(rt), by = n_vars)]
+  # ── Step 2: build global time index across all files ─────────────────────────
+  all_times_num      <- as.numeric(do.call(c, lapply(catalog, `[[`, "unique_times")))
+  file_for_global    <- rep(seq_along(catalog),
+                            vapply(catalog, function(x) length(x$unique_times), integer(1)))
+  local_t_for_global <- unlist(lapply(catalog, function(x) seq_along(x$unique_times)),
+                                use.names = FALSE)
 
-  obs_num  <- as.numeric(timestamps)
-  time_num <- as.numeric(unique_times)
-  nearest_t <- vapply(obs_num, function(t) which.min(abs(time_num - t)), integer(1))
+  obs_num    <- as.numeric(timestamps)
+  nearest_gi <- vapply(obs_num, function(t) which.min(abs(all_times_num - t)), integer(1))
 
-  gaps_h <- abs(time_num[nearest_t] - obs_num) / 3600
+  obs_file_idx <- file_for_global[nearest_gi]
+  obs_time_idx <- local_t_for_global[nearest_gi]   # 1-based within that file
+
+  # ── Step 3: time-gap warning ──────────────────────────────────────────────────
+  gaps_h <- abs(all_times_num[nearest_gi] - obs_num) / 3600
   bad <- which(gaps_h > max_gap)
   if (length(bad) > 0 && verbose) {
     message("    [warn] ", length(bad), " fixes >", max_gap,
@@ -272,31 +290,51 @@ annotate_era5 <- function(
             round(max(gaps_h[bad]), 1), "h)")
   }
 
-  coords_xy <- coords_mat[, 1:2, drop = FALSE]
+  # ── Step 4: extract one file at a time ───────────────────────────────────────
+  for (fi in seq_along(catalog)) {
+    obs_mask <- obs_file_idx == fi
+    if (!any(obs_mask)) next
 
-  for (col_nm in names(var_positions)) {
-    pos <- var_positions[[col_nm]]
-    if (pos > n_vars) next
+    cat_entry <- catalog[[fi]]
+    r <- tryCatch(rast(cat_entry$file), error = function(e) {
+      if (verbose) message("    [skip] Could not load: ", basename(cat_entry$file))
+      NULL
+    })
+    if (is.null(r)) next
 
-    layer_idx <- (nearest_t - 1L) * n_vars + pos
-    out_vals  <- rep(NA_real_, length(layer_idx))
-    for (li in unique(layer_idx)) {
-      idx <- which(layer_idx == li)
-      ex  <- tryCatch(
-        terra::extract(r[[li]], coords_xy[idx, , drop = FALSE]),
-        error = function(e) {
-          if (verbose) message("    [warn] layer ", li, " unreadable — skipping (", conditionMessage(e), ")")
-          NULL
-        }
-      )
-      if (!is.null(ex) && ncol(ex) >= 1) out_vals[idx] <- ex[[1]]
+    n_vars     <- cat_entry$n_vars
+    obs_here   <- which(obs_mask)
+    t_idx_here <- obs_time_idx[obs_mask]
+
+    for (col_nm in names(var_positions)) {
+      pos <- var_positions[[col_nm]]
+      if (pos > n_vars) next
+      if (!col_nm %in% names(data)) data[[col_nm]] <- rep(NA_real_, nrow(data))
+
+      layer_idx <- (t_idx_here - 1L) * n_vars + pos
+      for (li in unique(layer_idx)) {
+        rows_li <- obs_here[layer_idx == li]
+        ex <- tryCatch(
+          terra::extract(r[[li]], coords_xy[rows_li, , drop = FALSE]),
+          error = function(e) {
+            if (verbose) message("    [warn] layer ", li, " unreadable — skipping (", conditionMessage(e), ")")
+            NULL
+          }
+        )
+        if (!is.null(ex) && ncol(ex) >= 1) data[[col_nm]][rows_li] <- ex[[1]]
+      }
     }
-    data[[col_nm]] <- out_vals
-    if (verbose) message("    + ", col_nm)
+
+    if (verbose) message("    [single] file ", fi, "/", length(catalog), ": ",
+                         basename(cat_entry$file), " (", sum(obs_mask), " obs)")
+    rm(r); gc(verbose = FALSE)
   }
 
-  rm(r)
-  gc(verbose = FALSE)
+  if (verbose) {
+    for (col_nm in names(var_positions)) {
+      if (col_nm %in% names(data)) message("    + ", col_nm)
+    }
+  }
 
   data
 }
@@ -308,44 +346,55 @@ annotate_era5 <- function(
                                     coords_mat, pressure_levels,
                                     max_gap, verbose) {
 
-  coords_xy <- coords_mat[, 1:2, drop = FALSE]
+  coords_xy    <- coords_mat[, 1:2, drop = FALSE]
+  obs_num      <- as.numeric(timestamps)
   reported_gap <- FALSE
 
-  if (verbose) {
-    cat("  Pressure levels: ")
-    pb <- utils::txtProgressBar(min = 0, max = length(pressure_levels), style = 3)
-    pb_i <- 0L
-  }
+  if (verbose) message("  Pressure levels: ", paste(pressure_levels, collapse = ", "), " hPa")
 
   for (level in pressure_levels) {
-    pattern <- paste0("era5_wind_", level, "hPa_.*\\.grib$")
-    level_files <- gsub("\\\\", "/", sort(list.files(pressure_dir, pattern, full.names = TRUE)))
+    pattern     <- paste0("era5_wind_", level, "hPa_.*\\.grib$")
+    level_files <- gsub("\\\\", "/",
+                        sort(list.files(pressure_dir, pattern, full.names = TRUE)))
 
     if (length(level_files) == 0) {
       if (verbose) message("    [skip] No files for ", level, " hPa")
       next
     }
 
-    r <- tryCatch(rast(level_files), error = function(e) NULL)
-    if (is.null(r)) {
-      if (verbose) message("    [skip] Could not load ", level, " hPa")
+    # ── Metadata scan for this level ───────────────────────────────────────────
+    catalog <- vector("list", length(level_files))
+    for (fi in seq_along(level_files)) {
+      r_tmp <- tryCatch(rast(level_files[fi]), error = function(e) NULL)
+      if (is.null(r_tmp)) next
+      rt  <- time(r_tmp)
+      lnm <- names(r_tmp)
+      rm(r_tmp); gc(verbose = FALSE)
+      if (length(rt) == 0) next
+      n_v <- sum(rt == rt[1])
+      ut  <- rt[seq(1L, length(rt), by = n_v)]
+      catalog[[fi]] <- list(file = level_files[fi], n_vars = n_v,
+                             unique_times = ut, layer_names = lnm[seq_len(n_v)])
+    }
+    catalog <- Filter(Negate(is.null), catalog)
+    if (length(catalog) == 0) {
+      if (verbose) message("    [skip] Could not read any files for ", level, " hPa")
       next
     }
 
-    rt <- time(r)
-    if (is.null(rt) || length(rt) == 0) next
+    # ── Global time index for this level ───────────────────────────────────────
+    all_times_num      <- as.numeric(do.call(c, lapply(catalog, `[[`, "unique_times")))
+    file_for_global    <- rep(seq_along(catalog),
+                              vapply(catalog, function(x) length(x$unique_times), integer(1)))
+    local_t_for_global <- unlist(lapply(catalog, function(x) seq_along(x$unique_times)),
+                                  use.names = FALSE)
 
-    # GRIB interleaved structure: n_vars layers per time step
-    n_vars       <- sum(rt == rt[1])
-    unique_times <- rt[seq(1L, length(rt), by = n_vars)]
-    layer_names  <- names(r)[seq_len(n_vars)]
-
-    obs_num  <- as.numeric(timestamps)
-    time_num <- as.numeric(unique_times)
-    nearest_t <- vapply(obs_num, function(t) which.min(abs(time_num - t)), integer(1))
+    nearest_gi   <- vapply(obs_num, function(t) which.min(abs(all_times_num - t)), integer(1))
+    obs_file_idx <- file_for_global[nearest_gi]
+    obs_time_idx <- local_t_for_global[nearest_gi]
 
     if (!reported_gap) {
-      gaps_h <- abs(time_num[nearest_t] - obs_num) / 3600
+      gaps_h <- abs(all_times_num[nearest_gi] - obs_num) / 3600
       bad <- which(gaps_h > max_gap)
       if (length(bad) > 0 && verbose) {
         message("    [warn] ", length(bad), " fixes >", max_gap,
@@ -355,48 +404,69 @@ annotate_era5 <- function(
       reported_gap <- TRUE
     }
 
-    # Find u and v layer positions by name matching
-    # ERA5 GRIB short names are often bare "u" / "v"; NetCDF uses "u_component_of_wind"
-    u_pos <- grep("(?i)(^u$|U-velocity|U_velocity|\\bu.{0,10}wind|u.{0,5}component)", layer_names, perl = TRUE)[1]
-    v_pos <- grep("(?i)(^v$|V-velocity|V_velocity|\\bv.{0,10}wind|v.{0,5}component)", layer_names, perl = TRUE)[1]
+    # u/v positions from first file's layer names (consistent across files)
+    layer_names <- catalog[[1]]$layer_names
+    u_pos <- grep("(?i)(^u$|U-velocity|U_velocity|\\bu.{0,10}wind|u.{0,5}component)",
+                  layer_names, perl = TRUE)[1]
+    v_pos <- grep("(?i)(^v$|V-velocity|V_velocity|\\bv.{0,10}wind|v.{0,5}component)",
+                  layer_names, perl = TRUE)[1]
 
     if (verbose && (is.na(u_pos) || is.na(v_pos)))
       message("    [debug] layer names: ", paste(layer_names, collapse = ", "))
 
-    for (var_info in list(list(pos = u_pos, nm = "u"),
-                          list(pos = v_pos, nm = "v"))) {
-      pos <- var_info$pos
-      var <- var_info$nm
-      if (is.na(pos)) {
-        if (verbose) message("    [skip] ", var, " at ", level, " hPa — layer not found")
-        next
+    # ── Extract one file at a time ─────────────────────────────────────────────
+    for (fi in seq_along(catalog)) {
+      obs_mask <- obs_file_idx == fi
+      if (!any(obs_mask)) next
+
+      cat_entry <- catalog[[fi]]
+      r <- tryCatch(rast(cat_entry$file), error = function(e) {
+        if (verbose) message("    [skip] Could not load: ", basename(cat_entry$file))
+        NULL
+      })
+      if (is.null(r)) next
+
+      n_vars     <- cat_entry$n_vars
+      obs_here   <- which(obs_mask)
+      t_idx_here <- obs_time_idx[obs_mask]
+
+      for (var_info in list(list(pos = u_pos, nm = "u"),
+                            list(pos = v_pos, nm = "v"))) {
+        pos    <- var_info$pos
+        col_nm <- paste0("era5_", var_info$nm, level)
+
+        if (is.na(pos)) {
+          if (verbose && fi == 1L)
+            message("    [skip] ", var_info$nm, " at ", level, " hPa — layer not found")
+          next
+        }
+        if (!col_nm %in% names(data)) data[[col_nm]] <- rep(NA_real_, nrow(data))
+
+        layer_idx <- (t_idx_here - 1L) * n_vars + pos
+        for (li in unique(layer_idx)) {
+          rows_li <- obs_here[layer_idx == li]
+          ex <- tryCatch(
+            terra::extract(r[[li]], coords_xy[rows_li, , drop = FALSE]),
+            error = function(e) {
+              if (verbose) message("    [warn] layer ", li, " unreadable — skipping (", conditionMessage(e), ")")
+              NULL
+            }
+          )
+          if (!is.null(ex) && ncol(ex) >= 1) data[[col_nm]][rows_li] <- ex[[1]]
+        }
       }
 
-      layer_idx <- (nearest_t - 1L) * n_vars + pos
-      out_vals  <- rep(NA_real_, length(layer_idx))
-      for (li in unique(layer_idx)) {
-        idx <- which(layer_idx == li)
-        ex  <- tryCatch(
-          terra::extract(r[[li]], coords_xy[idx, , drop = FALSE]),
-          error = function(e) {
-            if (verbose) message("    [warn] layer ", li, " unreadable — skipping (", conditionMessage(e), ")")
-            NULL
-          }
-        )
-        if (!is.null(ex) && ncol(ex) >= 1) out_vals[idx] <- ex[[1]]
-      }
-      col_nm <- paste0("era5_", var, level)
-      data[[col_nm]] <- out_vals
-      if (verbose) message("    + ", col_nm)
+      if (verbose) message("    [", level, " hPa] file ", fi, "/", length(catalog),
+                           ": ", basename(cat_entry$file), " (", sum(obs_mask), " obs)")
+      rm(r); gc(verbose = FALSE)
     }
 
-    rm(r)
-    gc(verbose = FALSE)
-
-    if (verbose) { pb_i <- pb_i + 1L; utils::setTxtProgressBar(pb, pb_i) }
+    if (verbose) {
+      u_nm <- paste0("era5_u", level); v_nm <- paste0("era5_v", level)
+      if (u_nm %in% names(data)) message("    + ", u_nm)
+      if (v_nm %in% names(data)) message("    + ", v_nm)
+    }
   }
-
-  if (verbose) { close(pb); cat("\n") }
 
   data
 }
@@ -434,7 +504,7 @@ annotate_era5 <- function(
         dplyr::group_by(dplyr::across(dplyr::all_of(tid_col))) %>%
         dplyr::mutate(.az = dplyr::lag(.az)) %>%
         dplyr::ungroup()
-      heading[non_empty] <- sub$.az
+      heading[non_empty] <- as.numeric(sub$.az)
     }
   } else {
     heading <- rep(NA_real_, n)
@@ -461,7 +531,7 @@ annotate_era5 <- function(
         dplyr::group_by(dplyr::across(dplyr::all_of(tid_col))) %>%
         dplyr::mutate(.gs = dplyr::lag(.gs)) %>%
         dplyr::ungroup()
-      ground_speed[non_empty] <- sub$.gs
+      ground_speed[non_empty] <- as.numeric(sub$.gs)
     }
   } else {
     ground_speed <- rep(NA_real_, n)
@@ -473,16 +543,17 @@ annotate_era5 <- function(
     v_col <- paste0("era5_v", level)
     if (!all(c(u_col, v_col) %in% names(data))) next
 
-    u <- data[[u_col]];  v <- data[[v_col]]
+    u <- as.numeric(data[[u_col]])
+    v <- as.numeric(data[[v_col]])
 
-    data[[paste0("wind_speed_",   level)]] <- sqrt(u^2 + v^2)
-    data[[paste0("wind_support_", level)]] <- wind_support(u, v, heading)
-    data[[paste0("crosswind_",    level)]] <- cross_wind(u, v, heading)
-    data[[paste0("airspeed_",     level)]] <- airspeed(
-      as.numeric(ground_speed),
-      wind_support(u, v, heading),
-      cross_wind(u, v, heading)
-    )
+    ws  <- wind_support(u, v, heading)
+    cw  <- cross_wind(u, v, heading)
+    spd <- sqrt(u^2 + v^2)
+
+    data[[paste0("wind_speed_",   level)]] <- spd
+    data[[paste0("wind_support_", level)]] <- ws
+    data[[paste0("crosswind_",    level)]] <- cw
+    data[[paste0("airspeed_",     level)]] <- airspeed(as.numeric(ground_speed), ws, cw)
   }
 
   # Surface winds (10 m / 100 m)
@@ -491,7 +562,8 @@ annotate_era5 <- function(
     v_col <- paste0("era5_v", h)
     if (!all(c(u_col, v_col) %in% names(data))) next
 
-    u <- data[[u_col]];  v <- data[[v_col]]
+    u   <- as.numeric(data[[u_col]])
+    v   <- as.numeric(data[[v_col]])
     sfx <- paste0(h, "m")
     data[[paste0("wind_speed_",   sfx)]] <- sqrt(u^2 + v^2)
     data[[paste0("wind_support_", sfx)]] <- wind_support(u, v, heading)
@@ -504,11 +576,13 @@ annotate_era5 <- function(
   if (!is.null(flight_p)) {
     data$flight_pressure_hPa <- flight_p
 
-    # Nearest standard pressure level
-    level_mat <- outer(flight_p, pressure_levels,
-                       function(fp, pl) abs(fp - pl))
-    nearest_idx   <- apply(level_mat, 1, which.min)
-    nearest_level <- pressure_levels[nearest_idx]
+    # Nearest standard pressure level.
+    # vapply handles NA flight_p correctly: which.min(all-NA) returns integer(0),
+    # which makes apply() return a list and crash with 'invalid subscript type'.
+    nearest_idx <- vapply(flight_p, function(fp) {
+      if (is.na(fp)) NA_integer_ else which.min(abs(pressure_levels - fp))
+    }, integer(1))
+    nearest_level <- ifelse(is.na(nearest_idx), NA_real_, pressure_levels[nearest_idx])
     data$matched_pressure_level <- nearest_level
 
     # Collect wind columns across available levels
@@ -528,21 +602,35 @@ annotate_era5 <- function(
       matched_col <- match(nearest_level, pressure_levels[avail])
       idx <- cbind(seq_len(n), matched_col)
 
-      data$wind_support_flight <- ws_mat[idx]
-      data$crosswind_flight    <- cs_mat[idx]
-      data$wind_speed_flight   <- spd_mat[idx]
+      # Extract to plain numeric vectors before assigning to sf/move2 columns.
+      # Accessing the column back through `data$` after assignment can silently
+      # coerce to character via the sticky geometry mechanism; using local
+      # variables avoids the round-trip entirely.
+      ws_flight  <- as.numeric(ws_mat[idx])
+      cs_flight  <- as.numeric(cs_mat[idx])
+      spd_flight <- as.numeric(spd_mat[idx])
+
+      data$wind_support_flight <- ws_flight
+      data$crosswind_flight    <- cs_flight
+      data$wind_speed_flight   <- spd_flight
       data$airspeed_flight     <- airspeed(
         as.numeric(ground_speed),
-        data$wind_support_flight,
-        data$crosswind_flight
+        ws_flight,
+        cs_flight
       )
 
-      # Best available wind level
-      best_col <- apply(ws_mat, 1, function(row) {
+      # Best available wind level — vapply ensures length-1 integer per row even
+      # when all ws values are NA (apply() would return integer(0) and produce a
+      # list, causing list subscript crash / garbage memory values).
+      best_col <- vapply(seq_len(nrow(ws_mat)), function(i) {
+        row <- ws_mat[i, ]
         if (all(is.na(row))) NA_integer_ else which.max(row)
-      })
+      }, integer(1))
       data$best_wind_level   <- pressure_levels[avail][best_col]
-      data$best_wind_support <- ws_mat[cbind(seq_len(n), best_col)]
+      data$best_wind_support <- vapply(seq_len(n), function(i) {
+        j <- best_col[i]
+        if (is.na(j)) NA_real_ else ws_mat[i, j]
+      }, numeric(1))
       data$at_best_wind      <- nearest_level == data$best_wind_level
     }
   }

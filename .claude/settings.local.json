@@ -14,7 +14,8 @@
       "Bash(grep -v \"^$\")",
       "Bash(echo \"not found\" ls ~/Desktop/era5*)",
       "WebFetch(domain:link.springer.com)",
-      "WebFetch(domain:movementecologyjournal.biomedcentral.com)"
+      "WebFetch(domain:movementecologyjournal.biomedcentral.com)",
+      "WebFetch(domain:developers.google.com)"
     ]
   }
 }

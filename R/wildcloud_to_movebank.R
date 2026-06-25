@@ -1333,18 +1333,22 @@ wildcloud_to_movebank <- function(
       # receipt timestamp using the tag's (drifting) clock. A slow clock
       # (drift > 0) means more real time elapsed than the tag counted,
       # so offsets grow by (1 + drift).
-      movebank_df <- movebank_df %>%
-        dplyr::mutate(
-          .offset_end_s   = as.numeric(difftime(`timestamp SF transmission`,
-                                                `Time end`, units = "secs")),
-          .offset_start_s = as.numeric(difftime(`timestamp SF transmission`,
-                                                `Time start`, units = "secs")),
-          `Time end`   = `timestamp SF transmission` -
-            as.difftime(.offset_end_s * (1 + drift_predicted), units = "secs"),
-          `Time start` = `timestamp SF transmission` -
-            as.difftime(.offset_start_s * (1 + drift_predicted), units = "secs")
-        ) %>%
-        dplyr::select(-.offset_end_s, -.offset_start_s)
+      # Guard: only applies when the long-format expansion added Time start/end;
+      # raw WildCloud CSVs without sensor bins won't have these columns.
+      if ("Time end" %in% names(movebank_df) && "Time start" %in% names(movebank_df)) {
+        movebank_df <- movebank_df %>%
+          dplyr::mutate(
+            .offset_end_s   = as.numeric(difftime(`timestamp SF transmission`,
+                                                  `Time end`, units = "secs")),
+            .offset_start_s = as.numeric(difftime(`timestamp SF transmission`,
+                                                  `Time start`, units = "secs")),
+            `Time end`   = `timestamp SF transmission` -
+              as.difftime(.offset_end_s * (1 + drift_predicted), units = "secs"),
+            `Time start` = `timestamp SF transmission` -
+              as.difftime(.offset_start_s * (1 + drift_predicted), units = "secs")
+          ) %>%
+          dplyr::select(-.offset_end_s, -.offset_start_s)
+      }
 
       message(sprintf(
         "[pipeline] Drift correction applied. Mean drift: %+.4f%%",
@@ -1544,7 +1548,9 @@ wildcloud_to_movebank <- function(
     )
 
   # ---- Temperature (36-min bins) ----
-  temp_data <- movebank_base %>%
+  # FSP firmware uses pressure bins instead of temp bins, so this column may not exist.
+  temp_data <- if ("temperature [°C]" %in% names(movebank_base)) {
+    movebank_base %>%
     dplyr::filter(!is.na(`temperature [°C]`)) %>%
     dplyr::transmute(
       `tag ID`,
@@ -1567,6 +1573,10 @@ wildcloud_to_movebank <- function(
       animals_mb %>% dplyr::select(Tag.ID, Movebank.Project, Animal.ID, Deployment.ID),
       by = c("tag ID" = "Tag.ID")
     )
+  } else {
+    tibble::tibble(`tag ID` = character(), Movebank.Project = character(),
+                   Animal.ID = character(), Deployment.ID = character())
+  }
 
   # ---- Min temp — firmware-aware split ----
   # 30Days firmware:            categorical range label  (">10", ">5 / <=10")

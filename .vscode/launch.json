@@ -1,0 +1,19 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "R",
+            "request": "launch",
+            "name": "Debug current R file",
+            "program": "${file}",
+            "workingDirectory": "${workspaceFolder}"
+        },
+        {
+            "type": "R",
+            "request": "launch",
+            "name": "Run main script",
+            "program": "${workspaceFolder}/explore/run_pressure_wind_bats_2026.R",
+            "workingDirectory": "${workspaceFolder}"
+        }
+    ]
+}

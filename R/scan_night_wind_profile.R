@@ -90,7 +90,11 @@ find_complete_nights <- function(
 
   # ── Drop empty geometries; extract coordinates ─────────────────────────────
   data <- data[!sf::st_is_empty(data), ]
-  if (nrow(data) == 0) stop("No non-empty geometries in data.")
+  if (nrow(data) == 0) {
+    warning("find_complete_nights: data has no non-empty geometries — returning empty.\n",
+            "  If loading from cache, delete the .rds and re-run annotate_era5().")
+    return(data.frame())
+  }
 
   coords <- sf::st_coordinates(data)
   df <- data %>%

@@ -54,53 +54,36 @@
 #'   \code{\link{tag_fell_off_uwasp}}
 #' @export
 detect_tag_fell_off <- function(
-    df,
-    method           = c("Nanofox", "Tinyfox", "uWasp"),
-    tag_col          = "individual_local_identifier",
-    time_col         = "timestamp",
-    vedba_col        = "vedba_sum",
-    activity_col     = "tinyfox_activity_percent_last_24h",
-    dist_col         = "distance",
-    vedba_threshold  = 1,
-    activity_threshold = 1,
-    dist_threshold   = 0.5,
-    min_inactive_run = 3L,
-    keep_first_inactive = TRUE,
-    verbose          = FALSE
+  df,
+  method = c("Nanofox", "Tinyfox", "uWasp"),
+  tag_col = "individual_local_identifier",
+  time_col = "timestamp",
+  vedba_col = "vedba_sum",
+  activity_col = "tinyfox_activity_percent_last_24h",
+  dist_col = "distance",
+  vedba_threshold = 1,
+  activity_threshold = 1,
+  dist_threshold = 0.5,
+  min_inactive_run = 3L,
+  keep_first_inactive = TRUE,
+  tinyfox_signal = c("activity_first", "activity_only", "vedba_only", "either"),
+  verbose = FALSE
 ) {
   require(dplyr)
 
   method <- match.arg(method)
+  tinyfox_signal <- match.arg(tinyfox_signal)
 
   col_exists <- function(x) x %in% names(df)
 
-  # Soft validation: warn and return unchanged rather than stopping
   if (!col_exists(tag_col)) {
     warning("detect_tag_fell_off: tag_col '", tag_col, "' not found. Returning unchanged.")
     df$tag_fell_off <- FALSE
     return(df)
   }
+
   if (!col_exists(time_col)) {
     warning("detect_tag_fell_off: time_col '", time_col, "' not found. Returning unchanged.")
-    df$tag_fell_off <- FALSE
-    return(df)
-  }
-
-  if (method == "Nanofox" && !col_exists(vedba_col)) {
-    warning("detect_tag_fell_off [Nanofox]: vedba_col '", vedba_col,
-            "' not found. Returning unchanged.")
-    df$tag_fell_off <- FALSE
-    return(df)
-  }
-  if (method == "Tinyfox" && !col_exists(vedba_col) && !col_exists(activity_col)) {
-    warning("detect_tag_fell_off [Tinyfox]: neither '", vedba_col, "' nor '",
-            activity_col, "' found. Returning unchanged.")
-    df$tag_fell_off <- FALSE
-    return(df)
-  }
-  if (method == "uWasp" && !col_exists(dist_col)) {
-    warning("detect_tag_fell_off [uWasp]: dist_col '", dist_col,
-            "' not found. Returning unchanged.")
     df$tag_fell_off <- FALSE
     return(df)
   }
@@ -116,66 +99,70 @@ detect_tag_fell_off <- function(
     tag_df <- df[idx, , drop = FALSE]
     time_order <- order(tag_df[[time_col]])
     tag_df <- tag_df[time_order, , drop = FALSE]
+
     n <- nrow(tag_df)
     if (n <= 1L) next
 
-    # ---- define active rows ----
     active <- rep(FALSE, n)
 
     if (method == "Nanofox") {
-      if (col_exists(vedba_col)) {
-        v <- as.numeric(tag_df[[vedba_col]])
-        active <- active | (!is.na(v) & v > vedba_threshold)
-      }
+      if (!col_exists(vedba_col)) next
+      v <- as.numeric(tag_df[[vedba_col]])
+      active <- !is.na(v) & v > vedba_threshold
     }
 
     if (method == "Tinyfox") {
-      if (col_exists(vedba_col)) {
-        v <- as.numeric(tag_df[[vedba_col]])
-        active <- active | (!is.na(v) & v > vedba_threshold)
-      }
-      if (col_exists(activity_col)) {
+      has_activity <- col_exists(activity_col) &&
+        any(!is.na(tag_df[[activity_col]]))
+
+      has_vedba <- col_exists(vedba_col) &&
+        any(!is.na(tag_df[[vedba_col]]))
+
+      a_active <- rep(FALSE, n)
+      v_active <- rep(FALSE, n)
+
+      if (has_activity) {
         a <- as.numeric(tag_df[[activity_col]])
-        active <- active | (!is.na(a) & a > activity_threshold)
+        a_active <- !is.na(a) & a > activity_threshold
       }
+
+      if (has_vedba) {
+        v <- as.numeric(tag_df[[vedba_col]])
+        v_active <- !is.na(v) & v > vedba_threshold
+      }
+
+      active <- switch(
+        tinyfox_signal,
+        activity_only  = a_active,
+        vedba_only     = v_active,
+        either         = a_active | v_active,
+        activity_first = if (has_activity) a_active else v_active
+      )
     }
 
     if (method == "uWasp") {
-      if (col_exists(dist_col)) {
-        d <- as.numeric(tag_df[[dist_col]])
-        active <- active | (!is.na(d) & d > dist_threshold)
-      }
+      if (!col_exists(dist_col)) next
+      d <- as.numeric(tag_df[[dist_col]])
+      active <- !is.na(d) & d > dist_threshold
     }
 
-    # ---- find boundary ----
-    # first_inactive: first row that is not active (check full span to end)
-    # fell_start:     first row to be MARKED as tag_fell_off
-    #   when keep_first_inactive = TRUE, the tag physically occupied that
-    #   location before detaching — keep it as FALSE
     if (!any(active)) {
       first_inactive <- 1L
     } else {
-      last_active    <- max(which(active))
+      last_active <- max(which(active))
       first_inactive <- last_active + 1L
     }
 
-    if (first_inactive > n) {
-      if (verbose) message("Tag ", tag, ": active through final record.")
-      next
-    }
+    if (first_inactive > n) next
 
     inactive <- !active
-
-    # Require inactivity sustained from first_inactive through end (no recovery)
     all_inactive_to_end <- all(inactive[first_inactive:n])
-
-    # Minimum run counts from first_inactive (including kept row)
     run_len <- n - first_inactive + 1L
-    ok_run  <- run_len >= min_inactive_run
+    ok_run <- run_len >= min_inactive_run
 
     if (all_inactive_to_end && ok_run) {
       fell_start <- if (isTRUE(keep_first_inactive)) {
-        min(first_inactive + 1L, n + 1L)  # keep first inactive; start marking at +2
+        min(first_inactive + 1L, n + 1L)
       } else {
         first_inactive
       }
@@ -183,48 +170,40 @@ detect_tag_fell_off <- function(
       if (fell_start <= n) {
         tag_df$tag_fell_off[fell_start:n] <- TRUE
       }
-
-      if (verbose) {
-        kept_msg <- if (isTRUE(keep_first_inactive) && fell_start > first_inactive) {
-          paste0(" (row ", first_inactive, " kept as valid last location)")
-        } else ""
-        message("Tag ", tag, ": fell off from row ", fell_start,
-                " (", as.character(tag_df[[time_col]][min(fell_start, n)]), ")", kept_msg)
-      }
-    } else {
-      if (verbose) message("Tag ", tag, ": inactivity not sustained to end or run too short.")
     }
 
-    # Write back to original row order
-    orig_order        <- order(time_order)
+    orig_order <- order(time_order)
     df$tag_fell_off[idx] <- tag_df$tag_fell_off[orig_order]
   }
 
   df
 }
 
-
 #' @rdname detect_tag_fell_off
 #' @description \code{tag_fell_off_nanofox()} is a convenience wrapper for
-#'   NanoFox tags, defaulting to \code{vedba_sum} as the activity column.
+#'   NanoFox tags (30Days and 30DaysFineScalePressure firmware).  Tries
+#'   \code{vedba_sum} first (36-min windowed sum, fewer NAs), then falls back
+#'   to \code{vedba} (per-burst average, more NAs but same signal) if
+#'   \code{vedba_sum} is absent or all-NA for a given tag.
 #' @export
 tag_fell_off_nanofox <- function(
     df,
-    vedba_threshold  = 0,
-    vedba_col        = "vedba_sum",
-    min_inactive_run = 3L,
+    vedba_threshold      = 0,
+    vedba_col            = "vedba_sum",
+    vedba_fallback_cols  = c("vedba"),
+    min_inactive_run     = 3L,
     ...
 ) {
   detect_tag_fell_off(
     df,
-    method           = "Nanofox",
-    vedba_col        = vedba_col,
-    vedba_threshold  = vedba_threshold,
-    min_inactive_run = min_inactive_run,
+    method              = "Nanofox",
+    vedba_col           = vedba_col,
+    vedba_fallback_cols = vedba_fallback_cols,
+    vedba_threshold     = vedba_threshold,
+    min_inactive_run    = min_inactive_run,
     ...
   )
 }
-
 
 #' @rdname detect_tag_fell_off
 #' @description \code{tag_fell_off_tinyfox()} is a convenience wrapper for
@@ -233,7 +212,7 @@ tag_fell_off_nanofox <- function(
 tag_fell_off_tinyfox <- function(
     df,
     vedba_threshold    = 280800 * 3.9 / 1000 / (60 * 24),
-    activity_threshold = 0,
+    activity_threshold = 1,
     vedba_col          = "vedba_sum",
     activity_col       = "tinyfox_activity_percent_last_24h",
     min_inactive_run   = 3L,

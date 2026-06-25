@@ -46,3 +46,5 @@ migration_hmm.stan
 */*.gif
 *.mp4
 */*.mp4
+# pressure_wind_profile output directories
+output/

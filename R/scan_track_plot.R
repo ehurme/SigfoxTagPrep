@@ -157,16 +157,41 @@ scan_track_plot <- function(
 
   if (nrow(df_f_g) < 2) stop("After dropping empty geometries, not enough points to plot.")
 
-  # choose first available sensor cols
-  if(any(df_f_g$tag_type == "nanofox", na.rm = TRUE)){
-    vedba_col <- vedba[1]
-    temp_col  <- temp[1]
-    press_col <- press[1]
+  # Resolve sensor columns: prefer explicit args, then detect from tag_type,
+  # then fall back to first column that actually exists with data.
+  .pick_sensor <- function(candidates, df) {
+    hit <- candidates[candidates %in% names(df) & sapply(candidates, function(c) any(!is.na(df[[c]])))]
+    if (length(hit)) hit[1] else NULL
   }
-  if(any(df_f_g$tag_type == "tinyfox", na.rm = TRUE)){
-    vedba_col <- vedba[2]
-    temp_col  <- temp[3:4]
-    press_col <- press[3]
+
+  is_tinyfox <- "tag_type" %in% names(df_f_g) &&
+    any(tolower(as.character(df_f_g$tag_type)) == "tinyfox", na.rm = TRUE)
+  is_nanofox <- "tag_type" %in% names(df_f_g) &&
+    any(tolower(as.character(df_f_g$tag_type)) == "nanofox", na.rm = TRUE)
+
+  df_f_plain <- sf::st_drop_geometry(df_f_g)
+
+  if (is.null(vedba_col)) {
+    if (is_tinyfox) {
+      vedba_col <- .pick_sensor(c("vedba_sum", "vpm"), df_f_plain)
+    } else {
+      vedba_col <- .pick_sensor(vedba, df_f_plain)
+    }
+  }
+  if (is.null(temp_col)) {
+    if (is_tinyfox) {
+      found_temp <- .pick_sensor(temp[3:4], df_f_plain)
+      temp_col   <- if (!is.null(found_temp)) temp[3:4][temp[3:4] %in% names(df_f_plain)] else NULL
+    } else {
+      temp_col <- .pick_sensor(temp[1:2], df_f_plain)
+    }
+  }
+  if (is.null(press_col)) {
+    if (is_tinyfox) {
+      press_col <- .pick_sensor(press[3], df_f_plain)
+    } else {
+      press_col <- .pick_sensor(press[1:2], df_f_plain)
+    }
   }
 
   # map extents

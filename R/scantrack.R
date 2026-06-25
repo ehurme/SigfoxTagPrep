@@ -243,10 +243,10 @@ scan_tracks <- function(
       sensor_panels[["vedba"]] <- p_vedba
 
       # Panel: Activity % — TinyFox only
-      if (is_tinyfox && .has_data(b_full_df, "tinyfox_activity_percent_last_24")) {
+      if (is_tinyfox && .has_data(b_full_df, "tinyfox_activity_percent_last_24h")) {
         sensor_panels[["activity"]] <- ggplot(b_full_df) +
-          geom_path(aes(timestamp, tinyfox_activity_percent_last_24), col = "forestgreen") +
-          geom_point(aes(timestamp, tinyfox_activity_percent_last_24),
+          geom_path(aes(timestamp, tinyfox_activity_percent_last_24h), col = "forestgreen") +
+          geom_point(aes(timestamp, tinyfox_activity_percent_last_24h),
                      col = "forestgreen", size = 1.5) +
           ylim(c(0, 100)) +
           .pt() + ylab("Activity\n(% above threshold)") + xlab("Date")

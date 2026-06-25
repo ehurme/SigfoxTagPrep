@@ -305,8 +305,22 @@ import_nanofox_movebank <- function(
     # td track id column: match the move2 track id so lookups are consistent
     td_id_col <- if (track_col %in% names(td)) track_col else names(td)[1]
 
+    # Columns that carry Sigfox-transmission metadata and should be NA on start
+    # rows, which represent capture/release events rather than real transmissions.
+    .tx_cols <- c(
+      "event_id", "sequence_number", "format_type", "import_marked_outlier",
+      "sigfox_computed_location_radius", "sigfox_computed_location_source",
+      "sigfox_country", "sigfox_device_type", "sigfox_duplicates",
+      "sigfox_link_quality", "sigfox_lqi", "sigfox_operator",
+      "sigfox_payload", "sigfox_rssi", "transmission_protocol",
+      "transmission_timestamp", "visible"
+    )
+
     n_inserted <- 0L
     start_rows <- vector("list", nrow(td))
+    # Indices in x of existing location rows whose timestamp == deploy_on_timestamp.
+    # These are marked "start" in place instead of creating a duplicate row.
+    rows_to_mark_start <- integer(0)
 
     for (i in seq_len(nrow(td))) {
       track_key <- as.character(td[[td_id_col]][i])
@@ -331,6 +345,21 @@ import_nanofox_movebank <- function(
         error = function(e) NA_real_
       )
       if (length(dep_ts) == 0 || all(is.na(dep_ts))) {
+        next
+      }
+
+      # If a real location row already exists at deploy_on_timestamp for this
+      # deployment, mark it as "start" in place rather than inserting a duplicate
+      # synthetic row that .dedupe_timestamps() would silently discard.
+      existing_at_dep_ts <- which(
+        loc_mask &
+          track_ids_vec == track_key &
+          !is.na(x$timestamp) &
+          x$timestamp == dep_ts
+      )
+      if (length(existing_at_dep_ts) > 0) {
+        rows_to_mark_start <- c(rows_to_mark_start, existing_at_dep_ts[1])
+        n_inserted <- n_inserted + 1L
         next
       }
 
@@ -422,15 +451,41 @@ import_nanofox_movebank <- function(
         start_row$deployment_id <- as.character(td$deployment_id[i])
       }
 
+      # Clear Sigfox transmission columns — this is a capture/release row, not a
+      # real transmission, so inherited values from the template row would mislead.
+      for (.c in intersect(.tx_cols, names(start_row))) {
+        start_row[[.c]] <- NA
+      }
+      for (.c in grep("^tinyfox_", names(start_row), value = TRUE)) {
+        start_row[[.c]] <- NA
+      }
+
       start_rows[[i]] <- start_row
       n_inserted <- n_inserted + 1L
     }
 
+    # Mark in-place: existing location rows whose timestamp == deploy_on_timestamp.
+    if (length(rows_to_mark_start) > 0) {
+      if (!"comments" %in% names(x)) x$comments <- NA_character_
+      x$comments[rows_to_mark_start] <- "start"
+      .msg(
+        "  .add_start: marked ", length(rows_to_mark_start),
+        " existing location row(s) as 'start' (deploy_on_timestamp matches real fix)."
+      )
+    }
+
     start_rows <- Filter(Negate(is.null), start_rows)
     if (length(start_rows) == 0) {
-      .msg(
-        "  .add_start: no valid deploy_on_timestamp found; no start rows inserted."
-      )
+      if (n_inserted == 0L) {
+        .msg(
+          "  .add_start: no valid deploy_on_timestamp found; no start rows inserted."
+        )
+      } else {
+        .msg(
+          "  .add_start: all ", n_inserted,
+          " start rows handled via in-place marking (no synthetic rows needed)."
+        )
+      }
       return(x)
     }
 
@@ -698,6 +753,82 @@ import_nanofox_movebank <- function(
       )
     )
     x
+  }
+
+  .standardise_model_firmware <- function(x, study_id_current = NULL) {
+  if (is.null(x) || nrow(x) == 0) return(x)
+
+  # Save originals before any transformation
+  if (!"model_raw" %in% names(x) && "model" %in% names(x)) {
+    x$model_raw <- as.character(x$model)
+  }
+  if (!"tag_firmware_raw" %in% names(x) && "tag_firmware" %in% names(x)) {
+    x$tag_firmware_raw <- as.character(x$tag_firmware)
+  }
+
+  # Only proceed with standardisation if model/firmware columns exist
+  if (!"model" %in% names(x) || !"tag_firmware" %in% names(x)) {
+    if (isTRUE(verbose)) {
+      .msg("  model/firmware columns missing; skipping standardisation")
+    }
+    return(x)
+  }
+
+  # WORK WITH WHAT'S ALREADY THERE - don't overwrite valid data
+  model <- as.character(x$model)
+  firmware <- as.character(x$tag_firmware)
+  
+  # Clean NAs and empty strings
+  model[model %in% c("", "NA", "NaN", "NULL")] <- NA_character_
+  firmware[firmware %in% c("", "NA", "NaN", "NULL")] <- NA_character_
+
+  # If we have tag_type, use it to fill in missing models
+  if ("tag_type" %in% names(x)) {
+    tagtype_tok <- tolower(as.character(x$tag_type))
+    
+    # Only fill NAs - don't overwrite existing valid models
+    model[is.na(model) & tagtype_tok == "nanofox"] <- "Nanofox"
+    model[is.na(model) & tagtype_tok == "tinyfox"] <- "TinyFoxBatt"
+    model[is.na(model) & tagtype_tok == "uwasp"] <- "uWasp"
+    
+    # uWasp has no firmware
+    firmware[model == "uWasp"] <- NA_character_
+  }
+
+  # Validation
+  nano_fw <- c("Daily", "10Days", "30Days", "30DaysFineScalePressure")
+  tiny_fw <- c("V13", "V13P", "V14P", "battTorpor")
+  
+  issue <- rep("ok", nrow(x))
+  issue[is.na(model)] <- "model_unknown"
+  issue[model == "Nanofox" & is.na(firmware)] <- "nanofox_missing_firmware"
+  issue[model == "Nanofox" & !is.na(firmware) & !firmware %in% nano_fw] <- "nanofox_invalid_firmware"
+  issue[model == "TinyFoxBatt" & is.na(firmware)] <- "tinyfox_missing_firmware"
+  issue[model == "TinyFoxBatt" & !is.na(firmware) & !firmware %in% tiny_fw] <- "tinyfox_invalid_firmware"
+
+  x$model <- model
+  x$tag_firmware <- firmware
+  x$model_firmware_ok <- issue == "ok"
+  x$model_firmware_issue <- issue
+
+  if (isTRUE(verbose)) {
+    .msg("  model / firmware check for study ", study_id_current %||% "?", ":")
+    print(
+      sf::st_drop_geometry(x) |>
+        tibble::as_tibble() |>
+        dplyr::count(
+          .data$tag_type,
+          .data$model,
+          .data$tag_firmware,
+          .data$model_firmware_issue,
+          name = "n"
+        ) |>
+        dplyr::arrange(.data$model_firmware_issue, .data$tag_type, .data$model),
+      n = 100
+    )
+  }
+
+  x
   }
 
   .add_lonlat <- function(x) {
@@ -1690,29 +1821,53 @@ import_nanofox_movebank <- function(
           vedba_threshold  = nanofox_vedba_threshold,
           min_inactive_run = min_inactive_run
         )
-
       } else if (tt == "tinyfox") {
-        # Prefer rate (VeDBA/hour) so threshold is interval-independent;
-        # fall back to raw diff, then vedba_sum if rate is unavailable.
-        vedba_col <- if ("tinyfox_vedba_rate" %in% names(sub) &&
-                         any(!is.na(sub$tinyfox_vedba_rate))) {
-          "tinyfox_vedba_rate"
-        } else if ("tinyfox_diff_vedba" %in% names(sub)) {
-          "tinyfox_diff_vedba"
+        fw <- if ("tag_firmware" %in% names(sub)) {
+          tolower(as.character(na.omit(sub$tag_firmware)[1]))
         } else {
-          "vedba_sum"
+          NA_character_
         }
-        sub <- detect_tag_fell_off(
-          sub,
-          method             = "Tinyfox",
-          tag_col            = track_col,
-          vedba_col          = vedba_col,
-          activity_col       = "tinyfox_activity_percent_last_24h",
-          vedba_threshold    = tinyfox_vedba_rate_threshold,
-          activity_threshold = tinyfox_activity_threshold,
-          min_inactive_run   = min_inactive_run
-        )
 
+        # TinyFoxBatt V13/V13P/V14P:
+        # activity_percent_last_24h is the most reliable detachment signal.
+        # The cumulative VeDBA counter can continue to show low-level increments
+        # after detachment, so do NOT let it keep the tag active when activity is 0.
+        has_activity <- "tinyfox_activity_percent_last_24h" %in% names(sub) &&
+          any(!is.na(sub$tinyfox_activity_percent_last_24h))
+
+        if (has_activity) {
+          sub <- detect_tag_fell_off(
+            sub,
+            method = "Tinyfox",
+            tag_col = track_col,
+            vedba_col = "tinyfox_vedba_rate",
+            activity_col = "tinyfox_activity_percent_last_24h",
+            vedba_threshold = tinyfox_vedba_rate_threshold,
+            activity_threshold = tinyfox_activity_threshold,
+            min_inactive_run = min_inactive_run,
+            tinyfox_signal = "activity_first"
+          )
+        } else {
+          # Fallback only if activity percent is absent.
+          vedba_col <- if ("tinyfox_vedba_rate" %in% names(sub) &&
+                          any(!is.na(sub$tinyfox_vedba_rate))) {
+            "tinyfox_vedba_rate"
+          } else if ("tinyfox_diff_vedba" %in% names(sub)) {
+            "tinyfox_diff_vedba"
+          } else {
+            "vedba_sum"
+          }
+          sub <- detect_tag_fell_off(
+            sub,
+            method = "Tinyfox",
+            tag_col = track_col,
+            vedba_col = vedba_col,
+            activity_col = "__missing_activity_col__",
+            vedba_threshold = tinyfox_vedba_rate_threshold,
+            activity_threshold = Inf,
+            min_inactive_run = min_inactive_run
+          )
+        }
       } else if (tt == "uwasp") {
         if (!"distance" %in% names(sub)) next
         sub <- detect_tag_fell_off(
@@ -2306,34 +2461,47 @@ import_nanofox_movebank <- function(
   # columns that are entirely empty.
   # ---------------------------------------------------------------------------
   .drop_all_na_cols <- function(x) {
-    if (is.null(x) || nrow(x) == 0) {
-      return(x)
-    }
-    geom_col <- if (inherits(x, "sf")) attr(x, "sf_column") else character(0)
-    keep <- vapply(
-      names(x),
-      function(nm) {
-        if (nm %in% geom_col) {
-          return(TRUE)
-        } # always keep geometry
-        v <- x[[nm]]
-        if (inherits(v, "sfc")) {
-          return(TRUE)
-        } # always keep sfc columns
-        !all(is.na(v))
-      },
-      logical(1)
+  if (is.null(x) || nrow(x) == 0) {
+    return(x)
+  }
+
+  geom_col <- if (inherits(x, "sf")) attr(x, "sf_column") else character(0)
+
+  always_keep <- c(
+    "tag_type",
+    "model",
+    "tag_firmware",
+    "model_raw",
+    "tag_firmware_raw",
+    "model_firmware_ok",
+    "model_firmware_issue"
+  )
+
+  keep <- vapply(
+    names(x),
+    function(nm) {
+      if (nm %in% geom_col) return(TRUE)
+      if (nm %in% always_keep) return(TRUE)
+
+      v <- x[[nm]]
+      if (inherits(v, "sfc")) return(TRUE)
+
+      !all(is.na(v))
+    },
+    logical(1)
+  )
+
+  dropped <- names(x)[!keep]
+  if (length(dropped) > 0) {
+    .msg(
+      "  Dropping ",
+      length(dropped),
+      " all-NA column(s): ",
+      paste(dropped, collapse = ", ")
     )
-    dropped <- names(x)[!keep]
-    if (length(dropped) > 0) {
-      .msg(
-        "  Dropping ",
-        length(dropped),
-        " all-NA column(s): ",
-        paste(dropped, collapse = ", ")
-      )
-    }
-    x[, keep, drop = FALSE]
+  }
+
+  x[, keep, drop = FALSE]
   }
 
   # ---------------------------------------------------------------------------
@@ -2546,9 +2714,27 @@ import_nanofox_movebank <- function(
     b <- .fix_track_data_lists(b)
     b <- .add_event_attrs(b)
     b <- .set_tag_type(b, study_id_current = id)
+    # Add these diagnostic checks:
+    if (isTRUE(verbose)) {
+      .msg("  Diagnostic: tag_type distribution after .set_tag_type:")
+      print(table(b$tag_type, useNA = "ifany"))
+      
+      .msg("  Diagnostic: Checking raw columns used for model/firmware:")
+      for (check_col in c("model", "tag_firmware", "format_type")) {
+        if (check_col %in% names(b)) {
+          .msg("    ", check_col, ": ", sum(!is.na(b[[check_col]])), " non-NA values")
+          if (sum(!is.na(b[[check_col]])) > 0) {
+            .msg("      Unique values: ", paste(unique(na.omit(b[[check_col]]))[1:min(5, length(unique(na.omit(b[[check_col]]))))], collapse=", "))
+          }
+        } else {
+          .msg("    ", check_col, ": column not found")
+        }
+      }
+    }
+    b <- .standardise_model_firmware(b, study_id_current = id)
     b <- .add_lonlat(b)
     b <- .label_sensor_type(b, sensor_selected)
-
+    
     # Diagnostic: report a safe summary of what came back from the download.
     # Never paste raw column values — only names and table summaries.
     if (isTRUE(verbose)) {
@@ -2606,7 +2792,7 @@ import_nanofox_movebank <- function(
     # measurement type per transmission), adding time_start and time_end.
     # Must run AFTER .add_altitude_from_pressure_col() so altitude_m is already
     # on rows, and BEFORE .add_night_day_id() so new rows get night/day labels too.
-    b <- .safe_try(.expand_tinyfox_rows(b), "expand_tinyfox_rows") %||% b
+    # b <- .safe_try(.expand_tinyfox_rows(b), "expand_tinyfox_rows") %||% b
 
     b <- .safe_try(.add_night_day_id(b), "add_night_day_id") %||% b
 
@@ -2702,6 +2888,8 @@ import_nanofox_movebank <- function(
     for (obj_name in c("b", "b_loc", "b_daily2")) {
       obj <- get(obj_name)
       if (!is.null(obj) && nrow(obj) > 0) {
+        obj <- .standardise_model_firmware(obj, study_id_current = id)
+
         # Guarantee tag_fell_off exists on every output (FALSE if not computed)
         if (!"tag_fell_off" %in% names(obj)) obj$tag_fell_off <- FALSE
         obj$tag_fell_off <- as.logical(obj$tag_fell_off)

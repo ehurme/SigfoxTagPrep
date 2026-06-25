@@ -243,7 +243,7 @@ setup_pressure_wind_config <- function() {
 #'   ERA5 wind at all \code{cfg$pressure_levels}. Default 0.3.
 #' @param verbose     Logical; print progress. Default \code{TRUE}.
 #'
-#' @return Data frame: \code{individual_id}, \code{t_start}, \code{t_end},
+#' @return Data frame: \code{cfg$individual_col}, \code{t_start}, \code{t_end},
 #'   \code{displacement_km}, \code{n_fixes}, \code{era5_coverage}.
 #' @export
 find_complete_periods <- function(
@@ -260,6 +260,7 @@ find_complete_periods <- function(
   stopifnot(all(c(ts_col, id_col) %in% names(data)))
 
   data   <- data[!sf::st_is_empty(data), ]
+  data   <- sf::st_transform(data, 4326)
   coords <- sf::st_coordinates(data)
   df <- data %>%
     sf::st_drop_geometry() %>%
@@ -307,6 +308,10 @@ find_complete_periods <- function(
     dates <- sort(unique(idf$.date))
 
     if (cfg$window_type == "nightly") {
+      if (length(dates) < 2) {
+        if (verbose) message("  Skipping '", ind, "': fewer than 2 dates for nightly windows")
+        next
+      }
       for (d_idx in seq_len(length(dates) - 1L)) {
         d0 <- dates[d_idx]; d1 <- dates[d_idx + 1L]
         if (as.integer(d1 - d0) != 1L) next
@@ -321,7 +326,7 @@ find_complete_periods <- function(
         win <- idf %>% filter(.ts >= dep$.ts[1], .ts <= arr$.ts[1])
         if (.era5_cov(win) < min_coverage) next
 
-        results[[length(results) + 1L]] <- data.frame(
+        row_df <- data.frame(
           individual_id   = ind,
           t_start         = dep$.ts[1],
           t_end           = arr$.ts[1],
@@ -330,6 +335,8 @@ find_complete_periods <- function(
           era5_coverage   = round(.era5_cov(win), 3),
           stringsAsFactors = FALSE
         )
+        names(row_df)[names(row_df) == "individual_id"] <- id_col
+        results[[length(results) + 1L]] <- row_df
       }
 
     } else {
@@ -343,7 +350,7 @@ find_complete_periods <- function(
         arr <- win %>% slice_max(.ts, n = 1)
         dk  <- .dist_km(dep$.lon, dep$.lat, arr$.lon, arr$.lat)
 
-        results[[length(results) + 1L]] <- data.frame(
+        row_df <- data.frame(
           individual_id   = ind,
           t_start         = dep$.ts[1],
           t_end           = arr$.ts[1],
@@ -352,6 +359,8 @@ find_complete_periods <- function(
           era5_coverage   = round(.era5_cov(win), 3),
           stringsAsFactors = FALSE
         )
+        names(row_df)[names(row_df) == "individual_id"] <- id_col
+        results[[length(results) + 1L]] <- row_df
       }
     }
   }
@@ -368,7 +377,7 @@ find_complete_periods <- function(
   rownames(out) <- NULL
   if (verbose)
     message("find_complete_periods: ", nrow(out), " qualifying periods across ",
-            length(unique(out$individual_id)), " individuals.")
+            length(unique(out[[id_col]])), " individuals.")
   out
 }
 
@@ -383,18 +392,21 @@ find_complete_periods <- function(
     return(df)
   }
 
-  t_seq <- seq(min(df$timestamp), max(df$timestamp),
-               by = cfg$interp_timestep_min * 60)
-  t_num <- as.numeric(df$timestamp)
+  t_seq  <- seq(min(df$timestamp), max(df$timestamp),
+                by = cfg$interp_timestep_min * 60)
+  t_num  <- as.numeric(df$timestamp)
+  tz_str <- attr(df$timestamp, "tzone") %||% "UTC"
 
-  if (cfg$interpolation == "linear") {
-    return(data.frame(
-      timestamp     = t_seq,
+  .linear <- function() {
+    data.frame(
+      timestamp     = as.POSIXct(as.numeric(t_seq), tz = tz_str, origin = "1970-01-01"),
       .lon          = approx(t_num, df$.lon, xout = as.numeric(t_seq), rule = 2)$y,
       .lat          = approx(t_num, df$.lat, xout = as.numeric(t_seq), rule = 2)$y,
       .interpolated = TRUE
-    ))
+    )
   }
+
+  if (cfg$interpolation == "linear") return(.linear())
 
   if (cfg$interpolation == "crawl") {
     if (!requireNamespace("momentuHMM", quietly = TRUE))
@@ -430,7 +442,7 @@ find_complete_periods <- function(
     )
 
     if (!is.null(crw_fit)) {
-      pred <- crw_fit$crwPredict
+      pred    <- crw_fit$crwPredict
       pred_sf <- sf::st_as_sf(
         data.frame(x = pred$mu.x, y = pred$mu.y),
         coords = c("x", "y"), crs = 3857
@@ -444,14 +456,11 @@ find_complete_periods <- function(
       ))
     }
 
-    # Fall back to linear
-    return(data.frame(
-      timestamp     = t_seq,
-      .lon          = approx(t_num, df$.lon, xout = as.numeric(t_seq), rule = 2)$y,
-      .lat          = approx(t_num, df$.lat, xout = as.numeric(t_seq), rule = 2)$y,
-      .interpolated = TRUE
-    ))
+    return(.linear())  # CRAWL failed; explicit linear fallback
   }
+
+  stop("Unknown interpolation method '", cfg$interpolation,
+       "'. Expected 'none', 'linear', or 'crawl'.")
 }
 
 
@@ -507,6 +516,12 @@ find_complete_periods <- function(
 #' @param individual_id Character; individual to plot.
 #' @param t_start       POSIXct start of the analysis window.
 #' @param t_end         POSIXct end of the analysis window.
+#' @param sensor_data   Optional sf or data frame with the full (dense) tag
+#'   data for the same individual, including non-location rows (pressure and
+#'   VeDBA messages without a GPS fix).  When supplied, the pressure, VeDBA,
+#'   and temperature panels use this denser time series instead of the
+#'   location-filtered \code{data}.  Must contain \code{cfg$individual_col}
+#'   and \code{cfg$timestamp_col}. Default \code{NULL} (use \code{data}).
 #' @param context_min   Minutes of context beyond the window shown in the map
 #'   track. Default 15.
 #' @param elev_z        Zoom level for \code{elevatr::get_elev_raster}. Default 6.
@@ -525,6 +540,7 @@ pressure_wind_profile <- function(
     individual_id,
     t_start,
     t_end,
+    sensor_data = NULL,
     context_min = 15,
     elev_z      = 6,
     buffer_deg  = 1.5,
@@ -542,11 +558,15 @@ pressure_wind_profile <- function(
                  "../SigfoxTagPrep/R/pressure_to_altitude_m.R"))
     if (!exists("pressure_to_altitude_m", mode = "function") && file.exists(.src))
       source(.src)
+  if (!exists("pressure_to_altitude_m", mode = "function") && verbose)
+    message("  pressure_to_altitude_m() not found; using built-in approximation")
 
   for (.src in c("R/extract_elevation_segments.R",
                  "../SigfoxTagPrep/R/extract_elevation_segments.R"))
     if (!exists("extract_elevation_segments", mode = "function") && file.exists(.src))
       source(.src)
+  if (!exists("extract_elevation_segments", mode = "function") && verbose)
+    message("  extract_elevation_segments() not found; elevation profile panel will be skipped")
 
   .has <- function(df, col)
     !is.null(col) && nchar(col) > 0 && col %in% names(df) && any(!is.na(df[[col]]))
@@ -577,16 +597,20 @@ pressure_wind_profile <- function(
   indiv_chr <- as.character(individual_id)
   data_i    <- data[as.character(data[[id_col]]) == indiv_chr, ]
   data_i    <- data_i[!sf::st_is_empty(data_i), ]
-  if (nrow(data_i) < 2)
-    stop("Fewer than 2 valid rows for individual '", indiv_chr, "'.")
+  if (nrow(data_i) < 1)
+    stop("No valid location rows for individual '", indiv_chr, "'.")
+  if (nrow(data_i) == 1)
+    warning("Only 1 location fix for '", indiv_chr,
+            "'; interpolation and path panels will be limited.")
 
+  data_i   <- sf::st_transform(data_i, 4326)
   coords_i <- sf::st_coordinates(data_i)
   df_i <- data_i %>%
     sf::st_drop_geometry() %>%
     mutate(
       timestamp = .data[[ts_col]],
-      .lon = coords_i[, "X"],
-      .lat = coords_i[, "Y"]
+      .lon = coords_i[, 1],
+      .lat = coords_i[, 2]
     ) %>%
     arrange(timestamp)
 
@@ -598,8 +622,10 @@ pressure_wind_profile <- function(
   t_ctx_e <- t_end   + context_min * 60
   core_df <- df_i %>% filter(timestamp >= t_start, timestamp <= t_end)
 
-  if (nrow(core_df) < 2)
-    stop("Fewer than 2 rows in window for '", indiv_chr, "'.")
+  if (nrow(core_df) < 1)
+    stop("No location rows in window for '", indiv_chr, "'.")
+  if (nrow(core_df) == 1 && verbose)
+    message("  Only 1 fix in window; interpolation disabled, path panels limited.")
 
   if (verbose)
     message("Window: ", format(t_start, "%Y-%m-%d %H:%M"), " – ",
@@ -619,6 +645,31 @@ pressure_wind_profile <- function(
   } else {
     plot_df <- core_df
     plot_df$.interpolated <- FALSE
+  }
+
+  # ── Sensor data for pressure / VeDBA / temperature panels ────────────────
+  # When the full dataset (including non-location messages) is provided via
+  # sensor_data, use it for the scalar time-series panels so that the denser
+  # 36-min measurements are shown rather than only the location-thinned rows.
+  if (!is.null(sensor_data)) {
+    sensor_raw <- if (inherits(sensor_data, "sf"))
+      sf::st_drop_geometry(sensor_data)
+    else
+      as.data.frame(sensor_data)
+    missing_cols <- setdiff(c(id_col, ts_col), names(sensor_raw))
+    if (length(missing_cols) > 0)
+      stop("sensor_data is missing required columns: ",
+           paste(missing_cols, collapse = ", "))
+    sensor_df <- sensor_raw %>%
+      filter(as.character(.data[[id_col]]) == indiv_chr) %>%
+      mutate(timestamp = .data[[ts_col]]) %>%
+      filter(timestamp >= t_start, timestamp <= t_end) %>%
+      arrange(timestamp)
+    if (verbose && nrow(sensor_df) > nrow(core_df))
+      message("  sensor_data: ", nrow(sensor_df),
+              " rows (vs ", nrow(core_df), " location fixes) in window")
+  } else {
+    sensor_df <- plot_df
   }
 
   # ── Pressure labels (hPa + approx altitude) ──────────────────────────────
@@ -784,8 +835,8 @@ pressure_wind_profile <- function(
       scale_y_reverse(breaks = press_breaks, labels = press_labels,
                       name = "Pressure level") +
       scale_x_datetime(expand = expansion(0)) +
-      { if (.has(plot_df, pr_col))
-          geom_path(data = plot_df %>% filter(!is.na(.data[[pr_col]])),
+      { if (.has(sensor_df, pr_col))
+          geom_path(data = sensor_df %>% filter(!is.na(.data[[pr_col]])),
                     aes(timestamp, .data[[pr_col]]),
                     col = "white", linewidth = 1.8, inherit.aes = FALSE) } +
       { if (.has(plot_df, "best_wind_level"))
@@ -793,9 +844,9 @@ pressure_wind_profile <- function(
                     aes(timestamp, as.numeric(best_wind_level)),
                     col = "yellow", linetype = "dashed", linewidth = 1.1,
                     inherit.aes = FALSE) } +
-      geom_vline(xintercept = as.numeric(t_start), col = "#4DAF4A",
+      geom_vline(xintercept = t_start, col = "#4DAF4A",
                  linetype = "dashed", linewidth = 0.7) +
-      geom_vline(xintercept = as.numeric(t_end),   col = "#FF7F00",
+      geom_vline(xintercept = t_end,   col = "#FF7F00",
                  linetype = "dashed", linewidth = 0.7) +
       labs(x = "Time (UTC)",
            subtitle = if (has_ws)
@@ -835,9 +886,9 @@ pressure_wind_profile <- function(
       geom_path(alpha = 0.85) +
       scale_color_manual(values = lvl_pal, name = "Level\n(hPa)") +
       scale_linewidth_manual(values = lw_vals, guide = "none") +
-      geom_vline(xintercept = as.numeric(t_start), col = "#4DAF4A",
+      geom_vline(xintercept = t_start, col = "#4DAF4A",
                  linetype = "dashed", linewidth = 0.7) +
-      geom_vline(xintercept = as.numeric(t_end),   col = "#FF7F00",
+      geom_vline(xintercept = t_end,   col = "#FF7F00",
                  linetype = "dashed", linewidth = 0.7) +
       scale_x_datetime(expand = expansion(0)) +
       labs(x = "Time (UTC)", y = "Wind support (m/s)",
@@ -850,9 +901,9 @@ pressure_wind_profile <- function(
 
   # ─ Panel 5: Tag pressure / flight altitude over time ───────────────────────
   p_pressure <- ggplot() +
-    geom_vline(xintercept = as.numeric(t_start), col = "#4DAF4A",
+    geom_vline(xintercept = t_start, col = "#4DAF4A",
                linetype = "dashed", linewidth = 0.7) +
-    geom_vline(xintercept = as.numeric(t_end),   col = "#FF7F00",
+    geom_vline(xintercept = t_end,   col = "#FF7F00",
                linetype = "dashed", linewidth = 0.7)
 
   for (lv in press_breaks)
@@ -860,14 +911,14 @@ pressure_wind_profile <- function(
       geom_hline(yintercept = lv, col = "grey70", linetype = "dotted",
                  linewidth = 0.35)
 
-  if (.has(plot_df, pr_col)) {
+  if (.has(sensor_df, pr_col)) {
     # Instantaneous → path; windowed minimum → step function
     geom_fn <- if (cfg$pressure_type == "instantaneous") geom_path else geom_step
     p_pressure <- p_pressure +
-      geom_fn(data  = plot_df %>% filter(!is.na(.data[[pr_col]])),
+      geom_fn(data  = sensor_df %>% filter(!is.na(.data[[pr_col]])),
               aes(timestamp, .data[[pr_col]]),
               col = "black", linewidth = 1) +
-      geom_point(data = plot_df %>% filter(!is.na(.data[[pr_col]])),
+      geom_point(data = sensor_df %>% filter(!is.na(.data[[pr_col]])),
                  aes(timestamp, .data[[pr_col]], col = as.numeric(timestamp)),
                  size = 1.5)
   }
@@ -883,9 +934,9 @@ pressure_wind_profile <- function(
   # ─ Panel 6: Flight-level vs best-wind comparison ───────────────────────────
   p_comparison <- ggplot() +
     geom_hline(yintercept = 0, col = "grey50", linetype = "dotted") +
-    geom_vline(xintercept = as.numeric(t_start), col = "#4DAF4A",
+    geom_vline(xintercept = t_start, col = "#4DAF4A",
                linetype = "dashed", linewidth = 0.7) +
-    geom_vline(xintercept = as.numeric(t_end),   col = "#FF7F00",
+    geom_vline(xintercept = t_end,   col = "#FF7F00",
                linetype = "dashed", linewidth = 0.7)
 
   if (.has(plot_df, "wind_support_flight"))
@@ -921,19 +972,19 @@ pressure_wind_profile <- function(
 
   # ─ Panel 7: VeDBA ─────────────────────────────────────────────────────────
   p_vedba <- NULL
-  if (.has(plot_df, cfg$vedba_col)) {
+  if (.has(sensor_df, cfg$vedba_col)) {
     vedba_y_lbl <- switch(cfg$vedba_aggregation %||% "precomputed",
       precomputed = "VeDBA (summed over window)",
       sum         = paste0("VeDBA (sum / ", cfg$vedba_window_min %||% "?", " min)"),
       "VeDBA"
     )
-    p_vedba <- ggplot(plot_df %>% filter(!is.na(.data[[cfg$vedba_col]])),
+    p_vedba <- ggplot(sensor_df %>% filter(!is.na(.data[[cfg$vedba_col]])),
                       aes(timestamp, .data[[cfg$vedba_col]])) +
       geom_path(col = "#E41A1C", linewidth = 0.9) +
       geom_point(col = "#E41A1C", size = 1.2) +
-      geom_vline(xintercept = as.numeric(t_start), col = "#4DAF4A",
+      geom_vline(xintercept = t_start, col = "#4DAF4A",
                  linetype = "dashed", linewidth = 0.7) +
-      geom_vline(xintercept = as.numeric(t_end),   col = "#FF7F00",
+      geom_vline(xintercept = t_end,   col = "#FF7F00",
                  linetype = "dashed", linewidth = 0.7) +
       scale_x_datetime(expand = expansion(0)) +
       labs(x = "Time (UTC)", y = vedba_y_lbl) +
@@ -942,7 +993,7 @@ pressure_wind_profile <- function(
 
   # ─ Panel 8: Temperature ─────────────────────────────────────────────────────
   p_temp <- NULL
-  if (.has(plot_df, cfg$temp_col)) {
+  if (.has(sensor_df, cfg$temp_col)) {
     temp_y_lbl <- switch(cfg$temp_aggregation %||% "mean",
       mean    = "Temperature — mean (°C)",
       min     = "Temperature — min (°C)",
@@ -950,13 +1001,13 @@ pressure_wind_profile <- function(
       instant = "Temperature (°C)",
       "Temperature (°C)"
     )
-    p_temp <- ggplot(plot_df %>% filter(!is.na(.data[[cfg$temp_col]])),
+    p_temp <- ggplot(sensor_df %>% filter(!is.na(.data[[cfg$temp_col]])),
                      aes(timestamp, .data[[cfg$temp_col]])) +
       geom_path(col = "#377EB8", linewidth = 0.9) +
       geom_point(col = "#377EB8", size = 1.2) +
-      geom_vline(xintercept = as.numeric(t_start), col = "#4DAF4A",
+      geom_vline(xintercept = t_start, col = "#4DAF4A",
                  linetype = "dashed", linewidth = 0.7) +
-      geom_vline(xintercept = as.numeric(t_end),   col = "#FF7F00",
+      geom_vline(xintercept = t_end,   col = "#FF7F00",
                  linetype = "dashed", linewidth = 0.7) +
       scale_x_datetime(expand = expansion(0)) +
       labs(x = "Time (UTC)", y = temp_y_lbl) +
@@ -1008,6 +1059,7 @@ pressure_wind_profile <- function(
     raw_data      = core_df,
     interp_track  = if (cfg$interpolation != "none") interp_df else NULL,
     plot_data     = plot_df,
+    sensor_data   = if (!is.null(sensor_data)) sensor_df else NULL,
     wind_long     = wind_long,
     elev_profile  = elev_profile,
     plot          = p_all
