@@ -2005,12 +2005,13 @@ check_movebank_export_types <- function(local_paths) {
 source("../SigfoxTagPrep/R/import_nanofox_movebank.R")
 
 z <- import_nanofox_movebank(
-  study_id = 4589981234,
+  study_id = 4474443973,
   daily_method = "daytime_only",
   run_daily_metrics = TRUE,
   verbose = TRUE
 )
 
+full <- z$full
 current_movebank <- z$location
 current_movebank$geometry |> plot()
 plot(rnaturalearth::countries110, add = TRUE)
@@ -2044,14 +2045,16 @@ res <- prepare_movebank_reupload_exports(
   supplemental_paths = supplemental_paths
 )
 
-tag <- "12102DB"
+tag <- "9ED38C"
 r <- res$missing_events |> filter(tag_local_identifier == tag)
 b <- current_movebank |> filter(tag_local_identifier == tag)
-b$geometry |> plot(type = "o")
-b$geometry |> plot(add = TRUE, col = 2)
-which(!(r$timestamp %in% b$timestamp))
-
-b$tinyfox_activity_percent_last_24h
+f <- full |> filter(tag_local_identifier == tag)
+b$geometry |> plot(type = "o", pch = 16)
+points(r$lon, r$lat, col = 2)
+r[which(!(r$timestamp %in% b$timestamp)),c("timestamp", "tinyfox_activity_percent_last_24h")]
+b$timestamp
+plot(b$timestamp, b$tinyfox_activity_percent_last_24h, col = b$tag_fell_off+1, pch = 16)
+points(r$timestamp, r$tinyfox_activity_percent_last_24h, col = 3)
 
 r$tinyfox_pressure_min_last_24h
 b$tinyfox_pressure_min_last_24h
@@ -2060,3 +2063,15 @@ b$tinyfox_diff_vedba
 b$tag_fell_off
 b$tag_firmware[1]
 
+plot(f$timestamp, f$vedba)
+# hist(as.numeric(f$timestamp - f$start_timestamp))
+f |> mt_track_data() -> data
+data$deploy_on_timestamp
+
+full$vedba |> summary()
+full$vedba_sum |> summary()
+current_movebank$vedba_sum |> hist(breaks = 100000, xlim = c(0,100))
+current_movebank$tinyfox_vedba_rate |> summary()
+high <- current_movebank |> filter(vedba_sum > 1000)
+high$tinyfox_total_vedba |> plot()
+high$vedba_sum |> plot()
