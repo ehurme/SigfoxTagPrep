@@ -497,7 +497,7 @@ if (!exists("extract_elevation_segments", mode = "function")) {
       else b_daily_df$daily_timestamp
 
       .t_mask <- .mk_ts_mask(b_full_df, c(
-        "temperature_min", "temperature_max", "external_temperature",
+        "avg_temp", "temperature_min", "temperature_max", "external_temperature",
         "tinyfox_temperature_min_last_24h", "tinyfox_temperature_max_last_24h"))
       b_daily_df$snap_ts_t <- .snap_to_nearest_ts(
         b_daily_df$daily_timestamp, b_full_df$timestamp[.t_mask])
@@ -649,7 +649,8 @@ if (!exists("extract_elevation_segments", mode = "function")) {
       b_full_df$tinyfox_temperature_max_last_24h,
       b_full_df$temperature_min,
       b_full_df$temperature_max,
-      b_full_df$external_temperature
+      b_full_df$external_temperature,
+      b_full_df$avg_temp
     )))
     .raw_temp_vals <- .raw_temp_vals[!is.na(.raw_temp_vals) & is.finite(.raw_temp_vals) &
                                        .raw_temp_vals != 0 & .raw_temp_vals > -30 & .raw_temp_vals < 55]
@@ -699,6 +700,14 @@ if (!exists("extract_elevation_segments", mode = "function")) {
         p_temperature <- p_temperature +
           geom_path(data = .tdf, aes(timestamp, external_temperature), col = "darkred") +
           geom_point(data = .tdf, aes(timestamp, external_temperature), col = "darkred", size = 1.5)
+      }
+
+      # NanoFox 30Days: temperature stored as avg_temp on "avg.temp" sensor rows
+      if (.has_data(b_full_df, "avg_temp")) {
+        .tdf <- b_full_df[!is.na(b_full_df$avg_temp), ]
+        p_temperature <- p_temperature +
+          geom_path(data = .tdf, aes(timestamp, avg_temp), col = "steelblue") +
+          geom_point(data = .tdf, aes(timestamp, avg_temp), col = "steelblue", size = 1.5)
       }
     }
 

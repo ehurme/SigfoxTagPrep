@@ -170,6 +170,15 @@ mt_add_daily_sensor_metrics <- function(b_all,
   # ---------- NanoFox summaries (attributes only) ----------
   nano_daily <- NULL
   if (has_nano) {
+    # Precompute column-presence flags outside summarise: names(.) inside a
+    # dplyr::summarise quosure is unreliable (. may not resolve to the grouped
+    # data), so scalar variables captured in the closure are used instead.
+    .has_nano_v   <- nano_vedba_col %in% names(b2_attr)
+    .has_tmin_col <- "temperature_min" %in% names(b2_attr)
+    .has_tmax_col <- "temperature_max" %in% names(b2_attr)
+    .has_avg_temp <- nano_temp_col %in% names(b2_attr)
+    .has_pres     <- nano_pres_col %in% names(b2_attr)
+
     nano_daily <- b2_attr %>%
       dplyr::filter(tolower(.data[[tag_type_col]]) == "nanofox") %>%
       dplyr::group_by(.data[[track_col]], .bat_day) %>%
@@ -178,31 +187,33 @@ mt_add_daily_sensor_metrics <- function(b_all,
         daily_gap_h_mean = mean(.dt_prev_h, na.rm = TRUE),
         daily_gap_h_max  = suppressWarnings(max(.dt_prev_h, na.rm = TRUE)),
 
-        daily_vedba_sum   = if (nano_vedba_col %in% names(.)) sum(.data[[nano_vedba_col]], na.rm = TRUE) else NA_real_,
-        daily_vedba_sum_n = if (nano_vedba_col %in% names(.)) sum(!is.na(.data[[nano_vedba_col]])) else 0L,
+        daily_vedba_sum   = if (.has_nano_v) sum(.data[[nano_vedba_col]], na.rm = TRUE) else NA_real_,
+        daily_vedba_sum_n = if (.has_nano_v) sum(!is.na(.data[[nano_vedba_col]])) else 0L,
 
         # temperature_min / temperature_max exist on 30DaysFineScalePressure;
         # avg_temp is the fallback for standard 30Days firmware.
         daily_temp_min = suppressWarnings(min(
-          if ("temperature_min" %in% names(.) && any(!is.na(.data[["temperature_min"]])))
+          if (.has_tmin_col && any(!is.na(.data[["temperature_min"]])))
             .data[["temperature_min"]]
-          else if (nano_temp_col %in% names(.)) .data[[nano_temp_col]]
+          else if (.has_avg_temp) .data[[nano_temp_col]]
           else NA_real_,
           na.rm = TRUE
         )),
         daily_temp_max = suppressWarnings(max(
-          if ("temperature_max" %in% names(.) && any(!is.na(.data[["temperature_max"]])))
+          if (.has_tmax_col && any(!is.na(.data[["temperature_max"]])))
             .data[["temperature_max"]]
-          else if (nano_temp_col %in% names(.)) .data[[nano_temp_col]]
+          else if (.has_avg_temp) .data[[nano_temp_col]]
           else NA_real_,
           na.rm = TRUE
         )),
-        daily_temp_n = sum(!is.na(if ("temperature_min" %in% names(.)) .data[["temperature_min"]]
-                                  else if (nano_temp_col %in% names(.)) .data[[nano_temp_col]]
-                                  else NA_real_)),
+        daily_temp_n = sum(!is.na(
+          if (.has_tmin_col) .data[["temperature_min"]]
+          else if (.has_avg_temp) .data[[nano_temp_col]]
+          else NA_real_
+        )),
 
-        daily_p_min       = if (nano_pres_col %in% names(.)) suppressWarnings(min(.data[[nano_pres_col]], na.rm = TRUE)) else NA_real_,
-        daily_p_min_n     = if (nano_pres_col %in% names(.)) sum(!is.na(.data[[nano_pres_col]])) else 0L,
+        daily_p_min   = if (.has_pres) suppressWarnings(min(.data[[nano_pres_col]], na.rm = TRUE)) else NA_real_,
+        daily_p_min_n = if (.has_pres) sum(!is.na(.data[[nano_pres_col]])) else 0L,
 
         daily_alt_day_mean_m  = mean(altitude_m[.is_day %in% TRUE], na.rm = TRUE),
         daily_alt_day_mean_n  = sum(is.finite(altitude_m) & (.is_day %in% TRUE)),
@@ -248,12 +259,20 @@ mt_add_daily_sensor_metrics <- function(b_all,
 
     b_daily_attr$.bat_day <- get_bat_day(b_daily_attr[[time_col_daily]])
 
+    # Precompute column flags (same reason as NanoFox: names(.) in mutate/transmute
+    # quosures may not resolve reliably across all dplyr versions).
+    .has_tiny_v    <- tiny_vedba_col %in% names(b_daily_attr)
+    .has_tiny_act  <- tiny_act_col   %in% names(b_daily_attr)
+    .has_tiny_pmin <- tiny_pmin_col  %in% names(b_daily_attr)
+    .has_tiny_tmax <- tiny_tmax_col  %in% names(b_daily_attr)
+    .has_tiny_tmin <- tiny_tmin_col  %in% names(b_daily_attr)
+
     tiny_from_noon <- b_daily_attr %>%
       dplyr::filter(tolower(.data[[tag_type_col]]) == "tinyfox") %>%
       dplyr::arrange(.data[[track_col]], .data[[time_col_daily]]) %>%
       dplyr::group_by(.data[[track_col]]) %>%
       dplyr::mutate(
-        .tiny_v = if (tiny_vedba_col %in% names(.)) as.numeric(.data[[tiny_vedba_col]]) else NA_real_,
+        .tiny_v = if (.has_tiny_v) as.numeric(.data[[tiny_vedba_col]]) else NA_real_,
         .dt_h   = as.numeric(difftime(.data[[time_col_daily]], dplyr::lag(.data[[time_col_daily]]), units = "hours")),
         .dvedba = .tiny_v - dplyr::lag(.tiny_v),
         .dvedba = dplyr::if_else(is.finite(.dvedba) & .dvedba >= 0, .dvedba, NA_real_),
@@ -265,16 +284,16 @@ mt_add_daily_sensor_metrics <- function(b_all,
       dplyr::transmute(
         !!rlang::sym(track_col), .bat_day,
 
-        daily_activity_percent_24h   = if (tiny_act_col %in% names(.)) .data[[tiny_act_col]] else NA_real_,
+        daily_activity_percent_24h   = if (.has_tiny_act)  .data[[tiny_act_col]]  else NA_real_,
         daily_activity_percent_24h_n = as.integer(!is.na(daily_activity_percent_24h)),
 
-        daily_pmin_24h   = if (tiny_pmin_col %in% names(.)) .data[[tiny_pmin_col]] else NA_real_,
+        daily_pmin_24h   = if (.has_tiny_pmin) .data[[tiny_pmin_col]] else NA_real_,
         daily_pmin_24h_n = as.integer(!is.na(daily_pmin_24h)),
 
-        daily_tmax_24h   = if (tiny_tmax_col %in% names(.)) .data[[tiny_tmax_col]] else NA_real_,
+        daily_tmax_24h   = if (.has_tiny_tmax) .data[[tiny_tmax_col]] else NA_real_,
         daily_tmax_24h_n = as.integer(!is.na(daily_tmax_24h)),
 
-        daily_tmin_24h   = if (tiny_tmin_col %in% names(.)) .data[[tiny_tmin_col]] else NA_real_,
+        daily_tmin_24h   = if (.has_tiny_tmin) .data[[tiny_tmin_col]] else NA_real_,
         daily_tmin_24h_n = as.integer(!is.na(daily_tmin_24h)),
 
         daily_total_vedba_rate_h,
@@ -331,31 +350,22 @@ mt_add_daily_sensor_metrics <- function(b_all,
   key$.row_id  <- seq_len(nrow(key))
   key$.bat_day <- get_bat_day(key[[time_col_daily]])
 
-  key_unique <- key |>
-    dplyr::arrange(.data[[track_col]], .data[[time_col_daily]], .row_id) |>
-    dplyr::group_by(.data[[track_col]], .bat_day) |>
-    dplyr::slice(1) |>
-    dplyr::ungroup()
-
   sensor_daily_uniq <- sensor_daily |>
     dplyr::group_by(.data[[track_col]], .bat_day) |>
     dplyr::summarise(dplyr::across(dplyr::everything(), ~ dplyr::first(.x)), .groups = "drop")
 
+  # many-to-one join: b_daily rows that share the same bat_day (UTC timestamp
+  # before noon maps to previous night) both receive the same nightly metrics.
   joined <- dplyr::left_join(
-    key_unique,
+    key,
     sensor_daily_uniq,
-    by = c(track_col, ".bat_day"),
-    relationship = "one-to-one"
+    by = c(track_col, ".bat_day")
   )
 
   new_cols <- setdiff(names(sensor_daily_uniq), c(track_col, ".bat_day"))
 
-  metrics_full <- tibble::tibble(.row_id = key$.row_id)
-  for (nm in new_cols) metrics_full[[nm]] <- NA
-  metrics_full[match(joined$.row_id, metrics_full$.row_id), new_cols] <- joined[, new_cols, drop = FALSE]
-
   out <- b_daily
-  for (nm in new_cols) out[[nm]] <- metrics_full[[nm]]
+  for (nm in new_cols) out[[nm]] <- joined[[nm]]
 
   # geometry stays exactly as in b_daily (POINT/empty), never MULTIPOINT
   out
