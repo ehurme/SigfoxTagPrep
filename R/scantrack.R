@@ -294,7 +294,8 @@ if (!exists("extract_elevation_segments", mode = "function")) {
 
     # ── Daily column name candidates (resolved once, used in overlays below) ──
     daily_vedba_col <- if (has_daily) .pick_first_col(b_daily_df, c(
-      "daily_vedba_sum", "daily_total_vedba_24h",
+      "daily_vedba_sum", "tinyfox_total_vedba",
+      "daily_total_vedba_24h",
       "daily_vedba_24h", "daily_total_vedba",
       "tinyfox_vedba_24h", "daily_tinyfox_vedba_24h"
     )) else NA_character_
@@ -318,6 +319,10 @@ if (!exists("extract_elevation_segments", mode = "function")) {
       "daily_p_min", "daily_pmin_24h",
       "daily_pressure_min", "daily_pressure_mbar",
       "tinyfox_pressure_min_last_24h", "barometric_pressure"
+    )) else NA_character_
+
+    daily_activity_col <- if (has_daily) .pick_first_col(b_daily_df, c(
+      "daily_activity_percent_24h", "tinyfox_activity_percent_last_24h"
     )) else NA_character_
 
     # ── Tag type detection ───────────────────────────────────────────────
@@ -501,10 +506,15 @@ if (!exists("extract_elevation_segments", mode = "function")) {
         c("barometric_pressure", "tinyfox_pressure_min_last_24h"))
       b_daily_df$snap_ts_p <- .snap_to_nearest_ts(
         b_daily_df$daily_timestamp, b_full_df$timestamp[.p_mask])
+
+      .a_mask <- .mk_ts_mask(b_full_df, c("tinyfox_activity_percent_last_24h"))
+      b_daily_df$snap_ts_a <- .snap_to_nearest_ts(
+        b_daily_df$daily_timestamp, b_full_df$timestamp[.a_mask])
     } else if (has_daily && nrow(b_daily_df) > 0) {
       b_daily_df$snap_ts_v <- b_daily_df$daily_timestamp
       b_daily_df$snap_ts_t <- b_daily_df$daily_timestamp
       b_daily_df$snap_ts_p <- b_daily_df$daily_timestamp
+      b_daily_df$snap_ts_a <- b_daily_df$daily_timestamp
     }
 
     # ── Sensor panels ────────────────────────────────────────────────────
@@ -607,13 +617,30 @@ if (!exists("extract_elevation_segments", mode = "function")) {
     sensor_panels[["vedba"]] <- p_vedba
 
     if (is_tinyfox && .has_data(b_full_df, "tinyfox_activity_percent_last_24h")) {
-      sensor_panels[["activity"]] <- ggplot(b_full_df) +
-        geom_path(aes(timestamp, tinyfox_activity_percent_last_24h), col = "forestgreen") +
-        geom_point(aes(timestamp, tinyfox_activity_percent_last_24h), col = "forestgreen", size = 1.5) +
+      p_activity <- ggplot() +
+        geom_path(data = b_full_df, aes(timestamp, tinyfox_activity_percent_last_24h), col = "forestgreen") +
+        geom_point(data = b_full_df, aes(timestamp, tinyfox_activity_percent_last_24h), col = "forestgreen", size = 1.5) +
         ylim(c(0, 100)) +
         .pt() +
         ylab("Activity\n(% above threshold)") +
         xlab("Date")
+
+      if (has_daily && !is.na(daily_activity_col) && .has_data(b_daily_df, daily_activity_col)) {
+        p_activity <- p_activity +
+          geom_line(
+            data = b_daily_df,
+            aes(snap_ts_a, .data[[daily_activity_col]]),
+            inherit.aes = FALSE, col = "forestgreen", linewidth = 0.6, linetype = "dashed"
+          ) +
+          geom_point(
+            data = b_daily_df,
+            aes(snap_ts_a, .data[[daily_activity_col]]),
+            inherit.aes = FALSE, shape = 21, fill = "white",
+            col = "forestgreen", size = 2.8, stroke = 1.2
+          )
+      }
+
+      sensor_panels[["activity"]] <- p_activity
     }
 
     # Dynamic ylim: range of valid raw temp values (exclude exact zeros = sensor artifact)
@@ -870,31 +897,38 @@ if (!exists("extract_elevation_segments", mode = "function")) {
     }
 
     if (has_daily && .has_data(b_daily_df, "daily_pressure_alt_m")) {
-  if (!"cum_dist_km" %in% names(b_daily_df)) {
-    t_daily <- as.numeric(b_daily_df$daily_timestamp)
-    t_loc <- as.numeric(b_df$timestamp)
+      # Snap daily cum_dist_km to nearest raw pressure data row (not nearest location)
+      # so the circle lands on top of an existing raw pressure altitude point.
+      .pres_rows <- b_full_df[!is.na(b_full_df$alt_pressure_m) & !is.na(b_full_df$cum_dist_km), ]
+      if (nrow(.pres_rows) > 0) {
+        t_d <- as.numeric(b_daily_df$daily_timestamp)
+        t_p <- as.numeric(.pres_rows$timestamp)
+        idx_l <- findInterval(t_d, t_p, all.inside = TRUE)
+        idx_r <- pmin(idx_l + 1L, nrow(.pres_rows))
+        use_r <- abs(t_d - t_p[idx_r]) < abs(t_d - t_p[idx_l])
+        b_daily_df$cum_dist_km <- .pres_rows$cum_dist_km[ifelse(use_r, idx_r, idx_l)]
+      } else {
+        # Fallback: snap to nearest location row
+        t_d <- as.numeric(b_daily_df$daily_timestamp)
+        t_l <- as.numeric(b_df$timestamp)
+        idx_l <- findInterval(t_d, t_l, all.inside = TRUE)
+        idx_r <- pmin(idx_l + 1L, nrow(b_df))
+        use_r <- abs(t_d - t_l[idx_r]) < abs(t_d - t_l[idx_l])
+        b_daily_df$cum_dist_km <- b_df$cum_dist_km[ifelse(use_r, idx_r, idx_l)]
+      }
 
-    idx_l <- findInterval(t_daily, t_loc, all.inside = TRUE)
-    idx_r <- pmin(idx_l + 1L, nrow(b_df))
-
-    use_r <- abs(t_daily - t_loc[idx_r]) < abs(t_daily - t_loc[idx_l])
-    nn <- ifelse(use_r, idx_r, idx_l)
-
-    b_daily_df$cum_dist_km <- b_df$cum_dist_km[nn]
-  }
-
-  p_altitude <- p_altitude +
-    geom_point(
-      data = b_daily_df[!is.na(b_daily_df$daily_pressure_alt_m), ],
-      aes(cum_dist_km, daily_pressure_alt_m),
-      inherit.aes = FALSE,
-      shape = 21,
-      fill = "white",
-      col = "black",
-      size = 2.2,
-      stroke = 0.7
-    )
-  }
+      p_altitude <- p_altitude +
+        geom_point(
+          data = b_daily_df[!is.na(b_daily_df$daily_pressure_alt_m), ],
+          aes(cum_dist_km, daily_pressure_alt_m),
+          inherit.aes = FALSE,
+          shape = 21,
+          fill = "white",
+          col = "black",
+          size = 2.2,
+          stroke = 0.7
+        )
+    }
     # ── Daily standalone panels ──────────────────────────────────────────────
     # VeDBA, temperature, and pressure are overlaid directly on the raw sensor
     # panels above. Only step distance (different metric from speed) and message
