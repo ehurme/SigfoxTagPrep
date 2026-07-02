@@ -73,6 +73,26 @@ if (!exists("extract_elevation_segments", mode = "function")) {
   NA_character_
 }
 
+# Snap a vector of daily timestamps to the nearest timestamp in raw_ts.
+# Returns daily_ts unchanged when raw_ts is empty.
+.snap_to_nearest_ts <- function(daily_ts, raw_ts) {
+  t_r <- sort(as.numeric(raw_ts[!is.na(raw_ts)]))
+  if (!length(t_r)) return(daily_ts)
+  t_d <- as.numeric(daily_ts)
+  idx_l <- findInterval(t_d, t_r, all.inside = TRUE)
+  idx_r <- pmin(idx_l + 1L, length(t_r))
+  use_r <- abs(t_d - t_r[idx_r]) < abs(t_d - t_r[idx_l])
+  as.POSIXct(t_r[ifelse(use_r, idx_r, idx_l)], origin = "1970-01-01",
+             tz = attr(daily_ts[1L], "tzone") %||% "UTC")
+}
+
+# Build a logical mask: TRUE on rows of df where any of cols is non-NA.
+.mk_ts_mask <- function(df, cols) {
+  m <- rep(FALSE, nrow(df))
+  for (cc in cols) if (cc %in% names(df)) m <- m | !is.na(df[[cc]])
+  m
+}
+
 .prepare_daily_df <- function(b_daily) {
   if (is.null(b_daily) || nrow(b_daily) == 0) {
     return(data.frame())
@@ -161,6 +181,7 @@ if (!exists("extract_elevation_segments", mode = "function")) {
     d,
     c(
       "daily_p_min",
+      "daily_pmin_24h",
       "daily_pressure_min",
       "daily_pressure_mbar",
       "tinyfox_pressure_min_last_24h",
@@ -273,24 +294,29 @@ if (!exists("extract_elevation_segments", mode = "function")) {
 
     # ── Daily column name candidates (resolved once, used in overlays below) ──
     daily_vedba_col <- if (has_daily) .pick_first_col(b_daily_df, c(
-      "daily_vedba_sum", "daily_vedba_24h", "daily_total_vedba",
+      "daily_vedba_sum", "daily_total_vedba_24h",
+      "daily_vedba_24h", "daily_total_vedba",
       "tinyfox_vedba_24h", "daily_tinyfox_vedba_24h"
     )) else NA_character_
 
     daily_temp_min_col <- if (has_daily) .pick_first_col(b_daily_df, c(
-      "daily_temp_min", "daily_temperature_min", "tinyfox_temperature_min_last_24h"
+      "daily_temp_min", "daily_tmin_24h",
+      "daily_temperature_min", "tinyfox_temperature_min_last_24h"
     )) else NA_character_
 
     daily_temp_max_col <- if (has_daily) .pick_first_col(b_daily_df, c(
-      "daily_temp_max", "daily_temperature_max", "tinyfox_temperature_max_last_24h"
+      "daily_temp_max", "daily_tmax_24h",
+      "daily_temperature_max", "tinyfox_temperature_max_last_24h"
     )) else NA_character_
 
     daily_temp_mean_col <- if (has_daily) .pick_first_col(b_daily_df, c(
-      "daily_temp_mean", "daily_temperature_mean", "temperature_mean"
+      "daily_temp_mean", "daily_tmean_24h",
+      "daily_temperature_mean", "temperature_mean"
     )) else NA_character_
 
     daily_pressure_col <- if (has_daily) .pick_first_col(b_daily_df, c(
-      "daily_p_min", "daily_pressure_min", "daily_pressure_mbar",
+      "daily_p_min", "daily_pmin_24h",
+      "daily_pressure_min", "daily_pressure_mbar",
       "tinyfox_pressure_min_last_24h", "barometric_pressure"
     )) else NA_character_
 
@@ -454,6 +480,33 @@ if (!exists("extract_elevation_segments", mode = "function")) {
           stroke = 0.8
         )
     }
+    # ── Snap daily timestamps to nearest raw sensor row (one per sensor type) ──
+    # For NanoFox, sensor rows sit at their own timestamps (not location times),
+    # so solar-noon daily_timestamp doesn't fall on a raw measurement. Snapping
+    # makes daily overlay circles land exactly on an existing raw data point.
+    if (has_daily && nrow(b_daily_df) > 0 && "daily_timestamp" %in% names(b_daily_df)) {
+      .vs_col <- .pick_first_col(b_full_df,
+        c("tinyfox_total_vedba", "tinyfox_vedba_burst_sum", "vedba"))
+      b_daily_df$snap_ts_v <- if (!is.na(.vs_col))
+        .snap_to_nearest_ts(b_daily_df$daily_timestamp, b_full_df$timestamp[!is.na(b_full_df[[.vs_col]])])
+      else b_daily_df$daily_timestamp
+
+      .t_mask <- .mk_ts_mask(b_full_df, c(
+        "temperature_min", "temperature_max", "external_temperature",
+        "tinyfox_temperature_min_last_24h", "tinyfox_temperature_max_last_24h"))
+      b_daily_df$snap_ts_t <- .snap_to_nearest_ts(
+        b_daily_df$daily_timestamp, b_full_df$timestamp[.t_mask])
+
+      .p_mask <- .mk_ts_mask(b_full_df,
+        c("barometric_pressure", "tinyfox_pressure_min_last_24h"))
+      b_daily_df$snap_ts_p <- .snap_to_nearest_ts(
+        b_daily_df$daily_timestamp, b_full_df$timestamp[.p_mask])
+    } else if (has_daily && nrow(b_daily_df) > 0) {
+      b_daily_df$snap_ts_v <- b_daily_df$daily_timestamp
+      b_daily_df$snap_ts_t <- b_daily_df$daily_timestamp
+      b_daily_df$snap_ts_p <- b_daily_df$daily_timestamp
+    }
+
     # ── Sensor panels ────────────────────────────────────────────────────
     sensor_panels <- list()
 
@@ -540,12 +593,12 @@ if (!exists("extract_elevation_segments", mode = "function")) {
       p_vedba <- p_vedba +
         geom_line(
           data = b_daily_df,
-          aes(daily_timestamp, .data[[daily_vedba_col]]),
+          aes(snap_ts_v, .data[[daily_vedba_col]]),
           inherit.aes = FALSE, col = "black", linewidth = 0.6, linetype = "dashed"
         ) +
         geom_point(
           data = b_daily_df,
-          aes(daily_timestamp, .data[[daily_vedba_col]]),
+          aes(snap_ts_v, .data[[daily_vedba_col]]),
           inherit.aes = FALSE, shape = 21, fill = "white",
           col = "black", size = 2.8, stroke = 1.2
         )
@@ -627,12 +680,12 @@ if (!exists("extract_elevation_segments", mode = "function")) {
         p_temperature <- p_temperature +
           geom_line(
             data = b_daily_df,
-            aes(daily_timestamp, .data[[daily_temp_min_col]]),
+            aes(snap_ts_t, .data[[daily_temp_min_col]]),
             inherit.aes = FALSE, col = "steelblue", linewidth = 0.6, linetype = "dashed"
           ) +
           geom_point(
             data = b_daily_df,
-            aes(daily_timestamp, .data[[daily_temp_min_col]]),
+            aes(snap_ts_t, .data[[daily_temp_min_col]]),
             inherit.aes = FALSE, shape = 21, fill = "white",
             col = "steelblue", size = 2.8, stroke = 1.2
           )
@@ -641,12 +694,12 @@ if (!exists("extract_elevation_segments", mode = "function")) {
         p_temperature <- p_temperature +
           geom_line(
             data = b_daily_df,
-            aes(daily_timestamp, .data[[daily_temp_max_col]]),
+            aes(snap_ts_t, .data[[daily_temp_max_col]]),
             inherit.aes = FALSE, col = "tomato", linewidth = 0.6, linetype = "dashed"
           ) +
           geom_point(
             data = b_daily_df,
-            aes(daily_timestamp, .data[[daily_temp_max_col]]),
+            aes(snap_ts_t, .data[[daily_temp_max_col]]),
             inherit.aes = FALSE, shape = 21, fill = "white",
             col = "tomato", size = 2.8, stroke = 1.2
           )
@@ -655,12 +708,12 @@ if (!exists("extract_elevation_segments", mode = "function")) {
         p_temperature <- p_temperature +
           geom_line(
             data = b_daily_df,
-            aes(daily_timestamp, .data[[daily_temp_mean_col]]),
+            aes(snap_ts_t, .data[[daily_temp_mean_col]]),
             inherit.aes = FALSE, col = "black", linewidth = 0.7, linetype = "dashed"
           ) +
           geom_point(
             data = b_daily_df,
-            aes(daily_timestamp, .data[[daily_temp_mean_col]]),
+            aes(snap_ts_t, .data[[daily_temp_mean_col]]),
             inherit.aes = FALSE, shape = 21, fill = "white",
             col = "black", size = 2.8, stroke = 1.2
           )
@@ -734,12 +787,12 @@ if (!exists("extract_elevation_segments", mode = "function")) {
       p_pressure <- p_pressure +
         geom_line(
           data = b_daily_df,
-          aes(daily_timestamp, .data[[daily_pressure_col]]),
+          aes(snap_ts_p, .data[[daily_pressure_col]]),
           inherit.aes = FALSE, col = "purple", linewidth = 0.6, linetype = "dashed"
         ) +
         geom_point(
           data = b_daily_df,
-          aes(daily_timestamp, .data[[daily_pressure_col]]),
+          aes(snap_ts_p, .data[[daily_pressure_col]]),
           inherit.aes = FALSE, shape = 21, fill = "white",
           col = "purple", size = 2.8, stroke = 1.2
         )

@@ -51,7 +51,7 @@ mt_add_daily_sensor_metrics <- function(b_all,
                                         skip_uwasp = TRUE,
 
                                         # nanofox
-                                        nano_vedba_col = "vedba_sum",
+                                        nano_vedba_col = "vedba",
                                         nano_temp_col  = "avg_temp",
                                         nano_pres_col  = "min_3h_pressure",
 
@@ -181,10 +181,25 @@ mt_add_daily_sensor_metrics <- function(b_all,
         daily_vedba_sum   = if (nano_vedba_col %in% names(.)) sum(.data[[nano_vedba_col]], na.rm = TRUE) else NA_real_,
         daily_vedba_sum_n = if (nano_vedba_col %in% names(.)) sum(!is.na(.data[[nano_vedba_col]])) else 0L,
 
-        daily_temp_min   = if (nano_temp_col %in% names(.)) min(.data[[nano_temp_col]], na.rm = TRUE) else NA_real_,
-        daily_temp_max   = if (nano_temp_col %in% names(.)) max(.data[[nano_temp_col]], na.rm = TRUE) else NA_real_,
-        daily_temp_mean   = if (nano_temp_col %in% names(.)) mean(.data[[nano_temp_col]], na.rm = TRUE) else NA_real_,
-        daily_temp_n      = if (nano_temp_col %in% names(.)) sum(!is.na(.data[[nano_temp_col]])) else 0L,
+        # temperature_min / temperature_max exist on 30DaysFineScalePressure;
+        # avg_temp is the fallback for standard 30Days firmware.
+        daily_temp_min = suppressWarnings(min(
+          if ("temperature_min" %in% names(.) && any(!is.na(.data[["temperature_min"]])))
+            .data[["temperature_min"]]
+          else if (nano_temp_col %in% names(.)) .data[[nano_temp_col]]
+          else NA_real_,
+          na.rm = TRUE
+        )),
+        daily_temp_max = suppressWarnings(max(
+          if ("temperature_max" %in% names(.) && any(!is.na(.data[["temperature_max"]])))
+            .data[["temperature_max"]]
+          else if (nano_temp_col %in% names(.)) .data[[nano_temp_col]]
+          else NA_real_,
+          na.rm = TRUE
+        )),
+        daily_temp_n = sum(!is.na(if ("temperature_min" %in% names(.)) .data[["temperature_min"]]
+                                  else if (nano_temp_col %in% names(.)) .data[[nano_temp_col]]
+                                  else NA_real_)),
 
         daily_p_min       = if (nano_pres_col %in% names(.)) suppressWarnings(min(.data[[nano_pres_col]], na.rm = TRUE)) else NA_real_,
         daily_p_min_n     = if (nano_pres_col %in% names(.)) sum(!is.na(.data[[nano_pres_col]])) else 0L,
@@ -197,6 +212,8 @@ mt_add_daily_sensor_metrics <- function(b_all,
       ) %>%
       dplyr::mutate(
         daily_gap_h_max       = dplyr::if_else(is.infinite(daily_gap_h_max), NA_real_, daily_gap_h_max),
+        daily_temp_min        = dplyr::if_else(is.infinite(daily_temp_min), NA_real_, daily_temp_min),
+        daily_temp_max        = dplyr::if_else(is.infinite(daily_temp_max), NA_real_, daily_temp_max),
         daily_p_min           = dplyr::if_else(is.infinite(daily_p_min), NA_real_, daily_p_min),
         daily_alt_night_max_m = dplyr::if_else(is.infinite(daily_alt_night_max_m), NA_real_, daily_alt_night_max_m)
       )
