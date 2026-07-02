@@ -18,8 +18,7 @@
 #   plot_basestation_correction(before, after, ...)   — standalone plot
 # =============================================================================
 
-source("./R/parse_basestations.R")   # adjust path as needed
-
+source("../SigfoxTagPrep/R/parse_basestations.R")   # adjust path as needed
 
 # -----------------------------------------------------------------------------
 # .parse_correction_times(corrections)
@@ -216,22 +215,26 @@ plot_basestation_correction <- function(
 #   sep            CSV field separator       (default: ";")
 #   out_path       Output path. Defaults to <stem>_corrected.csv
 #   time_tz        Timezone for timestamps   (default: "UTC")
-#   plot           Show before/after map     (default: TRUE)
-#   verbose        Print change summary      (default: TRUE)
+#   plot               Show before/after map     (default: TRUE)
+#   verbose            Print change summary      (default: TRUE)
+#   sole_receiver_only Only correct rows where the faulty station is the *sole*
+#                      receiver (n_stations == 1). Set FALSE to also correct rows
+#                      where other stations are present alongside it. (default: TRUE)
 #
 # Returns (invisibly) the corrected data frame.
 # -----------------------------------------------------------------------------
 fix_basestation_locations <- function(
     csv_path,
     corrections,
-    bs_col   = "Base Stations (ID, RSSI, Reps)",
-    time_col = "Time (UTC)",
-    pos_col  = "Position",
-    sep      = ";",
-    out_path = NULL,
-    time_tz  = "UTC",
-    plot     = TRUE,
-    verbose  = TRUE
+    bs_col             = "Base Stations (ID, RSSI, Reps)",
+    time_col           = "Time (UTC)",
+    pos_col            = "Position",
+    sep                = ";",
+    out_path           = NULL,
+    time_tz            = "UTC",
+    plot               = TRUE,
+    verbose            = TRUE,
+    sole_receiver_only = TRUE
 ) {
   # ---- 0. Validate inputs ----------------------------------------------------
   stopifnot(
@@ -283,9 +286,10 @@ fix_basestation_locations <- function(
   for (i in seq_len(nrow(corrections))) {
     rule <- corrections[i, ]
 
-    sole_receiver <- !is.na(df$..best_id) &
-      df$..best_id == rule$station_id &
-      df$..n_stations == 1L
+    station_match <- !is.na(df$..best_id) & df$..best_id == rule$station_id
+    if (sole_receiver_only) {
+      station_match <- station_match & df$..n_stations == 1L
+    }
 
     in_window <- rep(TRUE, nrow(df))
     if (!is.na(rule$start_dt))
@@ -293,15 +297,16 @@ fix_basestation_locations <- function(
     if (!is.na(rule$end_dt))
       in_window <- in_window & !is.na(df$..time) & df$..time <= rule$end_dt
 
-    rows_to_fix <- which(sole_receiver & in_window)
+    rows_to_fix <- which(station_match & in_window)
     if (length(rows_to_fix) == 0) next
 
     df$..lat[rows_to_fix] <- rule$correct_lat
     df$..lon[rows_to_fix] <- rule$correct_lon
     df$..changed[rows_to_fix]  <- TRUE
+    match_type <- if (sole_receiver_only) "sole_receiver" else "any_receiver"
     df$..change_reason[rows_to_fix] <- sprintf(
-      "sole_receiver:%s corrected to (%.6f, %.6f)",
-      rule$station_id, rule$correct_lat, rule$correct_lon
+      "%s:%s corrected to (%.6f, %.6f)",
+      match_type, rule$station_id, rule$correct_lat, rule$correct_lon
     )
   }
 

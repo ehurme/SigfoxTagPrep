@@ -37,8 +37,12 @@ add_min_pressure_to_locations <- function(df,
   df2 <- df %>%
     dplyr::select(-any_of(c("min.3h.pressure", "min_3h_pressure_join")))
 
+  # Drop geometry for the summarize step — sf/move2 group_by+reframe can throw
+  # "no simple features geometry column present" in some sf/dplyr versions.
+  df2_tbl <- tryCatch(sf::st_drop_geometry(df2), error = function(e) df2)
+
   # 1) Extract min barometric pressure per (track, time)
-  summaries <- df2 %>%
+  summaries <- df2_tbl %>%
     group_by(!!track_col, !!time_col) %>%
     reframe(
       min_3h_pressure_join = {

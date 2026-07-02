@@ -22,7 +22,7 @@ if (!exists("extract_elevation_segments", mode = "function")) {
       source(.p)
       break
     }
-  }
+  } 
   rm(.p)
 }
 
@@ -213,13 +213,33 @@ if (!exists("extract_elevation_segments", mode = "function")) {
       return(status_row("skipped", message = msg))
     }
 
-    sp  <- .first_or(b_full$species, "unknown_species")
-    sex <- .first_or(b_full$sex, "unknown_sex")
+    b_full_df <- sf::st_drop_geometry(b_full)
 
-    yr <- if ("timestamp" %in% names(b_full) && length(b_full$timestamp) > 0) {
-      lubridate::year(b_full$timestamp[1])
+    sp  <- .first_or(b_full_df$species, "unknown_species")
+    sex <- .first_or(b_full_df$sex, "unknown_sex")
+
+    yr <- if ("timestamp" %in% names(b_full_df) && length(b_full_df$timestamp) > 0) {
+      lubridate::year(b_full_df$timestamp[1])
     } else {
       NA_integer_
+    }
+
+    tag_id <- if (
+      "tag_local_identifier" %in% names(b_full_df) &&
+        !is.na(b_full_df$tag_local_identifier[1])
+    ) {
+      as.character(b_full_df$tag_local_identifier[1])
+    } else {
+      NA_character_
+    }
+
+    indiv_id <- if (
+      "individual_local_identifier" %in% names(b_full_df) &&
+        !is.na(b_full_df$individual_local_identifier[1])
+    ) {
+      as.character(b_full_df$individual_local_identifier[1])
+    } else {
+      NA_character_
     }
 
     out_file <- file.path(
@@ -227,7 +247,8 @@ if (!exists("extract_elevation_segments", mode = "function")) {
       paste0(
         .clean_filename_part(sp), "_",
         .clean_filename_part(as.character(yr)), "_",
-        .clean_filename_part(tag), "_",
+        .clean_filename_part(tag_id), "_",
+        .clean_filename_part(indiv_id), "_",
         .clean_filename_part(sex), ".png"
       )
     )
@@ -249,12 +270,34 @@ if (!exists("extract_elevation_segments", mode = "function")) {
     
     b_daily_df <- .prepare_daily_df(b_daily)
     has_daily <- nrow(b_daily_df) > 0
-    # ── Tag type detection ───────────────────────────────────────────────
-    b_full_df <- b_full %>% sf::st_drop_geometry()
 
+    # ── Daily column name candidates (resolved once, used in overlays below) ──
+    daily_vedba_col <- if (has_daily) .pick_first_col(b_daily_df, c(
+      "daily_vedba_sum", "daily_vedba_24h", "daily_total_vedba",
+      "tinyfox_vedba_24h", "daily_tinyfox_vedba_24h"
+    )) else NA_character_
+
+    daily_temp_min_col <- if (has_daily) .pick_first_col(b_daily_df, c(
+      "daily_temp_min", "daily_temperature_min", "tinyfox_temperature_min_last_24h"
+    )) else NA_character_
+
+    daily_temp_max_col <- if (has_daily) .pick_first_col(b_daily_df, c(
+      "daily_temp_max", "daily_temperature_max", "tinyfox_temperature_max_last_24h"
+    )) else NA_character_
+
+    daily_temp_mean_col <- if (has_daily) .pick_first_col(b_daily_df, c(
+      "daily_temp_mean", "daily_temperature_mean", "temperature_mean"
+    )) else NA_character_
+
+    daily_pressure_col <- if (has_daily) .pick_first_col(b_daily_df, c(
+      "daily_p_min", "daily_pressure_min", "daily_pressure_mbar",
+      "tinyfox_pressure_min_last_24h", "barometric_pressure"
+    )) else NA_character_
+
+    # ── Tag type detection ───────────────────────────────────────────────
     is_tinyfox <-
-      any(grepl("tinyfox", b_full_df$model, ignore.case = TRUE), na.rm = TRUE) ||
-      any(b_full_df$tag_firmware %in% c("V13", "V13P", "V14P"), na.rm = TRUE)
+      any(grepl("tinyfox|BBX5|BBV6|TV1", b_full_df$model, ignore.case = TRUE), na.rm = TRUE) ||
+      any(b_full_df$tag_firmware %in% c("V13", "V13P", "V14P", "BBX5", "BBV6", "TV1"), na.rm = TRUE)
 
     # ── Elevation raster ─────────────────────────────────────────────────
     e <- terra::rast(elevatr::get_elev_raster(b_loc_valid, z = elev_z, expand = 1))
@@ -289,24 +332,6 @@ if (!exists("extract_elevation_segments", mode = "function")) {
     # ── Tag metadata & track summary ─────────────────────────────────────
     mdl <- .first_or(b_full_df$model, "unknown")
     firmware <- .first_or(b_full_df$tag_firmware, "unknown")
-
-    indiv_id <- if (
-      "individual_local_identifier" %in% names(b_full_df) &&
-        !is.na(b_full_df$individual_local_identifier[1])
-    ) {
-      b_full_df$individual_local_identifier[1]
-    } else {
-      NA_character_
-    }
-
-    tag_id <- if (
-      "tag_local_identifier" %in% names(b_full_df) &&
-        !is.na(b_full_df$tag_local_identifier[1])
-    ) {
-      b_full_df$tag_local_identifier[1]
-    } else {
-      NA_character_
-    }
 
     n_fixes <- nrow(b_df)
     date_start <- format(min(b_df$timestamp, na.rm = TRUE), "%Y-%m-%d")
@@ -499,15 +524,31 @@ if (!exists("extract_elevation_segments", mode = "function")) {
       )
 
       if (!is.na(vedba_col)) {
+        .vdf <- b_full_df[!is.na(b_full_df[[vedba_col]]), ]
         p_vedba <- p_vedba +
-          geom_path(data = b_full_df, aes(timestamp, .data[[vedba_col]]), col = "blue") +
+          geom_path(data = .vdf, aes(timestamp, .data[[vedba_col]]), col = "blue") +
           geom_point(
-            data = b_full_df,
+            data = .vdf,
             aes(timestamp, .data[[vedba_col]], col = as.character(tag_fell_off)),
             size = 1.5
           ) +
           .vedba_fell_scale
       }
+    }
+
+    if (has_daily && !is.na(daily_vedba_col) && .has_data(b_daily_df, daily_vedba_col)) {
+      p_vedba <- p_vedba +
+        geom_line(
+          data = b_daily_df,
+          aes(daily_timestamp, .data[[daily_vedba_col]]),
+          inherit.aes = FALSE, col = "black", linewidth = 0.6, linetype = "dashed"
+        ) +
+        geom_point(
+          data = b_daily_df,
+          aes(daily_timestamp, .data[[daily_vedba_col]]),
+          inherit.aes = FALSE, shape = 21, fill = "white",
+          col = "black", size = 2.8, stroke = 1.2
+        )
     }
 
     sensor_panels[["vedba"]] <- p_vedba
@@ -522,41 +563,149 @@ if (!exists("extract_elevation_segments", mode = "function")) {
         xlab("Date")
     }
 
+    # Dynamic ylim: range of valid raw temp values (exclude exact zeros = sensor artifact)
+    .raw_temp_vals <- suppressWarnings(as.numeric(c(
+      b_full_df$tinyfox_temperature_min_last_24h,
+      b_full_df$tinyfox_temperature_max_last_24h,
+      b_full_df$temperature_min,
+      b_full_df$temperature_max,
+      b_full_df$external_temperature
+    )))
+    .raw_temp_vals <- .raw_temp_vals[!is.na(.raw_temp_vals) & is.finite(.raw_temp_vals) &
+                                       .raw_temp_vals != 0 & .raw_temp_vals > -30 & .raw_temp_vals < 55]
+    .temp_ylim <- if (length(.raw_temp_vals) >= 5) {
+      c(max(-25, min(.raw_temp_vals) - 3), min(55, max(.raw_temp_vals) + 3))
+    } else {
+      c(-15, 45)
+    }
+
     p_temperature <- ggplot() +
-      ylim(c(-15, 45)) +
+      coord_cartesian(ylim = .temp_ylim) +
       .pt() +
       ylab("Temperature (°C)") +
       xlab("Date")
 
     if (is_tinyfox) {
       if (.has_data(b_full_df, "tinyfox_temperature_min_last_24h")) {
+        .tdf <- b_full_df[!is.na(b_full_df$tinyfox_temperature_min_last_24h), ]
         p_temperature <- p_temperature +
-          geom_path(data = b_full_df, aes(timestamp, tinyfox_temperature_min_last_24h), col = "darkblue") +
-          geom_point(data = b_full_df, aes(timestamp, tinyfox_temperature_min_last_24h), col = "darkblue", size = 1.5)
+          geom_path(data = .tdf, aes(timestamp, tinyfox_temperature_min_last_24h), col = "darkblue") +
+          geom_point(data = .tdf, aes(timestamp, tinyfox_temperature_min_last_24h), col = "darkblue", size = 1.5)
       }
 
       if (.has_data(b_full_df, "tinyfox_temperature_max_last_24h")) {
+        .tdf <- b_full_df[!is.na(b_full_df$tinyfox_temperature_max_last_24h), ]
         p_temperature <- p_temperature +
-          geom_path(data = b_full_df, aes(timestamp, tinyfox_temperature_max_last_24h), col = "tomato") +
-          geom_point(data = b_full_df, aes(timestamp, tinyfox_temperature_max_last_24h), col = "tomato", size = 1.5)
+          geom_path(data = .tdf, aes(timestamp, tinyfox_temperature_max_last_24h), col = "tomato") +
+          geom_point(data = .tdf, aes(timestamp, tinyfox_temperature_max_last_24h), col = "tomato", size = 1.5)
       }
     } else {
       if (.has_data(b_full_df, "temperature_min")) {
+        .tdf <- b_full_df[!is.na(b_full_df$temperature_min), ]
         p_temperature <- p_temperature +
-          geom_path(data = b_full_df, aes(timestamp, temperature_min), col = "steelblue") +
-          geom_point(data = b_full_df, aes(timestamp, temperature_min), col = "steelblue", size = 1.5)
+          geom_path(data = .tdf, aes(timestamp, temperature_min), col = "steelblue") +
+          geom_point(data = .tdf, aes(timestamp, temperature_min), col = "steelblue", size = 1.5)
       }
 
       if (.has_data(b_full_df, "temperature_max")) {
+        .tdf <- b_full_df[!is.na(b_full_df$temperature_max), ]
         p_temperature <- p_temperature +
-          geom_path(data = b_full_df, aes(timestamp, temperature_max), col = "tomato") +
-          geom_point(data = b_full_df, aes(timestamp, temperature_max), col = "tomato", size = 1.5)
+          geom_path(data = .tdf, aes(timestamp, temperature_max), col = "tomato") +
+          geom_point(data = .tdf, aes(timestamp, temperature_max), col = "tomato", size = 1.5)
       }
 
       if (.has_data(b_full_df, "external_temperature")) {
+        .tdf <- b_full_df[!is.na(b_full_df$external_temperature), ]
         p_temperature <- p_temperature +
-          geom_path(data = b_full_df, aes(timestamp, external_temperature), col = "darkred") +
-          geom_point(data = b_full_df, aes(timestamp, external_temperature), col = "darkred", size = 1.5)
+          geom_path(data = .tdf, aes(timestamp, external_temperature), col = "darkred") +
+          geom_point(data = .tdf, aes(timestamp, external_temperature), col = "darkred", size = 1.5)
+      }
+    }
+
+    if (has_daily) {
+      if (!is.na(daily_temp_min_col) && .has_data(b_daily_df, daily_temp_min_col)) {
+        p_temperature <- p_temperature +
+          geom_line(
+            data = b_daily_df,
+            aes(daily_timestamp, .data[[daily_temp_min_col]]),
+            inherit.aes = FALSE, col = "steelblue", linewidth = 0.6, linetype = "dashed"
+          ) +
+          geom_point(
+            data = b_daily_df,
+            aes(daily_timestamp, .data[[daily_temp_min_col]]),
+            inherit.aes = FALSE, shape = 21, fill = "white",
+            col = "steelblue", size = 2.8, stroke = 1.2
+          )
+      }
+      if (!is.na(daily_temp_max_col) && .has_data(b_daily_df, daily_temp_max_col)) {
+        p_temperature <- p_temperature +
+          geom_line(
+            data = b_daily_df,
+            aes(daily_timestamp, .data[[daily_temp_max_col]]),
+            inherit.aes = FALSE, col = "tomato", linewidth = 0.6, linetype = "dashed"
+          ) +
+          geom_point(
+            data = b_daily_df,
+            aes(daily_timestamp, .data[[daily_temp_max_col]]),
+            inherit.aes = FALSE, shape = 21, fill = "white",
+            col = "tomato", size = 2.8, stroke = 1.2
+          )
+      }
+      if (!is.na(daily_temp_mean_col) && .has_data(b_daily_df, daily_temp_mean_col)) {
+        p_temperature <- p_temperature +
+          geom_line(
+            data = b_daily_df,
+            aes(daily_timestamp, .data[[daily_temp_mean_col]]),
+            inherit.aes = FALSE, col = "black", linewidth = 0.7, linetype = "dashed"
+          ) +
+          geom_point(
+            data = b_daily_df,
+            aes(daily_timestamp, .data[[daily_temp_mean_col]]),
+            inherit.aes = FALSE, shape = 21, fill = "white",
+            col = "black", size = 2.8, stroke = 1.2
+          )
+      }
+    }
+
+    if (.has_data(b_full_df, "min_temp_c")) {
+      .mt_rows <- b_full_df[!is.na(b_full_df$min_temp_c), ]
+      if (nrow(.mt_rows) > 0) {
+        .mt_rows$ymin <- dplyr::case_when(
+          .mt_rows$min_temp_c == ">0 / <=5"  ~ 0,
+          .mt_rows$min_temp_c == ">5 / <=10" ~ 5,
+          TRUE ~ NA_real_
+        )
+        .mt_rows$ymax <- dplyr::case_when(
+          .mt_rows$min_temp_c == ">0 / <=5"  ~ 5,
+          .mt_rows$min_temp_c == ">5 / <=10" ~ 10,
+          TRUE ~ NA_real_
+        )
+        .mt_rows$yline <- dplyr::case_when(
+          .mt_rows$min_temp_c == "<=0" ~ 0,
+          .mt_rows$min_temp_c == ">10" ~ 10,
+          TRUE ~ NA_real_
+        )
+        .rb <- .mt_rows[!is.na(.mt_rows$ymin), ]
+        if (nrow(.rb) > 0) {
+          p_temperature <- p_temperature +
+            geom_ribbon(
+              data = .rb,
+              aes(x = timestamp, ymin = ymin, ymax = ymax),
+              inherit.aes = FALSE, fill = "darkgreen", alpha = 0.2
+            )
+        }
+        .ln <- .mt_rows[!is.na(.mt_rows$yline), ]
+        if (nrow(.ln) > 0) {
+          p_temperature <- p_temperature +
+            geom_line(
+              data = .ln, aes(x = timestamp, y = yline),
+              inherit.aes = FALSE, colour = "darkgreen", linewidth = 0.7
+            ) +
+            geom_point(
+              data = .ln, aes(x = timestamp, y = yline),
+              inherit.aes = FALSE, colour = "darkgreen", size = 1.5
+            )
+        }
       }
     }
 
@@ -568,15 +717,32 @@ if (!exists("extract_elevation_segments", mode = "function")) {
       xlab("Date")
 
     if (.has_data(b_full_df, "barometric_pressure")) {
+      .bpdf <- b_full_df[!is.na(b_full_df$barometric_pressure), ]
       p_pressure <- p_pressure +
-        geom_path(data = b_full_df, aes(timestamp, barometric_pressure), col = "purple") +
-        geom_point(data = b_full_df, aes(timestamp, barometric_pressure), col = "purple", size = 1.5)
+        geom_path(data = .bpdf, aes(timestamp, barometric_pressure), col = "purple") +
+        geom_point(data = .bpdf, aes(timestamp, barometric_pressure), col = "purple", size = 1.5)
     }
 
     if (.has_data(b_full_df, "tinyfox_pressure_min_last_24h")) {
+      .bpdf <- b_full_df[!is.na(b_full_df$tinyfox_pressure_min_last_24h), ]
       p_pressure <- p_pressure +
-        geom_path(data = b_full_df, aes(timestamp, tinyfox_pressure_min_last_24h), col = "darkorchid") +
-        geom_point(data = b_full_df, aes(timestamp, tinyfox_pressure_min_last_24h), col = "darkorchid", size = 1.5)
+        geom_path(data = .bpdf, aes(timestamp, tinyfox_pressure_min_last_24h), col = "darkorchid") +
+        geom_point(data = .bpdf, aes(timestamp, tinyfox_pressure_min_last_24h), col = "darkorchid", size = 1.5)
+    }
+
+    if (has_daily && !is.na(daily_pressure_col) && .has_data(b_daily_df, daily_pressure_col)) {
+      p_pressure <- p_pressure +
+        geom_line(
+          data = b_daily_df,
+          aes(daily_timestamp, .data[[daily_pressure_col]]),
+          inherit.aes = FALSE, col = "purple", linewidth = 0.6, linetype = "dashed"
+        ) +
+        geom_point(
+          data = b_daily_df,
+          aes(daily_timestamp, .data[[daily_pressure_col]]),
+          inherit.aes = FALSE, shape = 21, fill = "white",
+          col = "purple", size = 2.8, stroke = 1.2
+        )
     }
 
     sensor_panels[["pressure"]] <- p_pressure
@@ -676,168 +842,41 @@ if (!exists("extract_elevation_segments", mode = "function")) {
       stroke = 0.7
     )
   }
-    # ── Daily conversion panels ─────────────────────────────────────────────
-# These show how raw locations/sensors were converted into daily rows.
-if (has_daily) {
-  daily_panels <- list()
+    # ── Daily standalone panels ──────────────────────────────────────────────
+    # VeDBA, temperature, and pressure are overlaid directly on the raw sensor
+    # panels above. Only step distance (different metric from speed) and message
+    # count (no raw equivalent) remain as separate panels here.
+    if (has_daily) {
+      daily_panels <- list()
 
-  # Daily movement
-  if (.has_data(b_daily_df, "daily_step_km_plot")) {
-    daily_panels[["daily_movement"]] <- ggplot(b_daily_df) +
-      geom_col(aes(daily_date, daily_step_km_plot), fill = "grey65") +
-      geom_point(aes(daily_date, daily_step_km_plot), col = "black", size = 1.6) +
-      .pt() +
-      theme(legend.position = "none") +
-      ylab("Daily step\n(km)") +
-      xlab("Daily date")
-  }
+      if (.has_data(b_daily_df, "daily_step_km_plot")) {
+        daily_panels[["daily_movement"]] <- ggplot(b_daily_df) +
+          geom_col(aes(daily_date, daily_step_km_plot), fill = "grey65") +
+          geom_point(aes(daily_date, daily_step_km_plot), col = "black", size = 1.6) +
+          .pt() +
+          theme(legend.position = "none") +
+          ylab("Daily step\n(km)") +
+          xlab("Daily date")
+      }
 
-  # Daily VeDBA
-  daily_vedba_col <- .pick_first_col(
-    b_daily_df,
-    c(
-      "daily_vedba_sum",
-      "daily_vedba_24h",
-      "daily_total_vedba",
-      "tinyfox_vedba_24h",
-      "daily_tinyfox_vedba_24h"
-    )
-  )
+      daily_n_col <- .pick_first_col(
+        b_daily_df,
+        c("daily_n_msg", "daily_n_messages", "n_msg", "n_messages")
+      )
 
-  if (!is.na(daily_vedba_col)) {
-    daily_panels[["daily_vedba"]] <- ggplot(b_daily_df) +
-      geom_line(aes(daily_timestamp, .data[[daily_vedba_col]]), col = "black") +
-      geom_point(
-        aes(daily_timestamp, .data[[daily_vedba_col]]),
-        shape = 21,
-        fill = "white",
-        col = "black",
-        size = 2
-      ) +
-      .pt() +
-      ylab("Daily VeDBA") +
-      xlab("Daily date")
-  }
+      if (!is.na(daily_n_col)) {
+        daily_panels[["daily_messages"]] <- ggplot(b_daily_df) +
+          geom_col(aes(daily_date, .data[[daily_n_col]]), fill = "grey65") +
+          geom_point(aes(daily_date, .data[[daily_n_col]]), col = "black", size = 1.6) +
+          .pt() +
+          ylab("Messages\nper day") +
+          xlab("Daily date")
+      }
 
-  # Daily temperature
-  temp_mean_col <- .pick_first_col(
-    b_daily_df,
-    c("daily_temp_mean", "daily_temperature_mean", "temperature_mean")
-  )
-
-  temp_min_col <- .pick_first_col(
-    b_daily_df,
-    c("daily_temp_min", "daily_temperature_min", "tinyfox_temperature_min_last_24h")
-  )
-
-  temp_max_col <- .pick_first_col(
-    b_daily_df,
-    c("daily_temp_max", "daily_temperature_max", "tinyfox_temperature_max_last_24h")
-  )
-
-  if (!is.na(temp_mean_col) || !is.na(temp_min_col) || !is.na(temp_max_col)) {
-    p_daily_temp <- ggplot() +
-      .pt() +
-      ylab("Daily temp\n(°C)") +
-      xlab("Daily date")
-
-    if (!is.na(temp_min_col)) {
-      p_daily_temp <- p_daily_temp +
-        geom_line(
-          data = b_daily_df,
-          aes(daily_timestamp, .data[[temp_min_col]]),
-          col = "steelblue"
-        ) +
-        geom_point(
-          data = b_daily_df,
-          aes(daily_timestamp, .data[[temp_min_col]]),
-          col = "steelblue",
-          size = 1.5
-        )
+      if (length(daily_panels) > 0) {
+        sensor_panels <- c(sensor_panels, daily_panels)
+      }
     }
-
-    if (!is.na(temp_max_col)) {
-      p_daily_temp <- p_daily_temp +
-        geom_line(
-          data = b_daily_df,
-          aes(daily_timestamp, .data[[temp_max_col]]),
-          col = "tomato"
-        ) +
-        geom_point(
-          data = b_daily_df,
-          aes(daily_timestamp, .data[[temp_max_col]]),
-          col = "tomato",
-          size = 1.5
-        )
-    }
-
-    if (!is.na(temp_mean_col)) {
-      p_daily_temp <- p_daily_temp +
-        geom_line(
-          data = b_daily_df,
-          aes(daily_timestamp, .data[[temp_mean_col]]),
-          col = "black",
-          linewidth = 0.7
-        ) +
-        geom_point(
-          data = b_daily_df,
-          aes(daily_timestamp, .data[[temp_mean_col]]),
-          shape = 21,
-          fill = "white",
-          col = "black",
-          size = 2
-        )
-    }
-
-    daily_panels[["daily_temperature"]] <- p_daily_temp
-  }
-
-  # Daily pressure
-  daily_pressure_col <- .pick_first_col(
-    b_daily_df,
-    c(
-      "daily_p_min",
-      "daily_pressure_min",
-      "daily_pressure_mbar",
-      "tinyfox_pressure_min_last_24h",
-      "barometric_pressure"
-    )
-  )
-
-  if (!is.na(daily_pressure_col)) {
-    daily_panels[["daily_pressure"]] <- ggplot(b_daily_df) +
-      geom_line(aes(daily_timestamp, .data[[daily_pressure_col]]), col = "purple") +
-      geom_point(
-        aes(daily_timestamp, .data[[daily_pressure_col]]),
-        shape = 21,
-        fill = "white",
-        col = "purple",
-        size = 2
-      ) +
-      .pt() +
-      ylab("Daily pressure\n(mbar)") +
-      xlab("Daily date")
-  }
-
-  # Daily QA / message count
-  daily_n_col <- .pick_first_col(
-    b_daily_df,
-    c("daily_n_msg", "daily_n_messages", "n_msg", "n_messages")
-  )
-
-  if (!is.na(daily_n_col)) {
-    daily_panels[["daily_messages"]] <- ggplot(b_daily_df) +
-      geom_col(aes(daily_date, .data[[daily_n_col]]), fill = "grey65") +
-      geom_point(aes(daily_date, .data[[daily_n_col]]), col = "black", size = 1.6) +
-      .pt() +
-      ylab("Messages\nper day") +
-      xlab("Daily date")
-  }
-
-  if (length(daily_panels) > 0) {
-    sensor_panels <- c(sensor_panels, daily_panels)
-  }
-}
     # ── Assemble & save ──────────────────────────────────────────────────
     n_panels <- length(sensor_panels)
     ncol_grid <- if (n_panels <= 4) 2L else 3L
@@ -856,8 +895,15 @@ if (has_daily) {
       ncol = 1,
       heights = c(2.5, nrow_grid * 1.0, 0.6)
     )
+    p <- ggpubr::annotate_figure(
+      p,
+      bottom = ggpubr::text_grob(
+        "○ open circle + dashed line = daily summary value     • filled circle + solid line = raw sensor data",
+        size = 7, color = "grey30"
+      )
+    )
 
-    fig_height <- 3.5 + nrow_grid * 2.2
+    fig_height <- 3.5 + nrow_grid * 2.2 + 0.2
 
     ggplot2::ggsave(
       plot = p,

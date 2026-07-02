@@ -654,7 +654,7 @@ import_nanofox_movebank <- function(
         grepl("uWasp|SigfoxGH", s, ignore.case = TRUE)                          ~ "uWasp",
         grepl("Nano|NanoFox|spring2025bat|30days|30DaysFine", s,
               ignore.case = TRUE)                                                 ~ "Nanofox",
-        grepl("Tiny|TinyFox|TinyFoxBat", s, ignore.case = TRUE)                 ~ "Tinyfox",
+        grepl("Tiny|TinyFox|TinyFoxBat|BBX5|BBV6|TV1", s, ignore.case = TRUE)   ~ "Tinyfox",
         TRUE ~ NA_character_
       )
     }
@@ -797,7 +797,7 @@ import_nanofox_movebank <- function(
 
   # Validation
   nano_fw <- c("Daily", "10Days", "30Days", "30DaysFineScalePressure")
-  tiny_fw <- c("V13", "V13P", "V14P", "battTorpor")
+  tiny_fw <- c("V13", "V13P", "V14P", "battTorpor", "BBX5", "BBV6", "TV1")
   
   issue <- rep("ok", nrow(x))
   issue[is.na(model)] <- "model_unknown"
@@ -810,6 +810,16 @@ import_nanofox_movebank <- function(
   x$tag_firmware <- firmware
   x$model_firmware_ok <- issue == "ok"
   x$model_firmware_issue <- issue
+
+  n_unknown <- sum(issue == "model_unknown")
+  if (n_unknown > 0) {
+    warning(
+      "study ", study_id_current %||% "?", ": ",
+      n_unknown, " row(s) with unknown tag model (model_firmware_issue = 'model_unknown'). ",
+      "Check 'model' and 'tag_firmware' columns or supply tag_type override.",
+      call. = FALSE
+    )
+  }
 
   if (isTRUE(verbose)) {
     .msg("  model / firmware check for study ", study_id_current %||% "?", ":")
@@ -2792,7 +2802,7 @@ import_nanofox_movebank <- function(
     # measurement type per transmission), adding time_start and time_end.
     # Must run AFTER .add_altitude_from_pressure_col() so altitude_m is already
     # on rows, and BEFORE .add_night_day_id() so new rows get night/day labels too.
-    # b <- .safe_try(.expand_tinyfox_rows(b), "expand_tinyfox_rows") %||% b
+    b <- .safe_try(.expand_tinyfox_rows(b), "expand_tinyfox_rows") %||% b
 
     b <- .safe_try(.add_night_day_id(b), "add_night_day_id") %||% b
 
@@ -2848,7 +2858,8 @@ import_nanofox_movebank <- function(
     ) %||% b
 
     for (.col in c("vedba_sum", "avg_temp",
-                   "tinyfox_diff_vedba", "tinyfox_vedba_rate")) {
+                   "tinyfox_diff_vedba", "tinyfox_vedba_rate",
+                   "speed_kmh", "step_km")) {
       b <- .safe_try(
         .propagate_col_from_loc(b_loc, b, .col),
         paste0("propagate_", .col, "_full")
@@ -2882,6 +2893,25 @@ import_nanofox_movebank <- function(
         .add_tinyfox_diff_vedba(b_daily2),
         "add_tinyfox_diff_vedba_daily"
       ) %||% b_daily2
+    }
+
+    # Replace contiguous runs of exact-zero temperature spanning ≥ 48 h with NA.
+    # Exact zeros lasting multiple days are not biologically plausible for bats.
+    .mask_zero_temp_run <- function(vals, times, min_span_h = 48) {
+      n <- length(vals)
+      if (n == 0L) return(vals)
+      exact_zero <- !is.na(vals) & vals == 0
+      if (!any(exact_zero)) return(vals)
+      r    <- rle(exact_zero)
+      ends <- cumsum(r$lengths)
+      strt <- ends - r$lengths + 1L
+      for (i in seq_along(r$values)) {
+        if (!r$values[i]) next
+        idx    <- strt[i]:ends[i]
+        span_h <- as.numeric(difftime(times[max(idx)], times[min(idx)], units = "hours"))
+        if (!is.na(span_h) && span_h >= min_span_h) vals[idx] <- NA_real_
+      }
+      vals
     }
 
     # Temporal covariates + final cleanup on all three objects
@@ -2929,6 +2959,31 @@ import_nanofox_movebank <- function(
           )
           obj <- obj[, !names(obj) %in% "tag_tech_spec", drop = FALSE]
         }
+        # Mask consecutive exact-zero temperature runs (≥ 48 h → biologically invalid)
+        .temp_cols_mask <- c(
+          "external_temperature", "avg_temp",
+          "tinyfox_temperature_min_last_24h", "tinyfox_temperature_max_last_24h"
+        )
+        for (.tc in intersect(.temp_cols_mask, names(obj))) {
+          v_orig <- suppressWarnings(as.numeric(obj[[.tc]]))
+          if (!any(!is.na(v_orig) & v_orig == 0)) next
+          v_new <- v_orig
+          ts    <- obj$timestamp
+          if ("individual_local_identifier" %in% names(obj)) {
+            trk <- as.character(obj$individual_local_identifier)
+            for (.id in unique(trk[!is.na(trk)])) {
+              ridx         <- which(trk == .id)
+              ord          <- order(ts[ridx])
+              v_new[ridx[ord]] <- .mask_zero_temp_run(v_orig[ridx[ord]], ts[ridx[ord]])
+            }
+          } else {
+            ord        <- order(ts)
+            v_new[ord] <- .mask_zero_temp_run(v_orig[ord], ts[ord])
+          }
+          obj[[paste0(.tc, "_zero_flag")]] <- !is.na(v_orig) & v_orig == 0 & is.na(v_new)
+          obj[[.tc]] <- v_new
+        }
+
         # Coerce factors/ordered → character for merge safety
         obj <- .normalise_cols(obj)
         # Drop all-NA columns
