@@ -326,9 +326,17 @@ if (!exists("extract_elevation_segments", mode = "function")) {
     )) else NA_character_
 
     # ── Tag type detection ───────────────────────────────────────────────
-    is_tinyfox <-
-      any(grepl("tinyfox|BBX5|BBV6|TV1", b_full_df$model, ignore.case = TRUE), na.rm = TRUE) ||
-      any(b_full_df$tag_firmware %in% c("V13", "V13P", "V14P", "BBX5", "BBV6", "TV1"), na.rm = TRUE)
+    # Prefer tag_type column (set reliably by import); firmware fallback excluded
+    # "BBX5" because NanoFox BBX5 shares firmware label with TinyFox BBX5 but
+    # reports cumulative tinyfox_total_vedba — mis-classifying it as TinyFox
+    # would plot the wrong VeDBA panel.
+    is_tinyfox <- if ("tag_type" %in% names(b_full_df)) {
+      any(tolower(b_full_df$tag_type) == "tinyfox", na.rm = TRUE)
+    } else {
+      any(grepl("tinyfox|BBV6|TV1", b_full_df$model, ignore.case = TRUE), na.rm = TRUE) ||
+        (!any(grepl("nanofox", b_full_df$model, ignore.case = TRUE), na.rm = TRUE) &&
+           any(b_full_df$tag_firmware %in% c("V13", "V13P", "V14P", "BBV6", "TV1"), na.rm = TRUE))
+    }
 
     # ── Elevation raster ─────────────────────────────────────────────────
     e <- terra::rast(elevatr::get_elev_raster(b_loc_valid, z = elev_z, expand = 1))

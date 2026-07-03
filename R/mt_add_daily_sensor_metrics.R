@@ -167,6 +167,18 @@ mt_add_daily_sensor_metrics <- function(b_all,
   b2_attr <- sf::st_drop_geometry(b2)
   # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
+  # Strip units class from any temperature/pressure columns so that all groups
+  # return plain <double> from summarise. Without this, bind_rows across studies
+  # produces a mix of units and double in the same column → dplyr type error.
+  for (.strip_col in intersect(
+    c("temperature_min", "temperature_max", nano_temp_col, "external_temperature",
+      nano_pres_col),
+    names(b2_attr)
+  )) {
+    if (inherits(b2_attr[[.strip_col]], "units"))
+      b2_attr[[.strip_col]] <- as.numeric(b2_attr[[.strip_col]])
+  }
+
   # ---------- NanoFox summaries (attributes only) ----------
   nano_daily <- NULL
   if (has_nano) {
