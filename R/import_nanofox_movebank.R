@@ -29,6 +29,15 @@
 #'   \code{"vedba_sum"}.
 #' @param run_elevation Logical; retrieve ground elevation via \pkg{elevatr}.
 #'   Default \code{TRUE}.
+#' @param run_moonlit Logical; attach moonlight/twilight covariates via
+#'   \code{\link{add_moonlit_to_move2}} (requires the \pkg{moonlit} package
+#'   from GitHub). Default \code{TRUE}.
+#' @param moonlit_e Numeric or \code{NULL}; atmospheric extinction coefficient
+#'   passed to \code{add_moonlit_to_move2()}. Default \code{NULL}.
+#' @param moonlit_e_from_altitude Logical; derive \code{moonlit_e} from ground
+#'   elevation instead of using a fixed value. Default \code{FALSE}.
+#' @param moonlit_altitude_col Character; elevation column used when
+#'   \code{moonlit_e_from_altitude = TRUE}. Default \code{"elevation"}.
 #' @param run_daily_metrics Logical; compute daily solar-noon thinned dataset.
 #'   Default \code{TRUE}.
 #' @param daily_method Character; method for selecting the daily representative
@@ -39,7 +48,7 @@
 #' @param verbose Logical; print progress messages. Default \code{TRUE}.
 #' @param script_mt_add_start,script_add_min_pressure,script_mt_previous,
 #'   script_calc_displacement,script_pressure_to_altitude,script_daily,
-#'   script_daily_sensor Paths to helper R scripts. Defaults assume the
+#'   script_daily_sensor,script_add_moonlit Paths to helper R scripts. Defaults assume the
 #'   \pkg{SigfoxTagPrep} repo is one directory above the working directory.
 #' @param tz Time zone string. Default \code{"UTC"}.
 #' @return A list with elements:
@@ -81,6 +90,10 @@ import_nanofox_movebank <- function(
   vedba_col = "vedba",
   vedba_sum_name = "vedba_sum",
   run_elevation = TRUE,
+  run_moonlit = TRUE,
+  moonlit_e = NULL,
+  moonlit_e_from_altitude = FALSE,
+  moonlit_altitude_col = "elevation",
   run_daily_metrics = TRUE,
   daily_method = c("solar_noon", "daytime_only", "noon_roost"),
   compute_cum_dist = TRUE,
@@ -91,6 +104,7 @@ import_nanofox_movebank <- function(
   script_calc_displacement = "../SigfoxTagPrep/R/calc_displacement.R",
   script_pressure_to_altitude = "../SigfoxTagPrep/R/pressure_to_altitude_m.R",
   script_detect_tag_fell_off  = "../SigfoxTagPrep/R/detect_tag_fell_off.R",
+  script_add_moonlit = "../SigfoxTagPrep/R/add_moonlit_to_move2.R",
   script_daily = "../SigfoxTagPrep/R/mt_thin_daily_solar_noon.R",
   script_daily_sensor = "../SigfoxTagPrep/R/mt_add_daily_sensor_metrics.R",
   tz = "UTC"
@@ -109,6 +123,14 @@ import_nanofox_movebank <- function(
     require(assertthat, quietly = TRUE)
     if (isTRUE(run_elevation)) {
       require("elevatr", quietly = TRUE)
+    }
+    if (isTRUE(run_moonlit) && !requireNamespace("moonlit", quietly = TRUE)) {
+      warning(
+        "run_moonlit=TRUE but package 'moonlit' is not installed; ",
+        "moonlight/twilight covariates will be skipped. Install with ",
+        "devtools::install_github('msmielak/moonlit').",
+        call. = FALSE
+      )
     }
     if (isTRUE(run_daily_metrics)) require("suncalc", quietly = TRUE)
   })
@@ -1587,6 +1609,22 @@ import_nanofox_movebank <- function(
           .msg("  elevation: ", sum(!is.na(elev_vals)), " values fetched from AWS DEM.")
         }
       }, "get_elev_point")
+    }
+
+    # ---- Moonlight / twilight covariates (moonlit) ----
+    if (isTRUE(run_moonlit) && requireNamespace("moonlit", quietly = TRUE)) {
+      .source_local(script_add_moonlit)
+      b_loc <- .safe_try(
+        add_moonlit_to_move2(
+          b_loc,
+          time_col = "timestamp",
+          e = moonlit_e,
+          e_from_altitude = moonlit_e_from_altitude,
+          altitude_col = moonlit_altitude_col,
+          quiet = !verbose
+        ),
+        "add_moonlit_to_move2"
+      ) %||% b_loc
     }
 
     # ---- Delta altitude — grouped by deployment_id ----

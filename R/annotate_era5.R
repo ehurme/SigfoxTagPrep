@@ -230,12 +230,14 @@ annotate_era5 <- function(
 
 # ── Single-level extraction ──────────────────────────────────────────────────
 
-.era5_extract_single <- function(data, grib_files, timestamps,
-                                  coords_mat, max_gap, verbose) {
-  # GRIB layer positions within each time-step block.
-  # Order confirmed from terra output — positions 3, 4, 11 are "undefined" in
-  # GRIB names so must be identified by position, not name.
-  var_positions <- c(
+#' GRIB layer positions within each time-step block for single-level files.
+#'
+#' Order confirmed via eccodes against era5_single_YYYY_MM.grib — positions
+#' 3, 4, 11 (u100, v100, cbh) come back as "undefined" from GDAL's grib
+#' driver, so they must be identified by position, not name.
+#' @keywords internal
+.era5_single_var_positions <- function() {
+  c(
     era5_u10   = 1L,  # 10 metre u wind component
     era5_v10   = 2L,  # 10 metre v wind component
     era5_u100  = 3L,  # 100 metre u wind component (listed as "undefined")
@@ -248,6 +250,11 @@ annotate_era5 <- function(
     era5_tcc   = 10L, # Total cloud cover
     era5_cbh   = 11L  # Cloud base height (listed as "undefined")
   )
+}
+
+.era5_extract_single <- function(data, grib_files, timestamps,
+                                  coords_mat, max_gap, verbose) {
+  var_positions <- .era5_single_var_positions()
 
   grib_files <- gsub("\\\\", "/", grib_files)
   coords_xy  <- coords_mat[, 1:2, drop = FALSE]

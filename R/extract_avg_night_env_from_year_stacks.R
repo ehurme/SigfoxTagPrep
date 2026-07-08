@@ -108,6 +108,22 @@ extract_nighttime_hours_24h <- function(timestamps, latitudes, longitudes,
 
 
 # -----------------------------------------------------------------------------
+# Helper: detect whether raster_by_year is keyed by year ("2024") or by
+# year-month ("2024-01" / "2024_01")
+# -----------------------------------------------------------------------------
+detect_raster_key_mode <- function(raster_by_year) {
+  nm <- names(raster_by_year)
+  if (is.null(nm) || any(nm == "")) {
+    stop("raster_by_year must be a *named* list, e.g. list('2024'='path.grib') ",
+         "or list('2024-01'='path.grib').")
+  }
+  if (all(grepl("^[0-9]{4}$", nm))) return("year")
+  if (all(grepl("^[0-9]{4}[-_][0-9]{2}$", nm))) return("month")
+  stop("Names of raster_by_year must all be years ('2024') or all be ",
+       "year-months ('2024-01'), not a mix.")
+}
+
+# -----------------------------------------------------------------------------
 # Main extraction function
 # -----------------------------------------------------------------------------
 extract_avg_night_env_from_year_stacks <- function(
@@ -148,7 +164,6 @@ extract_avg_night_env_from_year_stacks <- function(
 
   df$.time_adj   <- df$timestamp + lubridate::hours(shift_hours)
   df$.time_round <- lubridate::round_date(df$.time_adj, "hour")
-  df$.year       <- lubridate::year(df$.time_round)
 
   # lazy raster opener
   open_raster <- function(x) {
@@ -156,8 +171,8 @@ extract_avg_night_env_from_year_stacks <- function(
     if (is.character(x) && length(x) == 1) return(terra::rast(x))
     stop("Each raster_by_year entry must be a SpatRaster or a single file path.")
   }
-  if (is.null(names(raster_by_year)))
-    stop("raster_by_year must be named with years, e.g. list('2024' = path_or_raster).")
+  key_mode <- detect_raster_key_mode(raster_by_year)
+  key_of   <- function(t) if (key_mode == "year") as.character(lubridate::year(t)) else format(t, "%Y-%m")
 
   # infer var names if needed
   if (is.null(var_names)) {
@@ -191,7 +206,9 @@ extract_avg_night_env_from_year_stacks <- function(
       latitude   = df$latitude[i],
       longitude  = df$longitude[i],
       ID         = df$ID[i],
-      year       = lubridate::year(nh[[1L]]),
+      # keyed per night-hour (not just nh[[1]]) so a night that spans a
+      # year/month boundary is split correctly across raster files
+      year       = key_of(nh),
       stringsAsFactors = FALSE
     )
   })
@@ -212,11 +229,12 @@ extract_avg_night_env_from_year_stacks <- function(
   for (nm in env_cols) long_tbl[[nm]] <- NA_real_
 
   # ------------------------------------------------------------------
-  # Step 3: batched terra::extract() — ONE call per year, not per hour
+  # Step 3: batched terra::extract() — ONE call per year (or year-month),
+  # not per hour
   #
   # Strategy:
-  #   a) For each year, build a *single* points SpatVector covering all
-  #      (row, hour) combos for that year.
+  #   a) For each key, build a *single* points SpatVector covering all
+  #      (row, hour) combos for that key.
   #   b) Subset the raster to all required layers at once.
   #   c) Call terra::extract() once — terra internally parallelises
   #      across its thread pool.
@@ -224,12 +242,13 @@ extract_avg_night_env_from_year_stacks <- function(
   #      (hour_idx → layer block) mapping.
   # ------------------------------------------------------------------
   years_needed <- sort(unique(long_tbl$year))
-  if (verbose) message("Years in night-hour table: ", paste(years_needed, collapse = ", "))
+  if (verbose) message(if (key_mode == "year") "Years in night-hour table: " else "Year-months in night-hour table: ",
+                       paste(years_needed, collapse = ", "))
 
   for (yr in years_needed) {
     yr_chr  <- as.character(yr)
     if (!yr_chr %in% names(raster_by_year)) {
-      if (verbose) message("Skipping year ", yr_chr, " (no raster provided).")
+      if (verbose) message("Skipping ", yr_chr, " (no raster provided).")
       next
     }
 
@@ -239,14 +258,22 @@ extract_avg_night_env_from_year_stacks <- function(
 
     # GRIB layout: layers = (time × variable), time repeats per variable
     rt        <- as.POSIXct(terra::time(r), tz = tz)
-    if (is.null(rt)) stop("Raster for year ", yr_chr, " has no time vector.")
+    if (is.null(rt)) stop("Raster for ", yr_chr, " has no time vector.")
 
     n_var     <- length(var_names)
-    if (terra::nlyr(r) %% n_var != 0L)
-      stop("nlyr(r) (", terra::nlyr(r), ") not divisible by n_var (", n_var, ").")
-
     rt_unique       <- unique(rt)
     rt_unique_round <- lubridate::round_date(rt_unique, "hour")
+
+    # Derive actual block size from unique timestamps instead of just
+    # nlyr(r) %% n_var, which can pass by coincidence (e.g. 720 hours x 11
+    # real layers = 7920, and 7920 %% 10 == 0 too) even when var_names
+    # doesn't match the file's real variable count/order.
+    actual_block <- terra::nlyr(r) / length(rt_unique_round)
+    if (actual_block %% 1 != 0 || actual_block != n_var) {
+      stop("Raster for ", yr_chr, ": nlyr(r) (", terra::nlyr(r), ") / unique timestamps (",
+           length(rt_unique_round), ") = ", actual_block, " layers/timestamp, but var_names has ",
+           n_var, " entries. var_names does not match this GRIB's actual variables/order.")
+    }
 
     t_round  <- lubridate::round_date(
       as.POSIXct(long_tbl$night_hour[sub_idx], tz = tz), "hour"
@@ -255,7 +282,7 @@ extract_avg_night_env_from_year_stacks <- function(
 
     ok       <- which(!is.na(hour_idx))
     if (length(ok) == 0L) {
-      if (verbose) message("No matching raster hours for year ", yr_chr)
+      if (verbose) message("No matching raster hours for ", yr_chr)
       next
     }
 
@@ -270,7 +297,7 @@ extract_avg_night_env_from_year_stacks <- function(
     all_layers <- unlist(layer_blocks)   # e.g. c(1:4, 5:8, 9:12, ...)
 
     if (verbose) {
-      message("Year ", yr_chr, ": rows=", length(sub_ok),
+      message(yr_chr, ": rows=", length(sub_ok),
               ", unique hours=", length(uniq_hours),
               ", total layers=", length(all_layers),
               ", vars/hour=", n_var,

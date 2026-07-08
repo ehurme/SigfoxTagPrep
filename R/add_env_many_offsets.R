@@ -1,3 +1,34 @@
+#' Detect whether a raster_by_year/raster_by_month list is keyed by
+#' year ("2024") or by year-month ("2024-01" / "2024_01").
+detect_raster_key_mode <- function(raster_by_year) {
+  nm <- names(raster_by_year)
+  if (is.null(nm) || any(nm == "")) {
+    stop("raster_by_year must be a *named* list, e.g. list('2024'='path.grib') ",
+         "or list('2024-01'='path.grib').")
+  }
+  if (all(grepl("^[0-9]{4}$", nm))) return("year")
+  if (all(grepl("^[0-9]{4}[-_][0-9]{2}$", nm))) return("month")
+  stop("Names of raster_by_year must all be years ('2024') or all be ",
+       "year-months ('2024-01'), not a mix.")
+}
+
+#' Build a year-month-keyed raster list from a directory of monthly GRIBs,
+#' e.g. files named "era5_single_2022_01.grib" -> key "2022-01".
+build_raster_by_month <- function(
+    dir,
+    pattern = "([0-9]{4})_([0-9]{2})\\.grib$"
+) {
+  files <- list.files(dir, pattern = pattern, full.names = TRUE)
+  if (length(files) == 0) stop("No files matching '", pattern, "' found in ", dir)
+
+  m <- regmatches(files, regexec(pattern, files))
+  keys <- vapply(m, function(x) paste0(x[2], "-", x[3]), character(1))
+
+  out <- as.list(files)
+  names(out) <- keys
+  out[order(names(out))]
+}
+
 add_env_to_move2 <- function(
     m,
     raster_by_year,
@@ -35,18 +66,20 @@ add_env_to_move2 <- function(
 
   if (!("timestamp" %in% names(df))) stop("Expected a 'timestamp' column on the move2 object.")
 
+  # ---- validate raster_by_year / raster_by_month ----
+  key_mode <- detect_raster_key_mode(raster_by_year)
+
   # ---- adjusted & rounded timestamps ----
   df <- df |>
     dplyr::mutate(
       .time_adj   = as.POSIXct(.data$timestamp, tz = tz) + lubridate::hours(shift_hours),
       .time_round = lubridate::round_date(.time_adj, unit = time_round),
-      .year       = lubridate::year(.time_round)
+      .key        = if (key_mode == "year") {
+        as.character(lubridate::year(.time_round))
+      } else {
+        format(.time_round, "%Y-%m")
+      }
     )
-
-  # ---- validate raster_by_year ----
-  if (is.null(names(raster_by_year))) {
-    stop("raster_by_year must be a *named* list with names equal to years, e.g. list('2024'='path.grib').")
-  }
 
   open_raster <- function(x) {
     if (inherits(x, "SpatRaster")) return(x)
@@ -64,29 +97,34 @@ add_env_to_move2 <- function(
   out_names <- paste0(var_names, "_", shift_hours, "h")
   for (nm in out_names) df[[nm]] <- NA_real_
 
-  years_needed <- sort(unique(df$.year))
-  if (verbose) message("Years in track: ", paste(years_needed, collapse = ", "))
+  keys_needed <- sort(unique(df$.key))
+  if (verbose) message(if (key_mode == "year") "Years in track: " else "Year-months in track: ",
+                       paste(keys_needed, collapse = ", "))
 
-  for (yr in years_needed) {
-    yr_chr <- as.character(yr)
+  for (yr_chr in keys_needed) {
     if (!yr_chr %in% names(raster_by_year)) {
-      if (verbose) message("Skipping year ", yr_chr, " (no raster provided).")
+      if (verbose) message("Skipping ", yr_chr, " (no raster provided).")
       next
     }
 
     r <- open_raster(raster_by_year[[yr_chr]])
-
-    # ---- IMPORTANT: GRIB is stored as blocks of variables per hour ----
-    # ---- IMPORTANT: GRIB is stored as blocks of variables per hour ----
     n_var <- length(var_names)
 
-    if (terra::nlyr(r) %% n_var != 0) {
-      stop("nlyr(r) (", terra::nlyr(r), ") is not divisible by n_var (", n_var,
-           "). var_names does not match GRIB layers-per-hour.")
-    }
-
     rt <- as.POSIXct(terra::time(r), tz = tz)
-    if (is.null(rt)) stop("Raster for year ", yr_chr, " has no time vector (terra::time() is NULL).")
+    if (is.null(rt)) stop("Raster for ", yr_chr, " has no time vector (terra::time() is NULL).")
+
+    # ---- IMPORTANT: GRIB is stored as blocks of variables per hour ----
+    # Derive the actual block size from the data itself (unique timestamps)
+    # instead of just nlyr(r) %% n_var, which can pass by coincidence (e.g.
+    # 720 hours x 11 real layers = 7920, and 7920 %% 10 == 0 too) even when
+    # var_names doesn't match the file's real variable count/order.
+    n_unique_times <- length(unique(lubridate::round_date(rt, unit = time_round)))
+    actual_block <- terra::nlyr(r) / n_unique_times
+    if (actual_block %% 1 != 0 || actual_block != n_var) {
+      stop("Raster for ", yr_chr, ": nlyr(r) (", terra::nlyr(r), ") / unique timestamps (",
+           n_unique_times, ") = ", actual_block, " layers/timestamp, but var_names has ",
+           n_var, " entries. var_names does not match this GRIB's actual variables/order.")
+    }
 
     # Block starts: 1, 1+n_var, 1+2*n_var, ...
     block_start <- seq.int(1L, terra::nlyr(r), by = n_var)
@@ -94,8 +132,8 @@ add_env_to_move2 <- function(
     # One timestamp per hour-block (all layers in the block share this time)
     rt_hour <- lubridate::round_date(rt[block_start], unit = time_round)
 
-    # subset rows for this year
-    idx_rows <- which(df$.year == yr)
+    # subset rows for this year / year-month
+    idx_rows <- which(df$.key == yr_chr)
     if (length(idx_rows) == 0) next
 
     t_req <- as.POSIXct(df$.time_round[idx_rows], tz = tz)
@@ -106,7 +144,7 @@ add_env_to_move2 <- function(
 
     ok <- which(!is.na(hour_idx))
     if (length(ok) == 0) {
-      if (verbose) message("No matching times in raster for year ", yr_chr)
+      if (verbose) message("No matching times in raster for ", yr_chr)
       next
     }
 
@@ -127,7 +165,7 @@ add_env_to_move2 <- function(
     }
 
     if (verbose) {
-      message("Year ", yr_chr, ": matched rows=", length(sub_rows),
+      message(yr_chr, ": matched rows=", length(sub_rows),
               ", unique hours=", length(uniq_hours), ", vars/hour=", n_var)
       pb <- utils::txtProgressBar(min = 0, max = length(uniq_hours), style = 3)
       on.exit(close(pb), add = TRUE)
@@ -164,7 +202,7 @@ add_env_to_move2 <- function(
 
   # ---- attach back to move2 (no st_drop_geometry<-) ----
   df_out <- df |>
-    dplyr::select(-.lon, -.lat, -.time_adj, -.time_round, -.year)
+    dplyr::select(-.lon, -.lat, -.time_adj, -.time_round, -.key)
 
   m_out <- m
   geom_col <- attr(m_out, "sf_column")

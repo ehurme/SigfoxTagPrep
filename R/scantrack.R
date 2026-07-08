@@ -263,6 +263,10 @@ if (!exists("extract_elevation_segments", mode = "function")) {
       NA_character_
     }
 
+    # deployment_id is included so that a redeployed tag / an individual with
+    # multiple deployments never collides on filename and overwrites another
+    # deployment's plot -- species/year/tag/individual/sex alone are not
+    # guaranteed unique per deployment.
     out_file <- file.path(
       out_dir,
       paste0(
@@ -270,7 +274,8 @@ if (!exists("extract_elevation_segments", mode = "function")) {
         .clean_filename_part(as.character(yr)), "_",
         .clean_filename_part(tag_id), "_",
         .clean_filename_part(indiv_id), "_",
-        .clean_filename_part(sex), ".png"
+        .clean_filename_part(sex), "_",
+        .clean_filename_part(tag), ".png"
       )
     )
 
@@ -294,7 +299,7 @@ if (!exists("extract_elevation_segments", mode = "function")) {
 
     # ── Daily column name candidates (resolved once, used in overlays below) ──
     daily_vedba_col <- if (has_daily) .pick_first_col(b_daily_df, c(
-      "daily_vedba_sum", "tinyfox_total_vedba",
+      "daily_vedba_mean", "tinyfox_total_vedba",
       "daily_total_vedba_24h",
       "daily_vedba_24h", "daily_total_vedba",
       "tinyfox_vedba_24h", "daily_tinyfox_vedba_24h"
@@ -498,8 +503,11 @@ if (!exists("extract_elevation_segments", mode = "function")) {
     # so solar-noon daily_timestamp doesn't fall on a raw measurement. Snapping
     # makes daily overlay circles land exactly on an existing raw data point.
     if (has_daily && nrow(b_daily_df) > 0 && "daily_timestamp" %in% names(b_daily_df)) {
-      .vs_col <- .pick_first_col(b_full_df,
-        c("tinyfox_total_vedba", "tinyfox_vedba_burst_sum", "vedba"))
+      .vs_col <- if (is_tinyfox) {
+        .pick_first_col(b_full_df, c("tinyfox_total_vedba", "tinyfox_vedba_burst_sum"))
+      } else {
+        .pick_first_col(b_full_df, "vedba")
+      }
       b_daily_df$snap_ts_v <- if (!is.na(.vs_col))
         .snap_to_nearest_ts(b_daily_df$daily_timestamp, b_full_df$timestamp[!is.na(b_full_df[[.vs_col]])])
       else b_daily_df$daily_timestamp
@@ -588,8 +596,12 @@ if (!exists("extract_elevation_segments", mode = "function")) {
         .vedba_fell_scale +
         ylab("Total VeDBA\n(cumulative)")
     } else {
+      # tinyfox_vedba_burst_sum is a TinyFox-only raw counter; only consider it
+      # as a fallback for TinyFox tracks that lack tinyfox_total_vedba above.
+      # A NanoFox track must never fall through to it, even if the column
+      # happens to carry (spurious) non-NA values on its rows.
       vedba_col <- dplyr::case_when(
-        .has_data(b_full_df, "tinyfox_vedba_burst_sum") ~ "tinyfox_vedba_burst_sum",
+        is_tinyfox && .has_data(b_full_df, "tinyfox_vedba_burst_sum") ~ "tinyfox_vedba_burst_sum",
         .has_data(b_full_df, "vedba") ~ "vedba",
         TRUE ~ NA_character_
       )
@@ -619,6 +631,27 @@ if (!exists("extract_elevation_segments", mode = "function")) {
           aes(snap_ts_v, .data[[daily_vedba_col]]),
           inherit.aes = FALSE, shape = 21, fill = "white",
           col = "black", size = 2.8, stroke = 1.2
+        )
+    }
+
+    # Day/night VeDBA split (NanoFox only): triangles pinned to the same
+    # overall daily-mean line so a migration night's activity burst is visible
+    # against the quiet daytime roost baseline, rather than averaged away.
+    if (!is_tinyfox && has_daily &&
+        .has_data(b_daily_df, "daily_vedba_day_mean") &&
+        .has_data(b_daily_df, "daily_vedba_night_mean")) {
+      p_vedba <- p_vedba +
+        geom_point(
+          data = b_daily_df,
+          aes(snap_ts_v, daily_vedba_day_mean),
+          inherit.aes = FALSE, shape = 24, fill = "goldenrod1",
+          col = "goldenrod4", size = 2.4, stroke = 1
+        ) +
+        geom_point(
+          data = b_daily_df,
+          aes(snap_ts_v, daily_vedba_night_mean),
+          inherit.aes = FALSE, shape = 25, fill = "midnightblue",
+          col = "midnightblue", size = 2.4, stroke = 1
         )
     }
 
@@ -1002,7 +1035,7 @@ if (!exists("extract_elevation_segments", mode = "function")) {
     p <- ggpubr::annotate_figure(
       p,
       bottom = ggpubr::text_grob(
-        "○ open circle + dashed line = daily summary value     • filled circle + solid line = raw sensor data",
+        "○ open circle + dashed line = daily summary value     ● filled circle + solid line = raw sensor data     ▲ day mean VeDBA     ▼ night mean VeDBA",
         size = 7, color = "grey30"
       )
     )

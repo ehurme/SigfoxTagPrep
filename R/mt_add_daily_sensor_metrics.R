@@ -52,6 +52,7 @@ mt_add_daily_sensor_metrics <- function(b_all,
 
                                         # nanofox
                                         nano_vedba_col = "vedba",
+                                        nano_vedba_active_threshold = 1,
                                         nano_temp_col  = "avg_temp",
                                         nano_pres_col  = "min_3h_pressure",
 
@@ -106,6 +107,21 @@ mt_add_daily_sensor_metrics <- function(b_all,
 
   ts_all <- dplyr::pull(b_all, !!sym(time_col_all))
   bat_day_all <- get_bat_day(ts_all)
+
+  # Non-location sensor rows (VeDBA, temp, pressure) have empty geometry of
+  # their own -- st_coordinates() returns NaN for them, which propagates to
+  # NA sunrise/sunset and leaves .is_day/.is_night NA for every such row
+  # (silently zeroing out any day/night split keyed off them). Borrow the
+  # nearest-in-time fix from the same track so sun-time can still be resolved.
+  .track_all <- as.character(move2::mt_track_id(b_all))
+  .fill_tbl <- tibble::tibble(.idx = seq_along(ts_all), .trk = .track_all, .ts = ts_all, lon = lon, lat = lat) %>%
+    dplyr::arrange(.trk, .ts) %>%
+    dplyr::group_by(.trk) %>%
+    tidyr::fill(lon, lat, .direction = "downup") %>%
+    dplyr::ungroup() %>%
+    dplyr::arrange(.idx)
+  lon <- .fill_tbl$lon
+  lat <- .fill_tbl$lat
 
   sun <- suncalc::getSunlightTimes(
     data = data.frame(date = bat_day_all, lat = lat, lon = lon),
@@ -167,12 +183,14 @@ mt_add_daily_sensor_metrics <- function(b_all,
   b2_attr <- sf::st_drop_geometry(b2)
   # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
-  # Strip units class from any temperature/pressure columns so that all groups
-  # return plain <double> from summarise. Without this, bind_rows across studies
-  # produces a mix of units and double in the same column → dplyr type error.
+  # Strip units class from any temperature/pressure/vedba columns so that all
+  # groups return plain <double> from summarise. Without this, bind_rows across
+  # studies produces a mix of units and double in the same column → dplyr type
+  # error, and comparisons like `vedba > threshold` error outright on a units
+  # object compared against a plain number.
   for (.strip_col in intersect(
     c("temperature_min", "temperature_max", nano_temp_col, "external_temperature",
-      nano_pres_col),
+      nano_pres_col, nano_vedba_col),
     names(b2_attr)
   )) {
     if (inherits(b2_attr[[.strip_col]], "units"))
@@ -201,6 +219,29 @@ mt_add_daily_sensor_metrics <- function(b_all,
 
         daily_vedba_sum   = if (.has_nano_v) sum(.data[[nano_vedba_col]], na.rm = TRUE) else NA_real_,
         daily_vedba_sum_n = if (.has_nano_v) sum(!is.na(.data[[nano_vedba_col]])) else 0L,
+        # Mean, not sum: comparable scale to per-transmission vedba (~0-30) for
+        # overlaying on the raw VeDBA panel. daily_vedba_sum accumulates over
+        # every transmission in the day (100s of windows) and reaches values
+        # 100x the raw signal, which blew up the scantrack.R y-axis.
+        daily_vedba_mean  = if (.has_nano_v) mean(.data[[nano_vedba_col]], na.rm = TRUE) else NA_real_,
+        # Count of windows above threshold: a duty-cycle-style activity count
+        # that isn't pulled around by a handful of extreme bursts the way a
+        # mean is, and unlike daily_vedba_sum doesn't conflate "more active"
+        # with "more transmissions received" on days with denser reception.
+        daily_vedba_active_n = if (.has_nano_v)
+          sum(.data[[nano_vedba_col]] > nano_vedba_active_threshold, na.rm = TRUE)
+          else NA_integer_,
+
+        # Day/night split: NanoFox migration nights show up as a burst of
+        # activity against a quiet daytime roost baseline, which a whole-day
+        # mean/sum washes out. Same sum-vs-mean scale caveat as above applies
+        # to each half independently.
+        daily_vedba_day_sum    = if (.has_nano_v) sum(.data[[nano_vedba_col]][.is_day %in% TRUE], na.rm = TRUE) else NA_real_,
+        daily_vedba_day_mean   = if (.has_nano_v) mean(.data[[nano_vedba_col]][.is_day %in% TRUE], na.rm = TRUE) else NA_real_,
+        daily_vedba_day_n      = if (.has_nano_v) sum(!is.na(.data[[nano_vedba_col]][.is_day %in% TRUE])) else 0L,
+        daily_vedba_night_sum  = if (.has_nano_v) sum(.data[[nano_vedba_col]][.is_night %in% TRUE], na.rm = TRUE) else NA_real_,
+        daily_vedba_night_mean = if (.has_nano_v) mean(.data[[nano_vedba_col]][.is_night %in% TRUE], na.rm = TRUE) else NA_real_,
+        daily_vedba_night_n    = if (.has_nano_v) sum(!is.na(.data[[nano_vedba_col]][.is_night %in% TRUE])) else 0L,
 
         # temperature_min / temperature_max exist on 30DaysFineScalePressure;
         # avg_temp is the fallback for standard 30Days firmware.
