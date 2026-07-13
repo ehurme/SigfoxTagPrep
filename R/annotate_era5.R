@@ -599,12 +599,20 @@ annotate_era5 <- function(
     avail    <- ws_cols %in% names(data)
 
     if (any(avail)) {
-      # Drop sf geometry before as.matrix(): the sticky geometry column would
-      # otherwise coerce the entire matrix to character.
+      # Drop sf geometry before matrix-building: the sticky geometry column
+      # (or any non-double column, e.g. class "units") would otherwise make
+      # as.matrix() fall back to format()-based stringification, turning the
+      # whole matrix to character and crashing the vapply() calls below.
+      # Coerce column-by-column with as.numeric() instead of as.matrix() so a
+      # single contaminated column can't silently poison the others.
       .data_df <- sf::st_drop_geometry(data)
-      ws_mat  <- as.matrix(.data_df[, ws_cols[avail],  drop = FALSE])
-      cs_mat  <- as.matrix(.data_df[, cs_cols[avail],  drop = FALSE])
-      spd_mat <- as.matrix(.data_df[, spd_cols[avail], drop = FALSE])
+      .num_mat <- function(df, cols) {
+        m <- vapply(cols, function(cn) as.numeric(df[[cn]]), numeric(nrow(df)))
+        matrix(m, nrow = nrow(df), ncol = length(cols), dimnames = list(NULL, cols))
+      }
+      ws_mat  <- .num_mat(.data_df, ws_cols[avail])
+      cs_mat  <- .num_mat(.data_df, cs_cols[avail])
+      spd_mat <- .num_mat(.data_df, spd_cols[avail])
 
       matched_col <- match(nearest_level, pressure_levels[avail])
       idx <- cbind(seq_len(n), matched_col)
