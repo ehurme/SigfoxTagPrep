@@ -19,8 +19,7 @@ library(tidyverse)
 library(move2)
 library(sf)
 
-source("R/annotate_era5_gee.R")
-source("R/annotate_era5.R")           # helpers reused by GEE version
+source("R/annotate_era5.R")           # annotate_era5(), annotate_era5_gee(), shared helpers
 source("R/calculate_wind_features.R")
 source("R/pressure_to_altitude_m.R")
 source("R/pressure_wind_profile.R")

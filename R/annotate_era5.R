@@ -1,12 +1,44 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # annotate_era5.R
 # ─────────────────────────────────────────────────────────────────────────────
-# Annotate move2 objects with ERA5 reanalysis weather data extracted from the
-# folder structure produced by inst/python/download_era5.py.
+# Annotate move2/sf objects with ERA5 reanalysis weather data. Consolidates
+# every ERA5 annotation mode into one file, all sharing the same internal
+# helpers (.era5_detect_col, .era5_single_var_positions, .era5_wind_support,
+# .era5_flight_pressure, ...) so they can't drift out of sync with each other
+# or with the monthly file layout produced by inst/python/download_era5.py.
 #
-# Complements add_env_to_move2() (which works with yearly GRIB stacks) by
-# adding pressure-level wind extraction, altitude-matched wind support, and
-# NetCDF-based extraction from the standardised monthly file layout.
+# Public functions, by use case:
+#
+#   annotate_era5(data, era5_dir, ...)
+#     Instantaneous, single fix: nearest ERA5 step to the fix's own timestamp.
+#     Single-level + pressure-level extraction, wind support / crosswind /
+#     airspeed / flight-pressure matching. The engine every other function
+#     below wraps.
+#
+#   annotate_era5_offsets(data, era5_dir, offsets_days, ...)
+#     Instantaneous, at multiple day offsets from the fix (e.g. u10_-48h,
+#     u10_-24h, u10_0h, u10_24h, u10_48h for offsets_days = -2:2). Re-runs
+#     annotate_era5() at each shifted timestamp. Only the day-0 pass computes
+#     wind_support/crosswind/airspeed/flight-pressure (heading and ground
+#     speed come from fix-to-fix geometry and are invariant to a uniform
+#     timestamp shift).
+#
+#   annotate_era5_night_avg(data, era5_dir, offsets_days, ...)
+#     Night-averaged, at multiple day offsets: for each offset, averages every
+#     hourly ERA5 single-level step across the preceding night (suncalc
+#     sunset->sunrise, up to 24h back) into one row per fix. Replaces
+#     extract_avg_night_env_from_year_stacks().
+#
+#   annotate_era5_sunset(data, era5_dir, shift_hours, ...)
+#     Beginning-of-night: looks up the ERA5 step nearest sunset (+1h +
+#     shift_hours) at the fix's own location, falling back to the *previous*
+#     fix's location when that sunset has already passed. Replaces
+#     extract_sunset_env().
+#
+#   annotate_era5_gee(data, ...)
+#     Same variables as annotate_era5(), but from the Google Earth Engine
+#     catalog via python/annotate_era5_gee.py (system2()) instead of local
+#     monthly GRIB files. Use when there's no local EnvData folder.
 #
 # Reuses existing SigfoxTagPrep functions:
 #   - wind_support(), cross_wind(), airspeed()  (calculate_wind_features.R)
@@ -38,7 +70,9 @@ altitude_to_pressure_hPa <- function(alt_m, p0_hpa = 1013.25) {
 }
 
 
-# ── Main annotation function ─────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════
+# annotate_era5() — instantaneous, single fix
+# ═══════════════════════════════════════════════════════════════════════════
 
 #' Annotate a move2 object with ERA5 reanalysis weather data
 #'
@@ -178,9 +212,10 @@ annotate_era5 <- function(
 }
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# INTERNAL HELPERS (prefixed .era5_ to avoid collisions)
-# ═══════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════
+# INTERNAL HELPERS (prefixed .era5_ to avoid collisions) — shared by every
+# public function in this file
+# ═══════════════════════════════════════════════════════════════════════════
 
 .era5_detect_col <- function(data, user_choice, candidates, label, verbose) {
   if (!is.null(user_choice)) {
@@ -209,22 +244,6 @@ annotate_era5 <- function(
   out <- (atan2(y, x) / to_rad + 360) %% 360
   out[is.na(lon1) | is.na(lat1) | is.na(lon2) | is.na(lat2)] <- NA_real_
   out
-}
-
-
-.era5_nearest_layer <- function(raster_times, obs_times, max_gap_h, verbose) {
-  obs_num  <- as.numeric(obs_times)
-  rast_num <- as.numeric(raster_times)
-  idx <- vapply(obs_num, function(t) which.min(abs(rast_num - t)), integer(1))
-
-  gaps_h <- abs(rast_num[idx] - obs_num) / 3600
-  bad <- which(gaps_h > max_gap_h)
-  if (length(bad) > 0 && verbose) {
-    message("    [warn] ", length(bad), " fixes >", max_gap_h,
-            "h from nearest ERA5 step (max gap: ",
-            round(max(gaps_h[bad]), 1), "h)")
-  }
-  idx
 }
 
 
@@ -690,4 +709,775 @@ annotate_era5 <- function(
 
   if (!any(has_value)) return(NULL)
   flight_p
+}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# annotate_era5_offsets() — instantaneous, at multiple day offsets
+# ═══════════════════════════════════════════════════════════════════════════
+
+#' Annotate a move2/sf object with ERA5 data at multiple day offsets
+#'
+#' Wraps \code{\link{annotate_era5}} to support the same ±N-day offset
+#' workflow that \code{add_env_many_offsets()} provided for the old yearly
+#' GRIB stacks — e.g. \code{u10_-48h}, \code{u10_-24h}, \code{u10_0h},
+#' \code{u10_24h}, \code{u10_48h} for \code{offsets_days = -2:2}, ready to feed
+#' into \code{\link{calculate_wind_features}}.
+#'
+#' For each offset, the animal's timestamp is shifted by \code{offset_days}
+#' and \code{\link{annotate_era5}} is re-run against that shifted time (same
+#' location) to look up the ERA5 step nearest the shifted time. Only the
+#' offset (day = 0) pass computes wind_support/crosswind/airspeed/
+#' flight-pressure matching, since heading and ground speed are derived from
+#' fix-to-fix geometry and are invariant to a uniform timestamp shift —
+#' recomputing them per offset would be redundant.
+#'
+#' @param data            A \code{move2} or \code{sf} object with timestamps.
+#' @param era5_dir        Path to the EnvData directory (parent of
+#'   \code{single_levels/} and \code{pressure_levels/}).
+#' @param offsets_days    Numeric vector of day offsets, e.g. \code{-2:2}.
+#' @param pressure_levels Numeric vector of pressure levels (hPa).
+#' @param altitude_col,tag_pressure_col,max_time_gap_hours See \code{\link{annotate_era5}}.
+#' @param verbose Logical; print progress messages?
+#' @return \code{data} with per-offset single/pressure-level columns
+#'   (\code{u10_-48h}, ..., \code{cbh_48h}) plus the day-0 wind-support /
+#'   flight-pressure-matching columns from \code{\link{annotate_era5}}.
+#' @export
+annotate_era5_offsets <- function(
+    data,
+    era5_dir,
+    offsets_days,
+    pressure_levels  = c(500, 600, 700, 800, 850, 900, 925, 950, 1000),
+    altitude_col     = NULL,
+    tag_pressure_col = NULL,
+    max_time_gap_hours = 3,
+    verbose = TRUE
+) {
+  require(move2)
+  require(sf)
+
+  stopifnot(inherits(data, "sf"))
+
+  base_time <- if (inherits(data, "move2")) move2::mt_time(data) else data$timestamp
+  if (is.null(base_time)) stop("Cannot find timestamps in data.")
+
+  existing_cols <- names(sf::st_drop_geometry(data))
+  out <- data
+
+  for (d in offsets_days) {
+    if (verbose) message("Offset days: ", d)
+
+    shifted <- data
+    shifted_time <- base_time + d * 86400  # days -> seconds
+    if (inherits(shifted, "move2")) {
+      move2::mt_time(shifted) <- shifted_time
+    } else {
+      shifted$timestamp <- shifted_time
+    }
+
+    res <- annotate_era5(
+      data                 = shifted,
+      era5_dir             = era5_dir,
+      pressure_levels      = pressure_levels,
+      altitude_col         = altitude_col,
+      tag_pressure_col     = tag_pressure_col,
+      compute_wind_support = (d == 0),
+      max_time_gap_hours   = max_time_gap_hours,
+      verbose              = verbose
+    )
+
+    res_df  <- sf::st_drop_geometry(res)
+    suffix  <- paste0("_", d * 24, "h")
+
+    # single/pressure-level env vars: era5_u10 -> u10_-48h, era5_u500 -> u500_-48h, ...
+    env_cols <- grep("^era5_", names(res_df), value = TRUE)
+    for (nm in env_cols) {
+      base_name <- sub("^era5_", "", nm)
+      out[[paste0(base_name, suffix)]] <- res_df[[nm]]
+    }
+
+    # wind-support / flight-pressure-matching columns: only from the true (day-0) time
+    if (d == 0) {
+      extra_cols <- setdiff(names(res_df), c(existing_cols, env_cols))
+      for (nm in extra_cols) out[[nm]] <- res_df[[nm]]
+    }
+  }
+
+  out
+}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# annotate_era5_night_avg() — night-averaged, at multiple day offsets
+# ═══════════════════════════════════════════════════════════════════════════
+
+# ── Night-hour sequence helper (suncalc-based) ──────────────────────────────
+# Self-contained copy of extract_nighttime_hours_24h() from
+# extract_avg_night_env.R — duplicated (matching that file's own duplication
+# precedent) so this function has no dependency beyond what's in this file.
+.era5_night_hours_24h <- function(timestamps, latitudes, longitudes, tz = "UTC") {
+  requireNamespace("lubridate", quietly = TRUE)
+  requireNamespace("suncalc",   quietly = TRUE)
+
+  n   <- length(timestamps)
+  ts  <- as.POSIXct(timestamps, tz = tz)
+  dt  <- as.Date(ts, tz = tz)
+  dt1 <- dt - 1L
+
+  combos_today <- unique(data.frame(date = dt,  lat = latitudes, lon = longitudes))
+  combos_yday  <- unique(data.frame(date = dt1, lat = latitudes, lon = longitudes))
+  all_combos   <- unique(rbind(combos_today, combos_yday))
+
+  sun_all <- suncalc::getSunlightTimes(data = all_combos, tz = tz, keep = c("sunrise", "sunset"))
+  sun_all$.key <- paste(sun_all$date, sun_all$lat, sun_all$lon, sep = "|")
+
+  .lookup <- function(d, lat, lon, field) {
+    idx <- match(paste(d, lat, lon, sep = "|"), sun_all$.key)
+    sun_all[[field]][idx]
+  }
+
+  lapply(seq_len(n), function(i) {
+    t0    <- ts[i]
+    start <- t0 - lubridate::hours(24)
+
+    sr_today <- .lookup(dt[i],  latitudes[i], longitudes[i], "sunrise")
+    ss_today <- .lookup(dt[i],  latitudes[i], longitudes[i], "sunset")
+    ss_yday  <- .lookup(dt1[i], latitudes[i], longitudes[i], "sunset")
+
+    night1_start <- max(ss_yday,  start, na.rm = FALSE)
+    night1_end   <- min(sr_today, t0,    na.rm = FALSE)
+    night2_start <- max(ss_today, start, na.rm = FALSE)
+    night2_end   <- t0
+
+    hours_seq <- seq(from = start, to = t0, by = "hour")
+    keep <- rep(FALSE, length(hours_seq))
+    if (!is.na(night1_start) && !is.na(night1_end) && night1_start < night1_end)
+      keep <- keep | (hours_seq >= night1_start & hours_seq <= night1_end)
+    if (!is.na(night2_start) && !is.na(night2_end) && night2_start < night2_end)
+      keep <- keep | (hours_seq >= night2_start & hours_seq <= night2_end)
+
+    lubridate::round_date(hours_seq[keep], unit = "hour")
+  })
+}
+
+
+#' Annotate a move2/sf object with night-averaged ERA5 single-level data
+#'
+#' Night-averaged counterpart to \code{\link{annotate_era5_offsets}}: instead
+#' of the single ERA5 step nearest each fix, averages every hourly ERA5 step
+#' across the preceding night (suncalc sunset->sunrise, spanning up to 24h
+#' back) for each of \code{offsets_days}, using the same single-level
+#' variable/position table as \code{\link{annotate_era5}}
+#' (\code{.era5_single_var_positions()}, incl. cbh) rather than a
+#' hand-maintained var_names list — so it can't drift out of sync with the
+#' monthly \code{single_levels/} GRIB layout the way
+#' \code{extract_avg_night_env_from_year_stacks()}'s var_names did.
+#'
+#' For each offset in \code{offsets_days}, computes the suncalc-derived
+#' nighttime hour sequence ending at (fix time + offset), looks up every
+#' hourly ERA5 single-level step in that window from the monthly
+#' \code{era5_dir/single_levels/} GRIB files, and averages back to one row
+#' per fix (total precipitation is summed, not averaged, since it's additive).
+#'
+#' @param data         A \code{move2} or \code{sf} object with timestamps.
+#' @param era5_dir     Path to the EnvData directory (parent of
+#'   \code{single_levels/}).
+#' @param offsets_days Numeric vector of day offsets, e.g. \code{-2:2}.
+#' @param lon_col,lat_col Optional column names to use as the extraction
+#'   location instead of \code{data}'s own geometry (e.g. \code{"lon_prev"},
+#'   \code{"lat_prev"} to annotate the *preceding* night's location rather
+#'   than the current fix).
+#' @param tz           Timezone for timestamp handling.
+#' @param coord_crs    CRS of the extraction coordinates.
+#' @param verbose      Logical; print progress messages?
+#' @return \code{data} with per-offset night-averaged columns
+#'   (\code{u10_-48h}, ..., \code{cbh_48h}) plus \code{night_n_-48h} etc.
+#'   (number of night-hours averaged into that offset).
+#' @export
+annotate_era5_night_avg <- function(
+    data,
+    era5_dir,
+    offsets_days,
+    lon_col = NULL,
+    lat_col = NULL,
+    tz = "UTC",
+    coord_crs = "EPSG:4326",
+    verbose = TRUE
+) {
+  require(terra)
+  require(lubridate)
+  require(dplyr)
+  require(sf)
+
+  stopifnot(inherits(data, "sf"))
+
+  single_dir <- file.path(era5_dir, "single_levels")
+  if (!dir.exists(single_dir)) stop("No single_levels/ folder found under ", era5_dir)
+
+  base_time <- if (inherits(data, "move2")) move2::mt_time(data) else data$timestamp
+  if (is.null(base_time)) stop("Cannot find timestamps in data.")
+
+  attr_df <- sf::st_drop_geometry(data)
+  if (!is.null(lon_col) && !is.null(lat_col)) {
+    stopifnot(lon_col %in% names(attr_df), lat_col %in% names(attr_df))
+    lon <- as.numeric(attr_df[[lon_col]])
+    lat <- as.numeric(attr_df[[lat_col]])
+  } else {
+    coords <- sf::st_coordinates(data)
+    lon <- coords[, 1]
+    lat <- coords[, 2]
+  }
+  n   <- nrow(data)
+
+  var_positions <- .era5_single_var_positions()
+  n_var    <- length(var_positions)
+  var_cols <- names(var_positions)
+
+  out <- data
+
+  for (d in offsets_days) {
+    if (verbose) message("Night offset days: ", d)
+    shifted_time <- as.POSIXct(base_time, tz = tz) + d * 86400
+
+    night_hours <- .era5_night_hours_24h(shifted_time, lat, lon, tz = tz)
+
+    rows <- lapply(seq_len(n), function(i) {
+      nh <- night_hours[[i]]
+      if (length(nh) == 0L) return(NULL)
+      data.frame(
+        .row_id    = i,
+        night_hour = nh,
+        lon        = lon[i],
+        lat        = lat[i],
+        ym         = format(nh, "%Y-%m"),
+        stringsAsFactors = FALSE
+      )
+    })
+    long_tbl <- dplyr::bind_rows(rows)
+
+    if (nrow(long_tbl) == 0L) {
+      if (verbose) message("  No night hours found for any fix at this offset.")
+      next
+    }
+
+    for (nm in var_cols) long_tbl[[nm]] <- NA_real_
+
+    yms_needed <- sort(unique(long_tbl$ym))
+    if (verbose) message("  Year-months needed: ", paste(yms_needed, collapse = ", "))
+
+    for (ym in yms_needed) {
+      f <- file.path(single_dir, paste0("era5_single_", gsub("-", "_", ym), ".grib"))
+      if (!file.exists(f)) {
+        if (verbose) message("  [skip] no file for ", ym)
+        next
+      }
+
+      r  <- terra::rast(f)
+      rt <- as.POSIXct(terra::time(r), tz = tz)
+      if (is.null(rt) || length(rt) == 0) {
+        if (verbose) message("  [skip] ", ym, " has no time vector.")
+        next
+      }
+      rt_hour   <- lubridate::round_date(rt, "hour")
+      rt_unique <- sort(unique(rt_hour))
+
+      actual_block <- terra::nlyr(r) / length(rt_unique)
+      if (actual_block %% 1 != 0 || actual_block != n_var) {
+        stop("Raster for ", ym, ": ", terra::nlyr(r), " layers / ", length(rt_unique),
+             " timestamps = ", actual_block, " layers/hour, but expected ", n_var,
+             " (u10,v10,u100,v100,t2m,msl,sp,tp,i10fg,tcc,cbh). ",
+             "This file's variable layout no longer matches .era5_single_var_positions().")
+      }
+
+      sub_idx <- which(long_tbl$ym == ym)
+      t_round <- lubridate::round_date(as.POSIXct(long_tbl$night_hour[sub_idx], tz = tz), "hour")
+      hour_idx <- match(as.numeric(t_round), as.numeric(rt_unique))
+
+      ok <- which(!is.na(hour_idx))
+      if (length(ok) == 0L) {
+        if (verbose) message("  No matching raster hours for ", ym)
+        next
+      }
+
+      sub_ok      <- sub_idx[ok]
+      hour_idx_ok <- hour_idx[ok]
+      uniq_hours  <- sort(unique(hour_idx_ok))
+
+      pts <- terra::vect(
+        data.frame(x = long_tbl$lon[sub_ok], y = long_tbl$lat[sub_ok]),
+        geom = c("x", "y"), crs = coord_crs
+      )
+      r_crs <- terra::crs(r, proj = TRUE)
+      if (!is.na(r_crs) && terra::crs(pts, proj = TRUE) != r_crs) pts <- terra::project(pts, r_crs)
+
+      layer_blocks <- lapply(uniq_hours, function(h) ((h - 1L) * n_var + 1L):(h * n_var))
+      all_layers   <- unlist(layer_blocks)
+
+      if (verbose) {
+        message("  ", ym, ": rows=", length(sub_ok), ", unique hours=", length(uniq_hours),
+                ", vars/hour=", n_var)
+      }
+
+      r_sub <- r[[all_layers]]
+      vals  <- terra::extract(r_sub, pts, ID = FALSE)
+      if (ncol(vals) != length(all_layers)) {
+        stop("Extraction returned ", ncol(vals), " columns, expected ", length(all_layers), ".")
+      }
+
+      hour_block_idx <- match(hour_idx_ok, uniq_hours)
+      out_mat <- matrix(NA_real_, nrow = length(sub_ok), ncol = n_var)
+      for (v in seq_len(n_var)) {
+        col_in_vals <- (hour_block_idx - 1L) * n_var + v
+        out_mat[, v] <- vals[cbind(seq_along(sub_ok), col_in_vals)]
+      }
+      long_tbl[sub_ok, var_cols] <- out_mat
+
+      rm(r); gc(verbose = FALSE)
+    }
+
+    # aggregate to one row per fix: mean for most vars, sum for precipitation
+    avg_tbl <- long_tbl |>
+      dplyr::group_by(.row_id) |>
+      dplyr::summarise(
+        night_n = dplyr::n(),
+        dplyr::across(dplyr::all_of(setdiff(var_cols, "era5_tp")), ~ mean(.x, na.rm = TRUE)),
+        era5_tp = sum(era5_tp, na.rm = TRUE),
+        .groups = "drop"
+      )
+
+    m <- match(seq_len(n), avg_tbl$.row_id)
+    suffix <- paste0("_", d * 24, "h")
+    for (nm in var_cols) {
+      base_name <- sub("^era5_", "", nm)
+      out[[paste0(base_name, suffix)]] <- avg_tbl[[nm]][m]
+    }
+    out[[paste0("night_n", suffix)]] <- avg_tbl$night_n[m]
+  }
+
+  out
+}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# annotate_era5_sunset() — beginning-of-night, sunset-referenced
+# ═══════════════════════════════════════════════════════════════════════════
+
+#' Annotate a move2/sf object with ERA5 single-level data at sunset (+ offset)
+#'
+#' Sunset-referenced counterpart to \code{\link{annotate_era5_offsets}}:
+#' instead of looking up the ERA5 step nearest the fix time, looks up the
+#' step nearest sunset (+1h + \code{shift_hours}) at the fix's own location,
+#' falling back to the \emph{previous} fix's location (\code{lon_prev_col}/
+#' \code{lat_prev_col}) when that sunset has already passed by the time of
+#' the current fix. Uses the same single-level variable/position table as
+#' \code{\link{annotate_era5}} (\code{.era5_single_var_positions()}, incl.
+#' cbh) rather than a hand-maintained var_names list, and reads from the
+#' monthly \code{era5_dir/single_levels/} GRIB files instead of a yearly
+#' raster_by_year stack — replaces \code{extract_sunset_env()}.
+#'
+#' For each fix, finds sunset at the fix's own coordinates. If that sunset is
+#' already in the past by the fix's timestamp, sunset is recomputed at the
+#' \emph{previous} fix's coordinates instead, so the extraction always looks
+#' up a sunset that actually preceded the fix. The ERA5 step nearest
+#' \code{sunset + 1h + shift_hours} is then extracted from the monthly
+#' \code{era5_dir/single_levels/} GRIB files, for each value in
+#' \code{shift_hours}.
+#'
+#' @param data         A \code{move2} or \code{sf} object with timestamps.
+#' @param era5_dir     Path to the EnvData directory (parent of
+#'   \code{single_levels/}).
+#' @param shift_hours  Numeric vector of hour offsets from sunset+1h, e.g.
+#'   \code{seq(-48, 48, by = 24)}.
+#' @param lon_prev_col,lat_prev_col Column names holding the previous fix's
+#'   coordinates, used as the fallback location when the current-location
+#'   sunset has already passed. \code{NULL} = no fallback (always use the
+#'   fix's own coordinates).
+#' @param tz              Timezone for timestamp handling.
+#' @param coord_crs       CRS of the extraction coordinates.
+#' @param keep_debug_cols Logical; also return \code{sunset_time_<suffix>},
+#'   \code{target_time_<suffix>}, \code{use_prev_<suffix>} per offset?
+#' @param verbose Logical; print progress messages?
+#' @return \code{data} with per-offset columns (\code{u10_0h}, ..., \code{cbh_0h},
+#'   ... for each \code{shift_hours} value, suffixed \code{_<shift>h}).
+#' @export
+annotate_era5_sunset <- function(
+    data,
+    era5_dir,
+    shift_hours = 0,
+    lon_prev_col = NULL,
+    lat_prev_col = NULL,
+    tz = "UTC",
+    coord_crs = "EPSG:4326",
+    keep_debug_cols = TRUE,
+    verbose = TRUE
+) {
+  require(terra)
+  require(lubridate)
+  require(dplyr)
+  require(suncalc)
+  require(sf)
+
+  stopifnot(inherits(data, "sf"))
+
+  single_dir <- file.path(era5_dir, "single_levels")
+  if (!dir.exists(single_dir)) stop("No single_levels/ folder found under ", era5_dir)
+
+  base_time <- if (inherits(data, "move2")) move2::mt_time(data) else data$timestamp
+  if (is.null(base_time)) stop("Cannot find timestamps in data.")
+
+  attr_df <- sf::st_drop_geometry(data)
+  coords  <- sf::st_coordinates(data)
+  lon <- coords[, 1]
+  lat <- coords[, 2]
+
+  if (!is.null(lon_prev_col) && !is.null(lat_prev_col)) {
+    stopifnot(lon_prev_col %in% names(attr_df), lat_prev_col %in% names(attr_df))
+    lon_prev <- as.numeric(attr_df[[lon_prev_col]])
+    lat_prev <- as.numeric(attr_df[[lat_prev_col]])
+  } else {
+    lon_prev <- lon
+    lat_prev <- lat
+  }
+
+  n <- nrow(data)
+
+  # ── base sunset table ────────────────────────────────────────────────────
+  df <- data.frame(
+    .row_id   = seq_len(n),
+    timestamp = as.POSIXct(base_time, tz = tz),
+    date      = as.Date(as.POSIXct(base_time, tz = tz), tz = tz),
+    lat       = lat,
+    lon       = lon,
+    lat_prev  = lat_prev,
+    lon_prev  = lon_prev,
+    stringsAsFactors = FALSE
+  )
+
+  # ── sunset at current coords ─────────────────────────────────────────────
+  if (verbose) message("Computing sunset at current coords...")
+  sun_now <- suncalc::getSunlightTimes(data = df, tz = tz, keep = "sunset")
+  df$sunset_time_now <- as.POSIXct(sun_now$sunset, tz = tz)
+
+  # ── switch to prev coords when sunset has already passed ────────────────
+  # Rule: if sunset(now) <= timestamp, recompute sunset using lon_prev/lat_prev
+  # and extract there instead.
+  df$use_prev <- !is.na(df$sunset_time_now) & (df$sunset_time_now <= df$timestamp)
+  if (verbose) message("Rows using prev coords: ", sum(df$use_prev, na.rm = TRUE), " / ", nrow(df))
+
+  df$sunset_time <- df$sunset_time_now
+  if (any(df$use_prev, na.rm = TRUE)) {
+    if (verbose) message("Recomputing sunset for rows where sunset<=timestamp using lon_prev/lat_prev...")
+    idx <- which(df$use_prev)
+    df_prev <- df[idx, ]
+    df_prev$lat <- df_prev$lat_prev
+    df_prev$lon <- df_prev$lon_prev
+    sun_prev <- suncalc::getSunlightTimes(data = df_prev, tz = tz, keep = "sunset")
+    df$sunset_time[idx] <- as.POSIXct(sun_prev$sunset, tz = tz)
+  }
+
+  df$lon_use <- ifelse(df$use_prev, df$lon_prev, df$lon)
+  df$lat_use <- ifelse(df$use_prev, df$lat_prev, df$lat)
+
+  var_positions <- .era5_single_var_positions()
+  n_var    <- length(var_positions)
+  var_cols <- names(var_positions)
+
+  out <- data
+
+  for (shift in shift_hours) {
+    if (verbose) message("Sunset shift hours: ", shift)
+
+    target_time <- lubridate::round_date(
+      df$sunset_time + lubridate::hours(1 + shift), unit = "hour"
+    )
+
+    sub_tbl <- data.frame(
+      .row_id     = df$.row_id,
+      target_time = target_time,
+      lon         = df$lon_use,
+      lat         = df$lat_use,
+      ym          = format(target_time, "%Y-%m"),
+      stringsAsFactors = FALSE
+    )
+    for (nm in var_cols) sub_tbl[[nm]] <- NA_real_
+
+    yms_needed <- sort(unique(sub_tbl$ym[!is.na(sub_tbl$ym)]))
+    if (verbose) message("  Year-months needed: ", paste(yms_needed, collapse = ", "))
+
+    for (ym_i in yms_needed) {
+      f <- file.path(single_dir, paste0("era5_single_", gsub("-", "_", ym_i), ".grib"))
+      if (!file.exists(f)) {
+        if (verbose) message("  [skip] no file for ", ym_i)
+        next
+      }
+
+      r  <- terra::rast(f)
+      rt <- as.POSIXct(terra::time(r), tz = tz)
+      if (is.null(rt) || length(rt) == 0) {
+        if (verbose) message("  [skip] ", ym_i, " has no time vector.")
+        next
+      }
+      rt_hour   <- lubridate::round_date(rt, "hour")
+      rt_unique <- sort(unique(rt_hour))
+
+      actual_block <- terra::nlyr(r) / length(rt_unique)
+      if (actual_block %% 1 != 0 || actual_block != n_var) {
+        stop("Raster for ", ym_i, ": ", terra::nlyr(r), " layers / ", length(rt_unique),
+             " timestamps = ", actual_block, " layers/hour, but expected ", n_var,
+             " (", paste(var_cols, collapse = ", "), "). ",
+             "This file's variable layout no longer matches .era5_single_var_positions().")
+      }
+
+      sub_idx  <- which(sub_tbl$ym == ym_i)
+      t_round  <- lubridate::round_date(as.POSIXct(sub_tbl$target_time[sub_idx], tz = tz), "hour")
+      hour_idx <- match(as.numeric(t_round), as.numeric(rt_unique))
+
+      ok <- which(!is.na(hour_idx))
+      if (length(ok) == 0L) {
+        if (verbose) message("  No matching raster hours for ", ym_i)
+        next
+      }
+
+      sub_ok      <- sub_idx[ok]
+      hour_idx_ok <- hour_idx[ok]
+      uniq_hours  <- sort(unique(hour_idx_ok))
+
+      pts <- terra::vect(
+        data.frame(x = sub_tbl$lon[sub_ok], y = sub_tbl$lat[sub_ok]),
+        geom = c("x", "y"), crs = coord_crs
+      )
+      r_crs <- terra::crs(r, proj = TRUE)
+      if (!is.na(r_crs) && terra::crs(pts, proj = TRUE) != r_crs) pts <- terra::project(pts, r_crs)
+
+      layer_blocks <- lapply(uniq_hours, function(h) ((h - 1L) * n_var + 1L):(h * n_var))
+      all_layers   <- unlist(layer_blocks)
+
+      if (verbose) {
+        message("  ", ym_i, ": rows=", length(sub_ok), ", unique hours=", length(uniq_hours),
+                ", vars/hour=", n_var)
+      }
+
+      r_sub <- r[[all_layers]]
+      vals  <- terra::extract(r_sub, pts, ID = FALSE)
+      if (ncol(vals) != length(all_layers)) {
+        stop("Extraction returned ", ncol(vals), " columns, expected ", length(all_layers), ".")
+      }
+
+      hour_block_idx <- match(hour_idx_ok, uniq_hours)
+      out_mat <- matrix(NA_real_, nrow = length(sub_ok), ncol = n_var)
+      for (v in seq_len(n_var)) {
+        col_in_vals <- (hour_block_idx - 1L) * n_var + v
+        out_mat[, v] <- vals[cbind(seq_along(sub_ok), col_in_vals)]
+      }
+      sub_tbl[sub_ok, var_cols] <- out_mat
+
+      rm(r); gc(verbose = FALSE)
+    }
+
+    suffix <- paste0("_", shift, "h")
+    m <- match(seq_len(n), sub_tbl$.row_id)
+    for (nm in var_cols) {
+      base_name <- sub("^era5_", "", nm)
+      out[[paste0(base_name, suffix)]] <- sub_tbl[[nm]][m]
+    }
+    if (keep_debug_cols) {
+      out[[paste0("sunset_time", suffix)]] <- df$sunset_time
+      out[[paste0("target_time", suffix)]] <- sub_tbl$target_time[m]
+      out[[paste0("use_prev",    suffix)]] <- df$use_prev
+    }
+  }
+
+  out
+}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# annotate_era5_gee() — same variables, sourced from Google Earth Engine
+# ═══════════════════════════════════════════════════════════════════════════
+
+#' Annotate a move2/sf object with ERA5 data via Google Earth Engine
+#'
+#' Calls \code{python/annotate_era5_gee.py} using \code{system2()} to extract
+#' ERA5 variables from the GEE data catalog.  No local ERA5 files or rgee
+#' required — only \pkg{earthengine-api} and \pkg{pandas} in a Python
+#' environment.
+#'
+#' @section Extracted variables:
+#' \describe{
+#'   \item{era5_u10, era5_v10}{10 m zonal / meridional wind (m/s)}
+#'   \item{era5_u100, era5_v100}{100 m zonal / meridional wind (m/s)}
+#'   \item{era5_u500, era5_v500}{500 hPa zonal / meridional wind (m/s)}
+#'   \item{era5_u850, era5_v850}{850 hPa zonal / meridional wind (m/s)}
+#'   \item{era5_t2m}{2 m temperature (K)}
+#'   \item{era5_msl}{Mean sea-level pressure (Pa)}
+#'   \item{era5_sp}{Surface pressure (Pa)}
+#'   \item{era5_tp}{Total precipitation (m)}
+#'   \item{era5_i10fg}{Instantaneous 10 m wind gust (m/s)}
+#'   \item{era5_tcc}{Total cloud cover (fraction 0–1)}
+#'   \item{era5_cbh}{Cloud base height (m)}
+#' }
+#'
+#' @section Python setup:
+#' \preformatted{
+#' conda activate your_env
+#' pip install earthengine-api pandas
+#' python -c "import ee; ee.Authenticate()"
+#' }
+#'
+#' @param data             A \code{move2} or \code{sf} object with timestamps.
+#' @param python           Path to the Python executable that has
+#'   \pkg{earthengine-api} installed.  \code{NULL} = auto-detect from PATH.
+#' @param script           Path to \code{annotate_era5_gee.py}.  Defaults to
+#'   \code{python/annotate_era5_gee.py} relative to \code{getwd()}.
+#' @param gee_project      GEE Cloud project ID (required by newer API
+#'   versions).  \code{NULL} = let the script use the stored default.
+#' @param altitude_col     Column name with altitude in metres (GPS data).
+#' @param tag_pressure_col Column name with barometric pressure from tag (hPa).
+#' @param compute_wind_support Logical; compute tailwind/crosswind/airspeed?
+#' @param pressure_levels  Pressure levels (hPa) to include in wind support.
+#'   Only 500 and 850 are available from GEE; others will be ignored unless
+#'   their \code{era5_uXXX}/\code{era5_vXXX} columns are already present.
+#' @param max_time_gap_hours Warn when nearest ERA5 hour exceeds this gap.
+#' @param verbose          Logical; show Python script output?
+#'
+#' @return The input object with ERA5 columns appended.
+#'
+#' @seealso \code{\link{annotate_era5}} for the local GRIB-file version.
+#'
+#' @examples
+#' \dontrun{
+#' source("R/annotate_era5.R")
+#' source("R/calculate_wind_features.R")
+#' source("R/pressure_to_altitude_m.R")
+#'
+#' dat <- annotate_era5_gee(
+#'   data    = leisler,
+#'   python  = "C:/Users/Edward/anaconda3/envs/rgee311/python.exe",
+#'   verbose = TRUE
+#' )
+#' }
+#'
+#' @export
+annotate_era5_gee <- function(
+    data,
+    python              = NULL,
+    script              = file.path("python", "annotate_era5_gee.py"),
+    gee_project         = NULL,
+    altitude_col        = NULL,
+    tag_pressure_col    = NULL,
+    compute_wind_support = TRUE,
+    pressure_levels     = c(500, 850),
+    max_time_gap_hours  = 3,
+    verbose             = TRUE
+) {
+
+  stopifnot(inherits(data, "sf"))
+  n <- nrow(data)
+  if (n == 0L) { warning("Input has 0 rows."); return(data) }
+
+  # ── Find Python ───────────────────────────────────────────────────────────
+  if (is.null(python)) {
+    python <- Sys.which("python")
+    if (python == "") python <- Sys.which("python3")
+    if (python == "")
+      stop(
+        "Python not found on PATH.\n",
+        "Set python = 'C:/Users/Edward/anaconda3/envs/rgee311/python.exe'"
+      )
+  }
+  if (!file.exists(python))
+    stop("Python executable not found: ", python)
+
+  if (!file.exists(script))
+    stop("Python script not found: ", script,
+         "\n  (run from project root, or set script = full path)")
+
+  # ── Column detection ──────────────────────────────────────────────────────
+  altitude_col <- .era5_detect_col(
+    data, altitude_col,
+    c("height_raw", "altitude", "altitude_m", "altitude_sea",
+      "altitude.sea", "height_above_msl"),
+    "altitude", verbose
+  )
+  tag_pressure_col <- .era5_detect_col(
+    data, tag_pressure_col,
+    c("tinyfox_pressure_min_last_24h", "min_3h_pressure",
+      "tag_pressure", "barometric_pressure", "pressure_hpa_used"),
+    "tag pressure", verbose
+  )
+
+  # ── Build a flat CSV for Python ───────────────────────────────────────────
+  coords  <- sf::st_coordinates(sf::st_transform(data, 4326))
+  df_flat <- sf::st_drop_geometry(data)
+
+  timestamps <- if (inherits(data, "move2")) move2::mt_time(data) else data$timestamp
+  if (is.null(timestamps)) stop("Cannot find timestamps in data.")
+
+  df_flat$.longitude <- coords[, 1]
+  df_flat$.latitude  <- coords[, 2]
+  df_flat$.timestamp <- format(as.POSIXct(timestamps, tz = "UTC"),
+                                "%Y-%m-%dT%H:%M:%SZ")
+  df_flat$.row_id    <- seq_len(n)
+
+  # Mask empty geometries so Python doesn't try to extract from (NA, NA)
+  empty <- sf::st_is_empty(data)
+  if (any(empty)) {
+    df_flat$.longitude[empty] <- NA_real_
+    df_flat$.latitude[empty]  <- NA_real_
+  }
+
+  tmp_in  <- tempfile(fileext = ".csv")
+  tmp_out <- tempfile(fileext = ".csv")
+  on.exit({ unlink(tmp_in); unlink(tmp_out) }, add = TRUE)
+
+  utils::write.csv(df_flat, tmp_in, row.names = FALSE, na = "")
+
+  # ── Call Python script ────────────────────────────────────────────────────
+  args <- c(
+    normalizePath(script, mustWork = FALSE),
+    normalizePath(tmp_in,  mustWork = TRUE),
+    normalizePath(tmp_out, mustWork = FALSE),
+    "--lon",  ".longitude",
+    "--lat",  ".latitude",
+    "--time", ".timestamp"
+  )
+  if (!is.null(gee_project)) args <- c(args, "--project", gee_project)
+
+  if (verbose) message("Running Python ERA5 extraction ...")
+  ret <- system2(python, args = args, wait = TRUE,
+                 stdout = if (verbose) "" else FALSE,
+                 stderr = if (verbose) "" else FALSE)
+
+  if (ret != 0L)
+    stop("Python script exited with code ", ret,
+         ".\n  Check output above for error details.")
+
+  if (!file.exists(tmp_out))
+    stop("Python script did not produce output file.")
+
+  # ── Read results and attach to original data ──────────────────────────────
+  result <- utils::read.csv(tmp_out, stringsAsFactors = FALSE)
+
+  era5_cols <- grep("^era5_", names(result), value = TRUE)
+  if (length(era5_cols) == 0L)
+    warning("No era5_* columns found in Python output — check script output above.")
+
+  # Match by row order (.row_id is just seq_len so index directly)
+  for (col in era5_cols) {
+    data[[col]] <- result[[col]]
+  }
+
+  if (verbose)
+    message("  ERA5 columns added: ",
+            paste(era5_cols, collapse = ", "))
+
+  # ── Wind support ──────────────────────────────────────────────────────────
+  if (compute_wind_support) {
+    if (verbose) message("Computing wind support ...")
+    data <- .era5_wind_support(data, pressure_levels,
+                                altitude_col, tag_pressure_col)
+  }
+
+  if (verbose) message("GEE annotation complete.")
+  data
 }
