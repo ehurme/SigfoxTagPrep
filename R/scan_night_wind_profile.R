@@ -287,6 +287,7 @@ scan_night_wind_profile <- function(
     library(tidyterra)
     library(rnaturalearth)
     library(elevatr)
+    library(lubridate)
   })
 
   # Source helpers if not loaded
@@ -310,6 +311,23 @@ scan_night_wind_profile <- function(
   # ── Helpers ────────────────────────────────────────────────────────────────
   .has <- function(df, col) !is.null(col) && col %in% names(df) &&
                               any(!is.na(df[[col]]))
+  `%||_wp%` <- function(a, b) if (!is.null(a)) a else b
+
+  # Physically implausible values indicate a unit/pipeline bug upstream
+  # (corrupted matrix column, near-zero-dt speed spike, ...) rather than real
+  # wind/flight data — clamp to NA instead of letting them blow out axis
+  # scales, and report how many were caught so the real bug is traceable.
+  .clamp_plausible <- function(x, max_abs, label) {
+    bad <- is.finite(x) & abs(x) > max_abs
+    if (any(bad)) {
+      message(sprintf(
+        "  [sanity] %d/%d %s value(s) exceed %g (max seen %.3g) — set to NA",
+        sum(bad), length(x), label, max_abs, max(abs(x[bad]))
+      ))
+      x[bad] <- NA_real_
+    }
+    x
+  }
 
   .pt <- function(base_size = 9) {
     bg <- if (theme_dark) "black" else "white"
@@ -404,6 +422,26 @@ scan_night_wind_profile <- function(
             " \u2013 ", format(t_arr, "%Y-%m-%d %H:%M"),
             " | ", nrow(night_df), " rows | finescale=", is_finescale)
 
+  # ── Sanity-clamp wind/speed columns ─────────────────────────────────────────
+  # ERA5 wind speed never exceeds ~120 m/s (extreme jet-stream core); ground-
+  # /air-speed for this species tops out around Vmr + a strong tailwind, so
+  # anything past 120 m/s is a pipeline artefact (corrupted cache, near-zero
+  # dt speed spike, ...), not real data — clamp before it reaches any plot.
+  .WIND_MAX_MS <- 120
+  for (.col in c("wind_support_flight", "crosswind_flight", "wind_speed_flight",
+                 "airspeed_flight", "best_wind_support")) {
+    if (.col %in% names(night_df))
+      night_df[[.col]] <- .clamp_plausible(night_df[[.col]], .WIND_MAX_MS, .col)
+  }
+  for (.lv in pressure_levels) {
+    for (.pfx in c("wind_support_", "wind_speed_", "crosswind_", "airspeed_")) {
+      .col <- paste0(.pfx, .lv)
+      if (.col %in% names(night_df))
+        night_df[[.col]] <- .clamp_plausible(night_df[[.col]], .WIND_MAX_MS, .col)
+    }
+  }
+  rm(.col, .lv, .pfx)
+
   # ── Wind-support reshape (long format for heatmap) ─────────────────────────
   ws_cols   <- paste0("wind_support_", pressure_levels)
   ws_avail  <- ws_cols[ws_cols %in% names(night_df)]
@@ -431,6 +469,49 @@ scan_night_wind_profile <- function(
         pressure_hPa = as.numeric(
           gsub("wind_support_|wind_speed_", "", level_col))
       )
+
+    # Exclude levels whose ISA altitude sits below the interpolated ground
+    # elevation at that timestamp — a pressure level "underground" has no
+    # physical wind reading and shouldn't feed the heatmap, per-level lines,
+    # or best-wind selection below.
+    wind_long <- wind_long %>%
+      left_join(night_df %>% select(timestamp, ground_pressure_hPa),
+                by = "timestamp") %>%
+      mutate(
+        !!fill_var := ifelse(
+          !is.na(ground_pressure_hPa) & pressure_hPa > ground_pressure_hPa,
+          NA_real_, .data[[fill_var]]
+        )
+      )
+  }
+
+  # ── Ground-aware best-wind level ────────────────────────────────────────────
+  # annotate_era5()'s best_wind_support/best_wind_level scan every requested
+  # pressure level with no notion of terrain — recompute locally restricted to
+  # levels above the interpolated ground elevation, so a below-ground level
+  # (spuriously the strongest "wind" some nights) can't win the comparison.
+  night_df$best_wind_support_ag <- night_df[["best_wind_support"]] %||_wp% NA_real_
+  night_df$best_wind_level_ag   <- night_df[["best_wind_level"]]   %||_wp% NA_real_
+  if (has_ws) {
+    # Column-by-column as.numeric(), not as.matrix(): a single non-double
+    # column (e.g. leftover "units" class) would otherwise make as.matrix()
+    # stringify the whole thing via format(), corrupting every level.
+    ws_mat_ag <- vapply(ws_avail, function(cn) as.numeric(night_df[[cn]]),
+                        numeric(nrow(night_df)))
+    ws_mat_ag <- matrix(ws_mat_ag, nrow = nrow(night_df), ncol = length(ws_avail),
+                        dimnames = list(NULL, ws_avail))
+    lvl_num_ag <- as.numeric(gsub("wind_support_", "", ws_avail))
+    if (any(!is.na(night_df$ground_pressure_hPa))) {
+      below_ground_ag <- outer(night_df$ground_pressure_hPa, lvl_num_ag,
+                               function(gp, lv) !is.na(gp) & lv > gp)
+      ws_mat_ag[below_ground_ag] <- NA_real_
+    }
+    best_idx_ag <- apply(ws_mat_ag, 1, function(r)
+      if (all(is.na(r))) NA_integer_ else which.max(r))
+    night_df$best_wind_support_ag <- vapply(seq_len(nrow(ws_mat_ag)), function(i) {
+      j <- best_idx_ag[i]; if (is.na(j)) NA_real_ else ws_mat_ag[i, j]
+    }, numeric(1))
+    night_df$best_wind_level_ag <- lvl_num_ag[best_idx_ag]
   }
 
   # ── Pressure-level breaks with altitude labels ─────────────────────────────
@@ -470,6 +551,23 @@ scan_night_wind_profile <- function(
       terra::values(elev_rast)[terra::values(elev_rast) < 0] <- 0
   }
 
+  # ── Ground elevation at each night-window fix ───────────────────────────────
+  # Interpolated (bilinear) from the same raster used for the map background.
+  # Converted to an ISA-equivalent pressure so it can be drawn on the
+  # pressure-axis panels, and used to exclude wind levels that sit below the
+  # terrain surface from every downstream comparison/selection.
+  .alt_to_p_isa <- function(alt_m) 1013.25 * (1 - pmax(alt_m, 0) / 44330)^5.2558
+
+  night_df$ground_elev_m <- rep(NA_real_, nrow(night_df))
+  if (!is.null(elev_rast)) {
+    night_df$ground_elev_m <- tryCatch({
+      ex <- terra::extract(elev_rast, cbind(night_df$.lon, night_df$.lat),
+                           method = "bilinear")
+      pmax(as.numeric(ex[[ncol(ex)]]), 0)
+    }, error = function(e) rep(NA_real_, nrow(night_df)))
+  }
+  night_df$ground_pressure_hPa <- .alt_to_p_isa(night_df$ground_elev_m)
+
   # Elevation profile along flight path
   elev_profile <- NULL
   if (!is.null(elev_rast) && !is.null(extent_pts) &&
@@ -497,6 +595,22 @@ scan_night_wind_profile <- function(
     if (!is.na(dist_km)) paste0("  |  ", dist_km, " km") else ""
   )
 
+  # 100 m wind vectors along the trajectory — thinned to one arrow per 30 min
+  # so consecutive fixes (every few minutes) don't overplot into a smear.
+  wind_arrows <- NULL
+  if (all(c("era5_u100", "era5_v100") %in% names(night_df))) {
+    arrow_scale <- 0.05   # degrees per m/s — tuned for a ~buffer_deg-wide map
+    wind_arrows <- night_df %>%
+      filter(!is.na(era5_u100), !is.na(era5_v100)) %>%
+      mutate(.tbin = lubridate::floor_date(timestamp, "30 minutes")) %>%
+      group_by(.tbin) %>%
+      slice(1) %>%
+      ungroup() %>%
+      mutate(lon_end = .lon + era5_u100 * arrow_scale,
+             lat_end = .lat + era5_v100 * arrow_scale)
+    if (nrow(wind_arrows) == 0) wind_arrows <- NULL
+  }
+
   # ─ Panel 1: Map ────────────────────────────────────────────────────────────
   p_map <- ggplot() +
     { if (!is.null(elev_rast))
@@ -510,6 +624,20 @@ scan_night_wind_profile <- function(
     # Full individual track — thin grey context
     geom_path(data = df_i, aes(.lon, .lat),
               col = "grey60", linewidth = 0.35, alpha = 0.5) +
+    # 100 m wind vectors (cyan, black outline for contrast against any
+    # elevation colour underneath)
+    { if (!is.null(wind_arrows))
+        geom_segment(data = wind_arrows,
+                     aes(x = .lon, y = .lat, xend = lon_end, yend = lat_end),
+                     col = "black", linewidth = 1.1, alpha = 0.9,
+                     arrow = arrow(length = unit(0.09, "cm"), type = "closed"),
+                     inherit.aes = FALSE) } +
+    { if (!is.null(wind_arrows))
+        geom_segment(data = wind_arrows,
+                     aes(x = .lon, y = .lat, xend = lon_end, yend = lat_end),
+                     col = "#00E5FF", linewidth = 0.5, alpha = 0.95,
+                     arrow = arrow(length = unit(0.07, "cm"), type = "closed"),
+                     inherit.aes = FALSE) } +
     # Flight segment
     geom_segment(
       aes(x = dep_row_map$.lon, y = dep_row_map$.lat,
@@ -557,24 +685,48 @@ scan_night_wind_profile <- function(
         name   = "Pressure (hPa)\n[approx. altitude]"
       ) +
       scale_x_datetime(expand = expansion(0)) +
-      # Animal's flight pressure (thick white line)
+      # Ground / terrain — shaded below the interpolated surface pressure so
+      # underground levels (excluded from the analysis above) read visually
+      # as "not sky" rather than just missing tiles.
+      { if (any(!is.na(night_df$ground_pressure_hPa)))
+          geom_ribbon(data = night_df %>% filter(!is.na(ground_pressure_hPa)),
+                      aes(x = timestamp, ymin = ground_pressure_hPa,
+                          ymax = max(press_breaks, na.rm = TRUE) + 20),
+                      fill = "#5C4033", alpha = 0.55, inherit.aes = FALSE) } +
+      { if (any(!is.na(night_df$ground_pressure_hPa)))
+          geom_path(data = night_df %>% filter(!is.na(ground_pressure_hPa)),
+                    aes(timestamp, ground_pressure_hPa),
+                    col = "#3E2723", linewidth = 1, inherit.aes = FALSE) } +
+      # Animal's flight pressure — black outline + white fill line so it
+      # stays visible over both the white midpoint of the fill scale and the
+      # ground-shading colour.
       { if (!is.null(pressure_col) && .has(night_df, pressure_col))
-          geom_path(data   = night_df %>% filter(!is.na(.data[[pressure_col]])),
-                    aes(timestamp, .data[[pressure_col]]),
-                    col = "white", linewidth = 1.8, inherit.aes = FALSE) } +
-      # Best wind level (yellow dashed)
-      { if (.has(night_df, "best_wind_level"))
-          geom_path(data   = night_df %>% filter(!is.na(best_wind_level)),
-                    aes(timestamp, as.numeric(best_wind_level)),
-                    col = "yellow", linetype = "dashed", linewidth = 1.2,
-                    inherit.aes = FALSE) } +
+          list(
+            geom_path(data = night_df %>% filter(!is.na(.data[[pressure_col]])),
+                      aes(timestamp, .data[[pressure_col]]),
+                      col = "black", linewidth = 2.6, inherit.aes = FALSE),
+            geom_path(data = night_df %>% filter(!is.na(.data[[pressure_col]])),
+                      aes(timestamp, .data[[pressure_col]]),
+                      col = "white", linewidth = 1.4, inherit.aes = FALSE)
+          ) } +
+      # Best wind level (ground-aware), gold dashed with a black outline
+      { if (.has(night_df, "best_wind_level_ag"))
+          list(
+            geom_path(data = night_df %>% filter(!is.na(best_wind_level_ag)),
+                      aes(timestamp, as.numeric(best_wind_level_ag)),
+                      col = "black", linewidth = 2.2, inherit.aes = FALSE),
+            geom_path(data = night_df %>% filter(!is.na(best_wind_level_ag)),
+                      aes(timestamp, as.numeric(best_wind_level_ag)),
+                      col = "#FFD700", linetype = "dashed", linewidth = 1.1,
+                      inherit.aes = FALSE)
+          ) } +
       # Departure / arrival vlines
       geom_vline(xintercept = as.numeric(t_dep), col = "#4DAF4A",
                  linetype = "dashed", linewidth = 0.8) +
       geom_vline(xintercept = as.numeric(t_arr), col = "#FF7F00",
                  linetype = "dashed", linewidth = 0.8) +
       labs(x = "Time (UTC)", y = "Pressure (hPa)\n[approx. altitude]",
-           subtitle = if (has_ws) "White path = animal flight pressure; yellow dashed = best wind level"
+           subtitle = if (has_ws) "White path = animal flight pressure; gold dashed = best wind level (above ground); brown = ground"
                       else "White path = animal flight pressure (wind speed shown — heading unavailable)") +
       .pt(9) +
       theme(legend.position = "right",
@@ -640,6 +792,18 @@ scan_night_wind_profile <- function(
                  linewidth = 0.4)
   }
 
+  # Ground / terrain shading (same convention as the heatmap panel)
+  if (any(!is.na(night_df$ground_pressure_hPa))) {
+    p_pressure <- p_pressure +
+      geom_ribbon(data = night_df %>% filter(!is.na(ground_pressure_hPa)),
+                  aes(x = timestamp, ymin = ground_pressure_hPa,
+                      ymax = max(pressure_levels, na.rm = TRUE) + 20),
+                  fill = "#5C4033", alpha = 0.4, inherit.aes = FALSE) +
+      geom_path(data = night_df %>% filter(!is.na(ground_pressure_hPa)),
+                aes(timestamp, ground_pressure_hPa),
+                col = "#3E2723", linewidth = 1, inherit.aes = FALSE)
+  }
+
   if (!is.null(pressure_col) && .has(night_df, pressure_col)) {
     p_pressure <- p_pressure +
       geom_path(data  = night_df %>% filter(!is.na(.data[[pressure_col]])),
@@ -681,13 +845,13 @@ scan_night_wind_profile <- function(
     has_comparison_data <- TRUE
   }
 
-  if (.has(night_df, "best_wind_support")) {
+  if (.has(night_df, "best_wind_support_ag")) {
     p_comparison <- p_comparison +
-      geom_path(data  = night_df %>% filter(!is.na(best_wind_support)),
-                aes(timestamp, best_wind_support), col = "#FF7F00",
+      geom_path(data  = night_df %>% filter(!is.na(best_wind_support_ag)),
+                aes(timestamp, best_wind_support_ag), col = "#FF7F00",
                 linewidth = 1, linetype = "dashed") +
-      geom_point(data = night_df %>% filter(!is.na(best_wind_support)),
-                 aes(timestamp, best_wind_support), col = "#FF7F00", size = 1.2)
+      geom_point(data = night_df %>% filter(!is.na(best_wind_support_ag)),
+                 aes(timestamp, best_wind_support_ag), col = "#FF7F00", size = 1.2)
     has_comparison_data <- TRUE
   }
 
@@ -702,7 +866,7 @@ scan_night_wind_profile <- function(
   p_comparison <- p_comparison +
     scale_x_datetime(expand = expansion(0)) +
     labs(x = "Time (UTC)", y = "Wind support (m/s)",
-         subtitle = "Black = flight level  |  Orange dashed = best available  |  Grey = 10 m surface") +
+         subtitle = "Black = flight level  |  Orange dashed = best available (above ground)  |  Grey = 10 m surface") +
     .pt(9) +
     theme(plot.subtitle = element_text(size = 6, color = "grey60"))
 
@@ -778,6 +942,21 @@ scan_night_wind_profile <- function(
       )
     }
 
+    # Exclude altitude-grid rows that sit below the interpolated ground
+    # elevation at that interval's midpoint — an "optimal altitude" below
+    # terrain isn't flyable and shouldn't feed the Lagerveld profile or the
+    # optimal-altitude-over-time summary.
+    ground_at_mid <- NULL
+    if (!is.null(night_profiles) && nrow(night_profiles) > 0 &&
+        any(!is.na(night_df$ground_elev_m))) {
+      ground_at_mid <- approx(
+        x = as.numeric(night_df$timestamp), y = night_df$ground_elev_m,
+        xout = as.numeric(night_profiles$t_mid), rule = 2
+      )$y
+      keep <- is.na(ground_at_mid) | night_profiles$alt_m >= ground_at_mid
+      night_profiles <- night_profiles[keep, ]
+    }
+
     if (!is.null(night_profiles) && nrow(night_profiles) > 0) {
       # Observed altitude from tag pressure (ISA, for comparison line)
       obs_alt_m <- NULL
@@ -796,6 +975,7 @@ scan_night_wind_profile <- function(
           vmp_sd_ms       = vmp_sd_ms,
           vmr_sd_ms       = vmr_sd_ms,
           observed_alt_m  = obs_alt_m,
+          ground_elev_m   = median(night_df$ground_elev_m, na.rm = TRUE),
           species_label   = species_label,
           theme_dark      = theme_dark
         ),
@@ -817,6 +997,11 @@ scan_night_wind_profile <- function(
                      linetype = "dashed", linewidth = 0.7) +
           geom_vline(xintercept = as.numeric(t_arr), col = "#FF7F00",
                      linetype = "dashed", linewidth = 0.7) +
+          # Ground / terrain floor
+          { if (any(!is.na(night_df$ground_elev_m)))
+              geom_ribbon(data = night_df %>% filter(!is.na(ground_elev_m)),
+                          aes(x = timestamp, ymin = 0, ymax = ground_elev_m),
+                          fill = "#5C4033", alpha = 0.4, inherit.aes = FALSE) } +
           # Feasible altitude range (ribbon)
           geom_ribbon(data = opt_summary %>%
                         filter(!is.na(feasible_alt_min_m), !is.na(feasible_alt_max_m)),
@@ -850,24 +1035,32 @@ scan_night_wind_profile <- function(
                            col = "black", size = 1.2, inherit.aes = FALSE)
               )
             } } +
-          # Vmp / Vmr reference lines (altitude-adjusted at median night altitude)
-          {
-            med_alt <- median(opt_summary$optimal_alt_m, na.rm = TRUE)
-            list(
-              geom_hline(yintercept = 0, col = "grey50", linetype = "dotted"),
-              annotate("text", x = t_dep + 300, y = 100, label = "0 m (sea level)",
-                       col = "grey50", size = 2, hjust = 0)
-            )
-          } +
+          # Vmp / Vmr markers — ring intervals whose minimum required airspeed
+          # sits within tolerance of Vmp (purple) or Vmr (teal) at their
+          # optimal altitude (at_vmp_optimal / at_vmr_optimal from
+          # summarise_optimal_altitudes()).
+          { if (any(opt_summary$at_vmp_optimal, na.rm = TRUE))
+              geom_point(data = opt_summary %>% filter(at_vmp_optimal),
+                         aes(t_mid, optimal_alt_m),
+                         shape = 21, size = 3.5, stroke = 1.3,
+                         col = "#762A83", fill = NA, inherit.aes = FALSE) } +
+          { if (any(opt_summary$at_vmr_optimal, na.rm = TRUE))
+              geom_point(data = opt_summary %>% filter(at_vmr_optimal),
+                         aes(t_mid, optimal_alt_m),
+                         shape = 21, size = 3.5, stroke = 1.3,
+                         col = "#35978F", fill = NA, inherit.aes = FALSE) } +
+          geom_hline(yintercept = 0, col = "grey50", linetype = "dotted") +
+          annotate("text", x = t_dep + 300, y = 100, label = "0 m (sea level)",
+                   col = "grey50", size = 2, hjust = 0) +
           scale_x_datetime(expand = expansion(0)) +
           scale_y_continuous(name = "Altitude (m)", limits = c(0, NA)) +
           labs(x = "Time (UTC)",
                subtitle = paste0(
                  "Colour = min required airspeed  |  ",
                  "Black = observed (tag pressure)  |  ",
-                 "Grey ribbon = feasible altitude range\n",
-                 "Purple = Vmp (", round(vmp_sl_ms, 1),
-                 " m/s)  |  Teal = Vmr (", round(vmr_sl_ms, 1), " m/s) at sea level"
+                 "Grey ribbon = feasible altitude range  |  Brown = terrain\n",
+                 "Purple ring = at Vmp (", round(vmp_sl_ms, 1),
+                 " m/s)  |  Teal ring = at Vmr (", round(vmr_sl_ms, 1), " m/s), sea-level-adjusted"
                )) +
           .pt(9) +
           theme(legend.position = "right",

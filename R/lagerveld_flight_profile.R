@@ -460,6 +460,7 @@ plot_lagerveld_profile <- function(
     vmp_sd_ms       = 1.0,
     vmr_sd_ms       = 1.1,
     observed_alt_m  = NULL,
+    ground_elev_m   = NULL,
     species_label   = NULL,
     theme_dark      = FALSE
 ) {
@@ -518,6 +519,12 @@ plot_lagerveld_profile <- function(
     filter(n_infeasible / n_intervals > 0.5)
 
   p <- ggplot() +
+    # Ground / terrain — shaded below the (single representative) interpolated
+    # elevation for the night; altitude-grid rows below it were already
+    # dropped from `profiles` upstream, so this is a visual floor marker.
+    { if (!is.null(ground_elev_m) && is.finite(ground_elev_m) && ground_elev_m > 0)
+        annotate("rect", xmin = 0, xmax = ground_elev_m, ymin = -Inf, ymax = Inf,
+                 fill = "#5C4033", alpha = 0.35) } +
     # Infeasible shading
     { if (nrow(infeasible_shade) > 0)
         geom_vline(data = infeasible_shade,
@@ -574,7 +581,7 @@ plot_lagerveld_profile <- function(
     # Legend annotation
     annotate("text", x = -Inf, y = Inf, hjust = -0.1, vjust = 1.5,
              label = paste0("Airspeed (red)  |  Ground speed (green)\n",
-                            "Vmp (purple)  |  Vmr (teal)  |  Infeasible (grey)"),
+                            "Vmp (purple)  |  Vmr (teal)  |  Infeasible (grey)  |  Terrain (brown)"),
              col = fg, size = 2.2) +
     scale_x_continuous(
       name   = "Altitude (m)",
