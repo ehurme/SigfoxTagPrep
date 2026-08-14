@@ -582,7 +582,7 @@ make_diagnostic_plots <- function(
 # ─────────────────────────────────────────────────────────────
 # EXAMPLE
 # ─────────────────────────────────────────────────────────────
-run <- TRUE
+run <- FALSE
 if (run) {
   wildcloud_quicklook(
     "../../../Downloads/8_13_2026_records (2).csv",
