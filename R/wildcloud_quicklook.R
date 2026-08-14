@@ -585,13 +585,13 @@ make_diagnostic_plots <- function(
 run <- TRUE
 if (run) {
   wildcloud_quicklook(
-    "../../../Downloads/Swiss_nanofoxFSP_04_05_2026_records.csv",
+    "../../../Downloads/8_13_2026_records (2).csv",
     start_time      = "2026-04-09",
     plot_daily      = TRUE,
     plot_raw        = TRUE,
     plot_temp       = TRUE,
     free_y_raw      = FALSE,
     facets_per_page = 20,
-    plot_dir        = "../../../Dropbox/MPI/Noctule/Plots/Spring26/Swiss/Quicklook/"
+    plot_dir        = "../../../Dropbox/MPI/Noctule/Plots/Fall26/Oder/Quicklook/"
   )
 }
