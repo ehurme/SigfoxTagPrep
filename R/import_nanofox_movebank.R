@@ -107,7 +107,9 @@ import_nanofox_movebank <- function(
   script_add_moonlit = "../SigfoxTagPrep/R/add_moonlit_to_move2.R",
   script_daily = "../SigfoxTagPrep/R/mt_thin_daily_solar_noon.R",
   script_daily_sensor = "../SigfoxTagPrep/R/mt_add_daily_sensor_metrics.R",
-  tz = "UTC"
+  tz = "UTC",
+  movebank_max_retries = 3,
+  movebank_retry_wait = 5
 ) {
   suppressPackageStartupMessages({
     require("tidyverse", quietly = TRUE)
@@ -147,6 +149,43 @@ import_nanofox_movebank <- function(
       .msg("\u26a0\ufe0f  ", what, " failed: ", conditionMessage(e))
       NULL
     })
+  }
+
+  # ---------------------------------------------------------------------------
+  # .movebank_retry() \u2014 retry a Movebank API call with exponential backoff.
+  #
+  # Movebank occasionally returns transient failures (e.g. "unknown download
+  # error" with HTTP status 200) that succeed on a subsequent attempt. `fn` is
+  # a zero-argument closure so the call is only actually issued on each retry.
+  # `should_retry(e)` lets callers opt specific error conditions (e.g. "study
+  # has no deployments") out of retrying, since those will never succeed.
+  # ---------------------------------------------------------------------------
+  .movebank_retry <- function(
+    fn,
+    what,
+    max_tries = movebank_max_retries,
+    wait_sec = movebank_retry_wait,
+    should_retry = function(e) TRUE
+  ) {
+    attempt <- 1L
+    repeat {
+      out <- tryCatch(
+        list(ok = TRUE, value = fn()),
+        error = function(e) list(ok = FALSE, error = e)
+      )
+      if (isTRUE(out$ok)) return(out$value)
+      e <- out$error
+      if (attempt >= max_tries || !isTRUE(should_retry(e))) {
+        stop(e)
+      }
+      .msg(
+        "  \u26a0\ufe0f  ", what, " failed (attempt ", attempt, "/", max_tries,
+        "): ", conditionMessage(e), " -- retrying in ", wait_sec, "s..."
+      )
+      Sys.sleep(wait_sec)
+      wait_sec <- wait_sec * 2
+      attempt <- attempt + 1L
+    }
   }
 
   .norm <- function(x) gsub("\\s+", " ", tolower(trimws(as.character(x))))
@@ -2604,7 +2643,10 @@ import_nanofox_movebank <- function(
   }
   download_one_study <- function(id) {
     .msg("Downloading study: ", id)
-    si <- move2::movebank_download_study_info(study_id = id)
+    si <- .movebank_retry(
+      function() move2::movebank_download_study_info(study_id = id),
+      what = paste0("movebank_download_study_info(", id, ")")
+    )
     w <- .wanted_sensor_ids(si, sensor_selected)
     wanted_ids <- w$wanted_ids
     if (length(wanted_ids) == 0) {
@@ -2621,9 +2663,21 @@ import_nanofox_movebank <- function(
     }
 
     b <- tryCatch(
-      move2::movebank_download_study(
-        study_id = id,
-        sensor_type_id = wanted_ids
+      .movebank_retry(
+        function() {
+          move2::movebank_download_study(
+            study_id = id,
+            sensor_type_id = wanted_ids
+          )
+        },
+        what = paste0("movebank_download_study(", id, ")"),
+        should_retry = function(e) {
+          !grepl(
+            "none seem to be deployed|deployment_id.*NA",
+            conditionMessage(e),
+            ignore.case = TRUE
+          )
+        }
       ),
       error = function(e) {
         msg <- conditionMessage(e)
