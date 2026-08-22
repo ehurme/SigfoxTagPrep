@@ -740,7 +740,7 @@ import_nanofox_movebank <- function(
     # Build classification by filling NA slots progressively.
     # Priority (highest to lowest):
     #   1. Explicit override
-    #   2. model / tag_model event column  (most reliable — "NanoFox", "TinyFoxBatt")
+    #   2. model / tag_model event column  (most reliable — "Nanofox", "Tinyfox")
     #   3. model / tag_model from track data
     #   4. format_type column              (firmware label; may omit model name)
     #   5. Existing tag_type column        (only used to fill surviving gaps)
@@ -838,20 +838,32 @@ import_nanofox_movebank <- function(
   # WORK WITH WHAT'S ALREADY THERE - don't overwrite valid data
   model <- as.character(x$model)
   firmware <- as.character(x$tag_firmware)
-  
+
   # Clean NAs and empty strings
   model[model %in% c("", "NA", "NaN", "NULL")] <- NA_character_
   firmware[firmware %in% c("", "NA", "NaN", "NULL")] <- NA_character_
 
+  # Regularize all existing model strings to one of three canonical values.
+  # This collapses variants such as "nanofox", "NanoFox" -> "Nanofox",
+  # "TinyFoxBatt" -> "Tinyfox", and "SigfoxGH" -> "uWasp".
+  model <- dplyr::case_when(
+    grepl("uWasp|SigfoxGH", model, ignore.case = TRUE)          ~ "uWasp",
+    grepl("Nano|NanoFox|spring2025bat|30days|30DaysFine",
+          model, ignore.case = TRUE)                              ~ "Nanofox",
+    grepl("Tiny|TinyFox|TinyFoxBat|BBX5|BBV6|TV1",
+          model, ignore.case = TRUE)                              ~ "Tinyfox",
+    TRUE                                                        ~ model
+  )
+
   # If we have tag_type, use it to fill in missing models
   if ("tag_type" %in% names(x)) {
     tagtype_tok <- tolower(as.character(x$tag_type))
-    
+
     # Only fill NAs - don't overwrite existing valid models
     model[is.na(model) & tagtype_tok == "nanofox"] <- "Nanofox"
-    model[is.na(model) & tagtype_tok == "tinyfox"] <- "TinyFoxBatt"
+    model[is.na(model) & tagtype_tok == "tinyfox"] <- "Tinyfox"
     model[is.na(model) & tagtype_tok == "uwasp"] <- "uWasp"
-    
+
     # uWasp has no firmware
     firmware[model == "uWasp"] <- NA_character_
   }
@@ -859,13 +871,13 @@ import_nanofox_movebank <- function(
   # Validation
   nano_fw <- c("Daily", "10Days", "30Days", "30DaysFineScalePressure")
   tiny_fw <- c("V13", "V13P", "V14P", "battTorpor", "BBX5", "BBV6", "TV1")
-  
+
   issue <- rep("ok", nrow(x))
   issue[is.na(model)] <- "model_unknown"
   issue[model == "Nanofox" & is.na(firmware)] <- "nanofox_missing_firmware"
   issue[model == "Nanofox" & !is.na(firmware) & !firmware %in% nano_fw] <- "nanofox_invalid_firmware"
-  issue[model == "TinyFoxBatt" & is.na(firmware)] <- "tinyfox_missing_firmware"
-  issue[model == "TinyFoxBatt" & !is.na(firmware) & !firmware %in% tiny_fw] <- "tinyfox_invalid_firmware"
+  issue[model == "Tinyfox" & is.na(firmware)] <- "tinyfox_missing_firmware"
+  issue[model == "Tinyfox" & !is.na(firmware) & !firmware %in% tiny_fw] <- "tinyfox_invalid_firmware"
 
   x$model <- model
   x$tag_firmware <- firmware
