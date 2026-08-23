@@ -48,3 +48,4 @@ migration_hmm.stan
 */*.mp4
 # pressure_wind_profile output directories
 output/
+*.sqlite
