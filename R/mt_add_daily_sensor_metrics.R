@@ -53,6 +53,7 @@ mt_add_daily_sensor_metrics <- function(b_all,
                                         # nanofox
                                         nano_vedba_col = "vedba",
                                         nano_vedba_active_threshold = 1,
+                                        nano_vedba_flying_threshold = 2,
                                         nano_temp_col  = "avg_temp",
                                         nano_pres_col  = "min_3h_pressure",
 
@@ -224,24 +225,51 @@ mt_add_daily_sensor_metrics <- function(b_all,
         # every transmission in the day (100s of windows) and reaches values
         # 100x the raw signal, which blew up the scantrack.R y-axis.
         daily_vedba_mean  = if (.has_nano_v) mean(.data[[nano_vedba_col]], na.rm = TRUE) else NA_real_,
-        # Count of windows above threshold: a duty-cycle-style activity count
-        # that isn't pulled around by a handful of extreme bursts the way a
-        # mean is, and unlike daily_vedba_sum doesn't conflate "more active"
-        # with "more transmissions received" on days with denser reception.
+        # Count of windows above the "active" threshold: a duty-cycle-style
+        # activity count that isn't pulled around by a handful of extreme
+        # bursts the way a mean is, and unlike daily_vedba_sum doesn't
+        # conflate "more active" with "more transmissions received" on days
+        # with denser reception.
         daily_vedba_active_n = if (.has_nano_v)
           sum(.data[[nano_vedba_col]] > nano_vedba_active_threshold, na.rm = TRUE)
           else NA_integer_,
 
+        # Median is far more robust than the mean when reception is patchy:
+        # a few flight bursts don't get washed out by many quiet/roost windows
+        # on days with high message coverage.
+        daily_vedba_median = if (.has_nano_v)
+          suppressWarnings(stats::median(.data[[nano_vedba_col]], na.rm = TRUE))
+          else NA_real_,
+
+        # Number of Vedba windows above a (usually lower) flying threshold.
+        # Default 0 counts any non-zero burst as flight; raise it if you only
+        # want to count stronger bursts.
+        daily_vedba_flying_n = if (.has_nano_v)
+          sum(.data[[nano_vedba_col]] > nano_vedba_flying_threshold, na.rm = TRUE)
+          else NA_integer_,
+
         # Day/night split: NanoFox migration nights show up as a burst of
         # activity against a quiet daytime roost baseline, which a whole-day
-        # mean/sum washes out. Same sum-vs-mean scale caveat as above applies
-        # to each half independently.
+        # mean/sum washes out. Same sum-vs-mean/median scale caveat as above
+        # applies to each half independently.
         daily_vedba_day_sum    = if (.has_nano_v) sum(.data[[nano_vedba_col]][.is_day %in% TRUE], na.rm = TRUE) else NA_real_,
         daily_vedba_day_mean   = if (.has_nano_v) mean(.data[[nano_vedba_col]][.is_day %in% TRUE], na.rm = TRUE) else NA_real_,
+        daily_vedba_day_median = if (.has_nano_v)
+          suppressWarnings(stats::median(.data[[nano_vedba_col]][.is_day %in% TRUE], na.rm = TRUE))
+          else NA_real_,
         daily_vedba_day_n      = if (.has_nano_v) sum(!is.na(.data[[nano_vedba_col]][.is_day %in% TRUE])) else 0L,
-        daily_vedba_night_sum  = if (.has_nano_v) sum(.data[[nano_vedba_col]][.is_night %in% TRUE], na.rm = TRUE) else NA_real_,
-        daily_vedba_night_mean = if (.has_nano_v) mean(.data[[nano_vedba_col]][.is_night %in% TRUE], na.rm = TRUE) else NA_real_,
-        daily_vedba_night_n    = if (.has_nano_v) sum(!is.na(.data[[nano_vedba_col]][.is_night %in% TRUE])) else 0L,
+        daily_vedba_day_flying_n = if (.has_nano_v)
+          sum(.data[[nano_vedba_col]][.is_day %in% TRUE] > nano_vedba_flying_threshold, na.rm = TRUE)
+          else NA_integer_,
+        daily_vedba_night_sum    = if (.has_nano_v) sum(.data[[nano_vedba_col]][.is_night %in% TRUE], na.rm = TRUE) else NA_real_,
+        daily_vedba_night_mean   = if (.has_nano_v) mean(.data[[nano_vedba_col]][.is_night %in% TRUE], na.rm = TRUE) else NA_real_,
+        daily_vedba_night_median = if (.has_nano_v)
+          suppressWarnings(stats::median(.data[[nano_vedba_col]][.is_night %in% TRUE], na.rm = TRUE))
+          else NA_real_,
+        daily_vedba_night_n      = if (.has_nano_v) sum(!is.na(.data[[nano_vedba_col]][.is_night %in% TRUE])) else 0L,
+        daily_vedba_night_flying_n = if (.has_nano_v)
+          sum(.data[[nano_vedba_col]][.is_night %in% TRUE] > nano_vedba_flying_threshold, na.rm = TRUE)
+          else NA_integer_,
 
         # temperature_min / temperature_max exist on 30DaysFineScalePressure;
         # avg_temp is the fallback for standard 30Days firmware.

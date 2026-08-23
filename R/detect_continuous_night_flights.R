@@ -117,6 +117,13 @@ detect_continuous_night_flights <- function(
   tag_sym  <- sym(tag_type_col)
   mig_sym  <- sym(migration_col)
 
+  # this function is purely tabular (no geometry operations); drop the
+  # geometry column (not just the sf/move2 class) up front, otherwise the
+  # leftover sfc list-column breaks dplyr's vctrs-based mutate/summarise
+  # and trips sf's check_join ("y should not have class sf") on joins
+  if (inherits(loc_data, "sf")) loc_data <- sf::st_drop_geometry(loc_data)
+  loc_data <- as.data.frame(loc_data)
+
   if (!inherits(loc_data[[time_col]], c("POSIXct", "POSIXt"))) {
     loc_data[[time_col]] <- as.POSIXct(loc_data[[time_col]], tz = tz)
   }
@@ -203,7 +210,12 @@ detect_continuous_night_flights <- function(
   # join migratory night info
   # ---------------------------
   if (!is.null(daily_data)) {
+    # drop the geometry column so this is a plain lookup table: an sfc
+    # list-column left in place breaks vctrs-based dplyr verbs, and joining
+    # two sf-classed objects trips sf's check_join ("y should not have class sf")
     dd <- daily_data
+    if (inherits(dd, "sf")) dd <- sf::st_drop_geometry(dd)
+    dd <- as.data.frame(dd)
 
     if (!migration_col %in% names(dd)) {
       stop("migration_col not found in daily_data.")
@@ -370,6 +382,10 @@ detect_continuous_night_flights <- function(
     )
 
   points <- bout_points %>%
+    # drop the original id/time/tag columns first: bout_points still carries
+    # them alongside the derived .id/.timestamp/.tag_type_std columns below,
+    # and renaming onto an existing name errors with "Names must be unique"
+    select(-any_of(c(id_col, time_col, tag_type_col))) %>%
     rename(
       individual_local_identifier = .id,
       night_date = .night_date,
