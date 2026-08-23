@@ -61,7 +61,7 @@ pairwise_track_distance <- function(tracks, max_pairs_warn = 20000) {
 
   ivl_cols <- c("id", "t_min", "t_max", if (has_group) "group")
   ivl <- tracks[, .(t_min = min(timestamp), t_max = max(timestamp),
-                     group = if (has_group) group[1] else NULL), by = id]
+                     group = if (has_group) group[1] else NA_character_), by = id]
 
   pairs <- .overlapping_pairs(ivl)
   if (nrow(pairs) == 0) {

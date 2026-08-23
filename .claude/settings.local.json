@@ -23,7 +23,9 @@
       "Bash(command -v R.exe)",
       "Read(//c/Program Files/R/**)",
       "Bash('/c/Program Files/R/R-4.6.1/bin/Rscript.exe' -e ' *)",
-      "Bash(Rscript -e \"tryCatch\\({parse\\('R/import_nanofox_movebank.R'\\); cat\\('OK\\\\n'\\)}, error=function\\(e\\) {cat\\('PARSE ERROR:\\\\n'\\); print\\(e\\)}\\)\")"
+      "Bash(Rscript -e \"tryCatch\\({parse\\('R/import_nanofox_movebank.R'\\); cat\\('OK\\\\n'\\)}, error=function\\(e\\) {cat\\('PARSE ERROR:\\\\n'\\); print\\(e\\)}\\)\")",
+      "Bash(command -v Rscript)",
+      "Bash(Rscript -e \"invisible\\(parse\\('R/plot_regularized_track.R'\\)\\)\")"
     ]
   }
 }
