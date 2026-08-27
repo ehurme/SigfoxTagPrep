@@ -212,9 +212,10 @@ To compare activity across tag types, both are normalized to **VEDBA per one-sec
 
 **Per-message VEDBA:** `tinyfox_diff_vedba` (cumulative diff between messages in m/s²)
 
-**Per-burst VEDBA:** `tinyfox_diff_vedba / (dt_hours × 60)`
-- `dt_hours` = actual time between messages (accounts for ±30 min/day clock drift)
-- Already computed in import pipeline as `tinyfox_vedba_rate / 60`
+**Per-burst VEDBA:** `tinyfox_diff_vedba / (dt_prev_hours × 60)`
+- `dt_prev_hours` = time from the previous message to the current message (accounts for ±30 min/day clock drift)
+- `tinyfox_diff_vedba` is the change since the previous fix, so it must be paired with the previous inter-message interval
+- Already computed in import pipeline as `tinyfox_vedba_rate / 60` (now using `dt_prev`)
 
 **Expected range (per-burst):**
 - Per-burst values: ~0.5–2.0 m/s²

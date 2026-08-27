@@ -1836,11 +1836,13 @@ import_nanofox_movebank <- function(
   #                            NA for the first fix per deployment and for
   #                            negative diffs (counter resets / overflows).
   #
-  #   tinyfox_vedba_rate     — tinyfox_diff_vedba / dt_hours; NA wherever
-  #                            diff is NA or dt is zero / missing.
+  #   tinyfox_vedba_rate     — tinyfox_diff_vedba / dt_prev_hours; NA wherever
+  #                            diff is NA or dt_prev is zero / missing.
   #
-  # Requires the `dt` column (seconds, from mt_time_lags in .make_location_metrics)
-  # to be present. Falls back to NA rate if `dt` is absent.
+  # Uses `dt_prev` (seconds, time from the previous fix to the current fix) rather
+  # than `dt` because `tinyfox_diff_vedba` is the change since the previous fix.
+  # `dt_prev` is produced by mt_add_prev_metrics() in .make_location_metrics().
+  # Falls back to NA rate if `dt_prev` is absent.
   #
   # Grouped by deployment track so re-deployments do not carry over the
   # previous tag's cumulative total.
@@ -1849,7 +1851,7 @@ import_nanofox_movebank <- function(
     if (!"tinyfox_total_vedba" %in% names(x)) return(x)
     if (!"tag_type" %in% names(x))            return(x)
 
-    has_dt    <- "dt" %in% names(x)
+    has_dt_prev <- "dt_prev" %in% names(x)
     track_col <- move2::mt_track_id_column(x)
 
     x$tinyfox_diff_vedba <- NA_real_
@@ -1866,10 +1868,10 @@ import_nanofox_movebank <- function(
       d[!is.na(d) & d < 0] <- NA_real_   # resets / overflows
       x$tinyfox_diff_vedba[idx] <- d
 
-      if (has_dt) {
-        dt_h <- as.numeric(x$dt[idx]) / 3600   # dt is in seconds
+      if (has_dt_prev) {
+        dt_h <- as.numeric(x$dt_prev[idx]) / 3600   # dt_prev is in seconds
         rate <- d / dt_h
-        rate[!is.finite(rate)] <- NA_real_       # guard against dt == 0
+        rate[!is.finite(rate)] <- NA_real_       # guard against dt_prev == 0
         x$tinyfox_vedba_rate[idx] <- rate
       }
     }
@@ -1963,11 +1965,14 @@ import_nanofox_movebank <- function(
   # because it requires the actual dt (time between messages, accounting for drift).
   #
   # To compute per-burst VEDBA for TinyFoxBatt:
-  #   vedba_per_burst = tinyfox_diff_vedba / (dt_hours × 60)
+  #   vedba_per_burst = tinyfox_diff_vedba / (dt_prev_hours × 60)
   #
-  # Where dt_hours is the actual time between messages (from timestamp differences).
-  # See `.add_tinyfox_diff_vedba()` for how this is computed. The dt column is
-  # produced by mt_time_lags() in `.make_location_metrics()`.
+  # Where dt_prev_hours is the time from the previous fix to the current fix
+  # (from timestamp differences).  Because tinyfox_diff_vedba is the change
+  # since the previous message, it must be divided by the previous inter-message
+  # interval, not the forward interval `dt`.
+  # See `.add_tinyfox_diff_vedba()` for how this is computed. The dt_prev column
+  # is produced by mt_add_prev_metrics() in `.make_location_metrics()`.
   #
   # When per-burst VEDBA is needed for TinyFoxBatt, this can be added as a
   # post-import step similar to the Nanofox correction above.

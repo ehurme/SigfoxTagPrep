@@ -10,12 +10,14 @@ This document tracks implementation status of VEDBA scaling corrections in the S
 
 ### Gap #1: TinyFoxBatt per-message VEDBA rate
 **Status:** IMPLEMENTED  
-**Details:** Temporal normalization of TinyFoxBatt VEDBA diffs by inter-message time interval.  
-**Location:** `.add_tinyfox_diff_vedba()` in `R/import_nanofox_movebank.R` (lines 1833–1868)  
+**Details:** Temporal normalization of TinyFoxBatt VEDBA diffs by the **previous** inter-message interval (`dt_prev`).  
+**Location:** `.add_tinyfox_diff_vedba()` in `R/import_nanofox_movebank.R` (lines ~1830–1885)  
 **What it does:**
 - Computes `tinyfox_diff_vedba`: raw counter change between consecutive fixes
-- Computes `tinyfox_vedba_rate`: normalized by dt_hours for comparable activity signals
+- Computes `tinyfox_vedba_rate`: normalized by `dt_prev_hours` for comparable activity signals
 - Handles counter resets and overflow gracefully
+
+**Important:** `tinyfox_diff_vedba` is the change *since the previous fix*, so it must be divided by the time from the previous fix to the current fix (`dt_prev`), not the forward interval `dt`. Using `dt` inflates rates when the forward interval is short (e.g., the next message arrives quickly) and can produce extreme per-burst spikes that make Tinyfox and Nanofox values incomparable.
 
 ---
 
@@ -86,9 +88,9 @@ This document tracks implementation status of VEDBA scaling corrections in the S
 
 To compute per-burst VEDBA for TinyFoxBatt when needed:
 ```r
-tinyfox_per_burst_vedba = tinyfox_diff_vedba / (dt_hours × 60)
+tinyfox_per_burst_vedba = tinyfox_diff_vedba / (dt_prev_hours × 60)
 ```
-Where `dt_hours` is already available from `.add_tinyfox_diff_vedba()`.
+Where `dt_prev_hours` is already available from `.add_tinyfox_diff_vedba()` (it now uses `dt_prev`, not `dt`).
 
 ### Movebank Upload Pipeline (`wildcloud_to_movebank.R`)
 **Status:** Not yet updated  
@@ -131,6 +133,7 @@ Where `dt_hours` is already available from `.add_tinyfox_diff_vedba()`.
 
 4. **Cross-type comparison test:**
    - Both Nanofox (corrected) and TinyfoxBatt per-burst should be on similar scale
+   - TinyfoxBatt rate should use `dt_prev` (not `dt`) so extreme forward-dt spikes disappear
    - Daily totals should be in comparable range when normalized by burst count
 
 ---
@@ -150,6 +153,8 @@ Where `dt_hours` is already available from `.add_tinyfox_diff_vedba()`.
 - [x] Call site documented with inline comments
 - [x] Status reporting added (scaling summary logged at end of processing)
 - [x] TinyFoxBatt per-burst reference comment added (for future work)
+- [x] `.add_tinyfox_diff_vedba()` updated to use `dt_prev` instead of `dt` for `tinyfox_vedba_rate`
+- [x] Inline docs for `.add_tinyfox_diff_vedba()` updated to explain `dt_prev` usage
 
 ---
 
