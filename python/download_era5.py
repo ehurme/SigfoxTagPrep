@@ -25,6 +25,8 @@ Usage:
     python download_era5.py era5_config.json --dataset single
     python download_era5.py era5_config.json --dataset pressure
     python download_era5.py era5_config.json --outdir //10.0.16.7/grpdechmann/.../EnvData
+    python download_era5.py era5_config.json --verify
+    python download_era5.py era5_config.json --verify --retries 3
 
 Requirements:
     pip install cdsapi
@@ -49,6 +51,11 @@ try:
     import cdsapi
 except ImportError:
     sys.exit("cdsapi not installed. Run: pip install cdsapi")
+
+try:
+    import xarray as xr
+except ImportError:
+    xr = None
 
 
 # ── Defaults ─────────────────────────────────────────────────────────────────
@@ -115,10 +122,141 @@ def load_config(path: str) -> dict:
     return cfg
 
 
+def expected_time_steps(year: int, month: int, hours: list[str] | None = None) -> int:
+    """Return the expected number of hourly time steps for a month."""
+    if hours is None:
+        hours = ALL_HOURS
+    n_days = calendar.monthrange(year, month)[1]
+    return n_days * len(hours)
+
+
+# Mapping from CDS API variable names to GRIB shortNames.
+# Used to verify that every requested variable is actually present in a file.
+ERA5_SHORTNAMES = {
+    # single levels
+    "10m_u_component_of_wind": "10u",
+    "10m_v_component_of_wind": "10v",
+    "100m_u_component_of_wind": "100u",
+    "100m_v_component_of_wind": "100v",
+    "2m_temperature": "2t",
+    "mean_sea_level_pressure": "msl",
+    "surface_pressure": "sp",
+    "total_precipitation": "tp",
+    "instantaneous_10m_wind_gust": "i10fg",
+    "total_cloud_cover": "tcc",
+    "cloud_base_height": "cbh",
+    # pressure levels
+    "u_component_of_wind": "u",
+    "v_component_of_wind": "v",
+    "temperature": "t",
+    "vertical_velocity": "w",
+}
+
+
+def inspect_grib(path: Path) -> tuple[int | None, list[str] | None]:
+    """
+    Read a GRIB file with eccodes and return (message_count, shortNames).
+
+    shortNames are returned in first-appearance order, which matches the
+    layer order the R extractor expects.
+    """
+    try:
+        import eccodes
+    except ImportError:
+        return None, None
+
+    count = 0
+    ordered: list[str] = []
+    seen: set[str] = set()
+    try:
+        with open(path, "rb") as f:
+            while True:
+                gid = eccodes.codes_grib_new_from_file(f)
+                if gid is None:
+                    break
+                count += 1
+                sn = eccodes.codes_get(gid, "shortName", str)
+                if sn not in seen:
+                    seen.add(sn)
+                    ordered.append(sn)
+                eccodes.codes_release(gid)
+        return count, ordered
+    except Exception:
+        return None, None
+
+
+def verify_download(path: Path, expected_steps: int,
+                    variables_per_step: int = 1,
+                    expected_shortnames: list[str] | None = None) -> tuple[bool, str]:
+    """
+    Check that a downloaded file is complete and contains the expected variables.
+
+    For GRIB files the total number of messages is compared to the expected
+    number (time steps x variables) and, when expected_shortnames is given,
+    the layer shortName order is checked. For NetCDF files the 'time' dimension
+    is checked directly. Returns (ok, message).
+    """
+    if not path.exists():
+        return False, "file does not exist"
+    if path.stat().st_size == 0:
+        return False, "file is empty"
+
+    suffix = path.suffix.lower()
+    if suffix in (".grib", ".grb", ".grib1", ".grib2"):
+        n_messages, actual_shortnames = inspect_grib(path)
+        if n_messages is None:
+            if xr is None:
+                return False, "eccodes/xarray not installed; cannot verify GRIB"
+        else:
+            expected_messages = expected_steps * variables_per_step
+            if n_messages < expected_messages:
+                return False, (
+                    f"incomplete ({n_messages}/{expected_messages} GRIB messages)"
+                )
+
+            if expected_shortnames and actual_shortnames is not None:
+                n_expected = len(expected_shortnames)
+                if len(actual_shortnames) < n_expected:
+                    return False, (
+                        f"missing variables: got {actual_shortnames}, "
+                        f"expected {expected_shortnames}"
+                    )
+                if actual_shortnames[:n_expected] != expected_shortnames:
+                    return False, (
+                        f"wrong layer order/names: got {actual_shortnames}, "
+                        f"expected {expected_shortnames}"
+                    )
+                return True, (
+                    f"{n_messages} messages, layers {actual_shortnames[:n_expected]}"
+                )
+            return True, f"{n_messages} GRIB messages"
+
+    if xr is None:
+        return False, "xarray not installed; cannot verify"
+
+    engine = "netcdf4" if suffix in (".nc", ".nc4", ".netcdf") else None
+    try:
+        ds = xr.open_dataset(str(path), engine=engine, decode_times=True)
+        with ds:
+            time_coord = ds.coords.get("time") or ds.coords.get("valid_time")
+            if time_coord is not None:
+                n_steps = len(time_coord)
+            else:
+                n_steps = ds.sizes.get("time", 0)
+
+            if n_steps < expected_steps:
+                return False, f"incomplete ({n_steps}/{expected_steps} time steps)"
+            return True, f"{n_steps} time steps"
+    except Exception as e:
+        return False, f"could not read file: {e}"
+
+
 # ── Download functions ───────────────────────────────────────────────────────
 
 def download_single_levels(client: cdsapi.Client, cfg: dict, out_root: Path,
-                           skip_existing: bool = True):
+                           skip_existing: bool = True,
+                           verify_existing: bool = False,
+                           max_retries: int = 2):
     """Download ERA5 single-level reanalysis, one file per month."""
     variables = cfg.get("single_level_variables", DEFAULT_SINGLE_VARS)
     area = cfg["area"]
@@ -130,33 +268,66 @@ def download_single_levels(client: cdsapi.Client, cfg: dict, out_root: Path,
     for year in sorted(cfg["years"], reverse=True):
         for month in sorted(cfg["months"], reverse=True):
             fname = out_dir / f"era5_single_{year}_{month:02d}.grib"
-            if skip_existing and fname.exists():
-                print(f"  [skip] {fname.name} already exists")
-                continue
+            expected = expected_time_steps(year, month)
 
-            print(f"  Requesting single-level {year}-{month:02d} ...")
-            request = {
-                "product_type": ["reanalysis"],
-                "variable": variables,
-                "year": [str(year)],
-                "month": [f"{month:02d}"],
-                "day": days_in_month(year, month),
-                "time": ALL_HOURS,
-                "data_format": fmt,
-                "download_format": "unarchived",
-                "area": area,
-            }
-            try:
-                client.retrieve("reanalysis-era5-single-levels", request).download(
-                    target=str(fname)
-                )
-                print(f"  [done] {fname.name}")
-            except requests.exceptions.HTTPError as e:
-                print(f"  [skip] {year}-{month:02d}: {e}")
+            if fname.exists():
+                if skip_existing:
+                    if verify_existing:
+                        ok, msg = verify_download(fname, expected,
+                                                  variables_per_step=len(variables))
+                        if ok:
+                            print(f"  [skip] {fname.name} verified ({msg})")
+                            continue
+                        print(f"  [warn] {fname.name} {msg}; re-downloading")
+                        fname.unlink(missing_ok=True)
+                    else:
+                        print(f"  [skip] {fname.name} already exists")
+                        continue
+                else:
+                    print(f"  [overwrite] {fname.name}")
+                    fname.unlink(missing_ok=True)
+
+            for attempt in range(max_retries + 1):
+                print(f"  Requesting single-level {year}-{month:02d} "
+                      f"(attempt {attempt + 1}/{max_retries + 1}) ...")
+                request = {
+                    "product_type": ["reanalysis"],
+                    "variable": variables,
+                    "year": [str(year)],
+                    "month": [f"{month:02d}"],
+                    "day": days_in_month(year, month),
+                    "time": ALL_HOURS,
+                    "data_format": fmt,
+                    "download_format": "unarchived",
+                    "area": area,
+                }
+                try:
+                    client.retrieve("reanalysis-era5-single-levels", request).download(
+                        target=str(fname)
+                    )
+                    ok, msg = verify_download(fname, expected,
+                                              variables_per_step=len(variables))
+                    if ok:
+                        print(f"  [done] {fname.name} ({msg})")
+                        break
+
+                    print(f"  [warn] {fname.name} {msg}")
+                    if attempt < max_retries:
+                        print("  Retrying...")
+                        fname.unlink(missing_ok=True)
+                    else:
+                        print(f"  [fail] {fname.name} still incomplete after "
+                              f"{max_retries} retries")
+                        fname.unlink(missing_ok=True)
+                except requests.exceptions.HTTPError as e:
+                    print(f"  [skip] {year}-{month:02d}: {e}")
+                    break
 
 
 def download_pressure_levels(client: cdsapi.Client, cfg: dict, out_root: Path,
-                             skip_existing: bool = True):
+                             skip_existing: bool = True,
+                             verify_existing: bool = False,
+                             max_retries: int = 2):
     """
     Download ERA5 pressure-level wind data.
 
@@ -176,30 +347,61 @@ def download_pressure_levels(client: cdsapi.Client, cfg: dict, out_root: Path,
         for month in sorted(cfg["months"], reverse=True):
             for level in levels:
                 fname = out_dir / f"era5_wind_{level}hPa_{year}_{month:02d}.grib"
-                if skip_existing and fname.exists():
-                    print(f"  [skip] {fname.name}")
-                    continue
+                expected = expected_time_steps(year, month)
 
-                print(f"  Requesting {level} hPa  {year}-{month:02d} ...")
-                request = {
-                    "product_type": ["reanalysis"],
-                    "variable": variables,
-                    "year": [str(year)],
-                    "month": [f"{month:02d}"],
-                    "day": days_in_month(year, month),
-                    "time": ALL_HOURS,
-                    "pressure_level": [str(level)],
-                    "data_format": fmt,
-                    "download_format": "unarchived",
-                    "area": area,
-                }
-                try:
-                    client.retrieve(
-                        "reanalysis-era5-pressure-levels", request
-                    ).download(target=str(fname))
-                    print(f"  [done] {fname.name}")
-                except requests.exceptions.HTTPError as e:
-                    print(f"  [skip] {level} hPa {year}-{month:02d}: {e}")
+                if fname.exists():
+                    if skip_existing:
+                        if verify_existing:
+                            ok, msg = verify_download(fname, expected,
+                                                      variables_per_step=len(variables))
+                            if ok:
+                                print(f"  [skip] {fname.name} verified ({msg})")
+                                continue
+                            print(f"  [warn] {fname.name} {msg}; re-downloading")
+                            fname.unlink(missing_ok=True)
+                        else:
+                            print(f"  [skip] {fname.name}")
+                            continue
+                    else:
+                        print(f"  [overwrite] {fname.name}")
+                        fname.unlink(missing_ok=True)
+
+                for attempt in range(max_retries + 1):
+                    print(f"  Requesting {level} hPa {year}-{month:02d} "
+                          f"(attempt {attempt + 1}/{max_retries + 1}) ...")
+                    request = {
+                        "product_type": ["reanalysis"],
+                        "variable": variables,
+                        "year": [str(year)],
+                        "month": [f"{month:02d}"],
+                        "day": days_in_month(year, month),
+                        "time": ALL_HOURS,
+                        "pressure_level": [str(level)],
+                        "data_format": fmt,
+                        "download_format": "unarchived",
+                        "area": area,
+                    }
+                    try:
+                        client.retrieve(
+                            "reanalysis-era5-pressure-levels", request
+                        ).download(target=str(fname))
+                        ok, msg = verify_download(fname, expected,
+                                                  variables_per_step=len(variables))
+                        if ok:
+                            print(f"  [done] {fname.name} ({msg})")
+                            break
+
+                        print(f"  [warn] {fname.name} {msg}")
+                        if attempt < max_retries:
+                            print("  Retrying...")
+                            fname.unlink(missing_ok=True)
+                        else:
+                            print(f"  [fail] {fname.name} still incomplete after "
+                                  f"{max_retries} retries")
+                            fname.unlink(missing_ok=True)
+                    except requests.exceptions.HTTPError as e:
+                        print(f"  [skip] {level} hPa {year}-{month:02d}: {e}")
+                        break
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
@@ -227,6 +429,18 @@ def main():
         default=False,
         help="Re-download files that already exist (default: skip existing)",
     )
+    ap.add_argument(
+        "--verify",
+        action="store_true",
+        default=False,
+        help="Open existing files and re-download any that are incomplete",
+    )
+    ap.add_argument(
+        "--retries",
+        type=int,
+        default=2,
+        help="Max retries when a downloaded file is incomplete (default: 2)",
+    )
     args = ap.parse_args()
 
     cfg = load_config(args.config)
@@ -241,14 +455,24 @@ def main():
     if args.dataset in ("single", "both"):
         n_files = len(cfg["years"]) * len(cfg["months"])
         print(f"=== Single-level variables ({n_files} monthly files) ===")
-        download_single_levels(client, cfg, out_root, skip_existing=not args.overwrite)
+        download_single_levels(
+            client, cfg, out_root,
+            skip_existing=not args.overwrite,
+            verify_existing=args.verify,
+            max_retries=args.retries,
+        )
 
     if args.dataset in ("pressure", "both"):
         levels = cfg.get("pressure_levels", DEFAULT_LEVELS)
         n_files = len(cfg["years"]) * len(cfg["months"]) * len(levels)
         print(f"=== Pressure-level wind ({n_files} files: "
               f"{len(levels)} levels x months) ===")
-        download_pressure_levels(client, cfg, out_root, skip_existing=not args.overwrite)
+        download_pressure_levels(
+            client, cfg, out_root,
+            skip_existing=not args.overwrite,
+            verify_existing=args.verify,
+            max_retries=args.retries,
+        )
 
     print(f"\nAll files saved to: {out_root}")
     print("Use SigfoxTagPrep::annotate_era5() in R to extract at animal locations.")

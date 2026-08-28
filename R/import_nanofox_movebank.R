@@ -6,6 +6,21 @@
 #' multi-sensor object, a location-only object with speed/distance/bearing, and
 #' a daily thinned dataset.
 #'
+#' @details
+#'
+#' \strong{VEDBA Scaling Correction (Temporary Workaround)}
+#'
+#' As of August 2026, Nanofox VEDBA in Movebank export uses per-sample scaling
+#' (÷504). The import pipeline auto-detects and corrects this to per-burst scaling
+#' (÷18) on import via the `.correct_vedba_scaling()` function.
+#'
+#' Auto-detection: if median(vedba_sum) < 5 m/s², assumes per-sample scaling and
+#' applies correction factor of 28 (= 504/18).
+#'
+#' After correction, vedba_sum represents per-burst values (~10-200 m/s² typical range).
+#' Original per-sample values are preserved in the \code{vedba_sum_orig} column.
+#' The \code{.vedba_scaling_note} metadata column tracks whether correction was applied.
+#'
 #' @param study_id Integer or character vector of Movebank study IDs.
 #' @param tag_type Character or named list. When tag type cannot be inferred
 #'   automatically from tag metadata, supply it here: a single string for all
@@ -1821,11 +1836,13 @@ import_nanofox_movebank <- function(
   #                            NA for the first fix per deployment and for
   #                            negative diffs (counter resets / overflows).
   #
-  #   tinyfox_vedba_rate     — tinyfox_diff_vedba / dt_hours; NA wherever
-  #                            diff is NA or dt is zero / missing.
+  #   tinyfox_vedba_rate     — tinyfox_diff_vedba / dt_prev_hours; NA wherever
+  #                            diff is NA or dt_prev is zero / missing.
   #
-  # Requires the `dt` column (seconds, from mt_time_lags in .make_location_metrics)
-  # to be present. Falls back to NA rate if `dt` is absent.
+  # Uses `dt_prev` (seconds, time from the previous fix to the current fix) rather
+  # than `dt` because `tinyfox_diff_vedba` is the change since the previous fix.
+  # `dt_prev` is produced by mt_add_prev_metrics() in .make_location_metrics().
+  # Falls back to NA rate if `dt_prev` is absent.
   #
   # Grouped by deployment track so re-deployments do not carry over the
   # previous tag's cumulative total.
@@ -1834,7 +1851,7 @@ import_nanofox_movebank <- function(
     if (!"tinyfox_total_vedba" %in% names(x)) return(x)
     if (!"tag_type" %in% names(x))            return(x)
 
-    has_dt    <- "dt" %in% names(x)
+    has_dt_prev <- "dt_prev" %in% names(x)
     track_col <- move2::mt_track_id_column(x)
 
     x$tinyfox_diff_vedba <- NA_real_
@@ -1851,10 +1868,10 @@ import_nanofox_movebank <- function(
       d[!is.na(d) & d < 0] <- NA_real_   # resets / overflows
       x$tinyfox_diff_vedba[idx] <- d
 
-      if (has_dt) {
-        dt_h <- as.numeric(x$dt[idx]) / 3600   # dt is in seconds
+      if (has_dt_prev) {
+        dt_h <- as.numeric(x$dt_prev[idx]) / 3600   # dt_prev is in seconds
         rate <- d / dt_h
-        rate[!is.finite(rate)] <- NA_real_       # guard against dt == 0
+        rate[!is.finite(rate)] <- NA_real_       # guard against dt_prev == 0
         x$tinyfox_vedba_rate[idx] <- rate
       }
     }
@@ -1866,6 +1883,100 @@ import_nanofox_movebank <- function(
     )
     x
   }
+
+  # ---------------------------------------------------------------------------
+  # .correct_vedba_scaling()
+  #
+  # Nanofox VEDBA in current Movebank export is scaled as per-sample average (÷504)
+  # but should be per-burst average (÷18). This function detects and corrects the
+  # scaling issue post-import.
+  #
+  # Detection logic:
+  #   - Per-sample (current Movebank data): typical median < 5 m/s²
+  #   - Per-burst (correct): typical median 10-30 m/s²
+  #   - Threshold: if median(vedba_sum) < 5, assume per-sample and correct
+  #
+  # Correction: vedba_sum_corrected = vedba_sum × (504/18) = vedba_sum × 28
+  #
+  # Returns: data with corrected vedba_sum column (per-burst) and metadata columns:
+  #   - vedba_sum_orig: original per-sample values (for transparency/reversibility)
+  #   - .vedba_scaling_note: correction status ("corrected_per_sample_to_per_burst"
+  #     or "already_per_burst")
+  #
+  # Expected ranges after correction (realistic bat activity):
+  #   - Rest: ~9 m/s²
+  #   - Moderate activity: ~27 m/s²
+  #   - High activity (flight): ~205 m/s²
+  #   - Daily median (mixed activity): ~18 m/s²
+  # ---------------------------------------------------------------------------
+  .correct_vedba_scaling <- function(data) {
+    require(dplyr)
+
+    # Return early if no vedba column
+    if (!"vedba_sum" %in% names(data)) return(data)
+
+    vedba_vals <- data$vedba_sum[!is.na(data$vedba_sum)]
+    if (length(vedba_vals) == 0) return(data)
+
+    median_vedba <- median(vedba_vals, na.rm = TRUE)
+
+    # Detection: if median < 5, likely per-sample (÷504); needs correction
+    # Conversion: per_sample_vedba × (504/18) = per_burst_vedba
+    # Or: per_sample_vedba × 28 = per_burst_vedba
+
+    is_per_sample <- median_vedba < 5
+    correction_factor <- 504 / 18  # 28
+
+    if (is_per_sample) {
+      .msg(sprintf(
+        "[VEDBA] Detected per-sample scaling (median=%.2f m/s²). ",
+        median_vedba
+      ),
+      sprintf("Correcting by factor %.1f (÷18 instead of ÷504)...", correction_factor)
+      )
+
+      data <- data %>%
+        dplyr::mutate(
+          vedba_sum_orig = vedba_sum,
+          vedba_sum = vedba_sum * correction_factor,
+          `.vedba_scaling_note` = "corrected_per_sample_to_per_burst"
+        )
+
+      .msg(sprintf(
+        "[VEDBA] Correction applied. Median before: %.2f, after: %.2f m/s²",
+        median_vedba, median(data$vedba_sum, na.rm = TRUE)
+      ))
+    } else {
+      .msg(sprintf(
+        "[VEDBA] Detected per-burst scaling (median=%.2f m/s²). No correction needed.",
+        median_vedba
+      ))
+      data <- data %>%
+        dplyr::mutate(`.vedba_scaling_note` = "already_per_burst")
+    }
+
+    data
+  }
+
+  # ---------------------------------------------------------------------------
+  # TinyFoxBatt per-burst VEDBA (informational reference)
+  #
+  # Unlike Nanofox, TinyFoxBatt VEDBA is not automatically computed as per-burst
+  # because it requires the actual dt (time between messages, accounting for drift).
+  #
+  # To compute per-burst VEDBA for TinyFoxBatt:
+  #   vedba_per_burst = tinyfox_diff_vedba / (dt_prev_hours × 60)
+  #
+  # Where dt_prev_hours is the time from the previous fix to the current fix
+  # (from timestamp differences).  Because tinyfox_diff_vedba is the change
+  # since the previous message, it must be divided by the previous inter-message
+  # interval, not the forward interval `dt`.
+  # See `.add_tinyfox_diff_vedba()` for how this is computed. The dt_prev column
+  # is produced by mt_add_prev_metrics() in `.make_location_metrics()`.
+  #
+  # When per-burst VEDBA is needed for TinyFoxBatt, this can be added as a
+  # post-import step similar to the Nanofox correction above.
+  # ---------------------------------------------------------------------------
 
   # ---------------------------------------------------------------------------
   # .detect_tag_fell_off_loc()
@@ -2920,6 +3031,14 @@ import_nanofox_movebank <- function(
       "add_location_sensor_metrics"
     ) %||% b_loc
 
+    # Apply VEDBA scaling correction (post-Movebank import workaround)
+    # Nanofox VEDBA in current Movebank export uses per-sample scaling (÷504).
+    # Auto-detect and correct to per-burst scaling (÷18) on import.
+    b_loc <- .safe_try(
+      .correct_vedba_scaling(b_loc),
+      "correct_vedba_scaling"
+    ) %||% b_loc
+
     # TinyFox: per-message change in cumulative VeDBA counter.
     # Must run before detect_tag_fell_off_loc so the diff column is available
     # as the activity signal.
@@ -3016,6 +3135,26 @@ import_nanofox_movebank <- function(
         if (!is.na(span_h) && span_h >= min_span_h) vals[idx] <- NA_real_
       }
       vals
+    }
+
+    # Report VEDBA scaling status
+    if (".vedba_scaling_note" %in% names(b_loc)) {
+      scaling_status <- sf::st_drop_geometry(b_loc) %>%
+        tibble::as_tibble() %>%
+        dplyr::filter(!is.na(vedba_sum)) %>%
+        dplyr::group_by(`.vedba_scaling_note`) %>%
+        dplyr::summarise(n_rows = dplyr::n(), .groups = "drop")
+
+      if (nrow(scaling_status) > 0) {
+        .msg("[VEDBA scaling] Status report:")
+        for (i in seq_len(nrow(scaling_status))) {
+          .msg(sprintf(
+            "  %s: %d rows",
+            scaling_status$.vedba_scaling_note[i],
+            scaling_status$n_rows[i]
+          ))
+        }
+      }
     }
 
     # Temporal covariates + final cleanup on all three objects
