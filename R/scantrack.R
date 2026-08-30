@@ -93,6 +93,18 @@ if (!exists("extract_elevation_segments", mode = "function")) {
   m
 }
 
+# For each timestamp in target_ts, return the index of the nearest timestamp
+# in source_ts (NA_integer_ for every target when source_ts is empty).
+.nearest_index <- function(target_ts, source_ts) {
+  t_t <- as.numeric(target_ts)
+  t_s <- as.numeric(source_ts)
+  if (!length(t_s)) return(rep(NA_integer_, length(t_t)))
+  idx_l <- findInterval(t_t, t_s, all.inside = TRUE)
+  idx_r <- pmin(idx_l + 1L, length(t_s))
+  use_r <- abs(t_t - t_s[idx_r]) < abs(t_t - t_s[idx_l])
+  ifelse(use_r, idx_r, idx_l)
+}
+
 .prepare_daily_df <- function(b_daily) {
   if (is.null(b_daily) || nrow(b_daily) == 0) {
     return(data.frame())
@@ -236,6 +248,14 @@ if (!exists("extract_elevation_segments", mode = "function")) {
 
     b_full_df <- sf::st_drop_geometry(b_full)
 
+    if ("tag_fell_off" %in% names(b_full_df)) {
+      b_full_df$tag_fell_off <- as.logical(b_full_df$tag_fell_off)
+    } else {
+      b_full_df$tag_fell_off <- FALSE
+    }
+
+    b_full_df$tag_fell_off[is.na(b_full_df$tag_fell_off)] <- FALSE
+
     sp  <- .first_or(b_full_df$species, "unknown_species")
     sex <- .first_or(b_full_df$sex, "unknown_sex")
 
@@ -296,6 +316,18 @@ if (!exists("extract_elevation_segments", mode = "function")) {
     
     b_daily_df <- .prepare_daily_df(b_daily)
     has_daily <- nrow(b_daily_df) > 0
+
+    # Flag each daily row as fell-off using the nearest raw sensor row's
+    # tag_fell_off value, so the daily overlay circles can be recolored below.
+    if (has_daily) {
+      if ("timestamp" %in% names(b_full_df) && nrow(b_full_df) > 0) {
+        nn <- .nearest_index(b_daily_df$daily_timestamp, b_full_df$timestamp)
+        b_daily_df$daily_fell_off <- b_full_df$tag_fell_off[nn]
+      } else {
+        b_daily_df$daily_fell_off <- FALSE
+      }
+      b_daily_df$daily_fell_off[is.na(b_daily_df$daily_fell_off)] <- FALSE
+    }
 
     # ── Daily column name candidates (resolved once, used in overlays below) ──
     daily_vedba_col <- if (has_daily) .pick_first_col(b_daily_df, c(
@@ -438,6 +470,17 @@ if (!exists("extract_elevation_segments", mode = "function")) {
         )
     }
 
+    # Fill scale for the white daily-summary circles, turned red on days when
+    # tag_fell_off is TRUE. Only the VeDBA panel is meant to expose a legend.
+    .daily_fell_fill_scale <- function(show_legend = FALSE) {
+      scale_fill_manual(
+        values = c("FALSE" = "white", "TRUE" = "red"),
+        labels = c("FALSE" = "On bat", "TRUE" = "Fell off"),
+        name = "Daily status",
+        guide = if (show_legend) "legend" else "none"
+      )
+    }
+
     # ── Panel: Map ───────────────────────────────────────────────────────
     map <- ggplot() +
       tidyterra::geom_spatraster(data = e) +
@@ -478,6 +521,14 @@ if (!exists("extract_elevation_segments", mode = "function")) {
         any(!is.na(b_daily_df$lon)) &&
         any(!is.na(b_daily_df$lat))
       ) {
+      # The map's fill aesthetic is already taken by the continuous elevation
+      # raster (and color by the continuous sequence viridis scale), so the
+      # fell-off/normal split here is drawn as literal fill colors in two
+      # layers rather than aes(fill=) + a discrete scale, which would clobber
+      # the raster's scale.
+      .map_daily_on  <- b_daily_df[!is.na(b_daily_df$lon) & !is.na(b_daily_df$lat) & !b_daily_df$daily_fell_off, ]
+      .map_daily_off <- b_daily_df[!is.na(b_daily_df$lon) & !is.na(b_daily_df$lat) & b_daily_df$daily_fell_off, ]
+
       map <- map +
         geom_path(
           data = b_daily_df,
@@ -486,17 +537,35 @@ if (!exists("extract_elevation_segments", mode = "function")) {
           col = "black",
           linewidth = 0.6,
           linetype = "dashed"
-        ) +
-        geom_point(
-          data = b_daily_df,
-          aes(lon, lat),
-          inherit.aes = FALSE,
-          shape = 21,
-          fill = "white",
-          col = "black",
-          size = 2.3,
-          stroke = 0.8
         )
+
+      if (nrow(.map_daily_on) > 0) {
+        map <- map +
+          geom_point(
+            data = .map_daily_on,
+            aes(lon, lat),
+            inherit.aes = FALSE,
+            shape = 21,
+            fill = "white",
+            col = "black",
+            size = 2.3,
+            stroke = 0.8
+          )
+      }
+
+      if (nrow(.map_daily_off) > 0) {
+        map <- map +
+          geom_point(
+            data = .map_daily_off,
+            aes(lon, lat),
+            inherit.aes = FALSE,
+            shape = 21,
+            fill = "red",
+            col = "black",
+            size = 2.3,
+            stroke = 0.8
+          )
+      }
     }
     # ── Snap daily timestamps to nearest raw sensor row (one per sensor type) ──
     # For NanoFox, sensor rows sit at their own timestamps (not location times),
@@ -556,23 +625,15 @@ if (!exists("extract_elevation_segments", mode = "function")) {
       ) +
       geom_point(
         data = b_daily_df,
-        aes(daily_timestamp, daily_speed_kmh_plot),
+        aes(daily_timestamp, daily_speed_kmh_plot, fill = as.character(daily_fell_off)),
         inherit.aes = FALSE,
         shape = 21,
-        fill = "white",
         col = "black",
         size = 2.2,
         stroke = 0.7
-      )
+      ) +
+      .daily_fell_fill_scale()
     }
-    if ("tag_fell_off" %in% names(b_full_df)) {
-      b_full_df$tag_fell_off <- as.logical(b_full_df$tag_fell_off)
-    } else {
-      b_full_df$tag_fell_off <- FALSE
-    }
-
-    b_full_df$tag_fell_off[is.na(b_full_df$tag_fell_off)] <- FALSE
-
     .vedba_fell_scale <- scale_color_manual(
       values = c("FALSE" = "blue", "TRUE" = "red"),
       labels = c("FALSE" = "On bat", "TRUE" = "Fell off"),
@@ -628,10 +689,11 @@ if (!exists("extract_elevation_segments", mode = "function")) {
         ) +
         geom_point(
           data = b_daily_df,
-          aes(snap_ts_v, .data[[daily_vedba_col]]),
-          inherit.aes = FALSE, shape = 21, fill = "white",
+          aes(snap_ts_v, .data[[daily_vedba_col]], fill = as.character(daily_fell_off)),
+          inherit.aes = FALSE, shape = 21,
           col = "black", size = 2.8, stroke = 1.2
-        )
+        ) +
+        .daily_fell_fill_scale(show_legend = TRUE)
     }
 
     # Day/night VeDBA split (NanoFox only): triangles pinned to the same
@@ -675,10 +737,11 @@ if (!exists("extract_elevation_segments", mode = "function")) {
           ) +
           geom_point(
             data = b_daily_df,
-            aes(snap_ts_a, .data[[daily_activity_col]]),
-            inherit.aes = FALSE, shape = 21, fill = "white",
+            aes(snap_ts_a, .data[[daily_activity_col]], fill = as.character(daily_fell_off)),
+            inherit.aes = FALSE, shape = 21,
             col = "forestgreen", size = 2.8, stroke = 1.2
-          )
+          ) +
+          .daily_fell_fill_scale()
       }
 
       sensor_panels[["activity"]] <- p_activity
@@ -753,6 +816,8 @@ if (!exists("extract_elevation_segments", mode = "function")) {
     }
 
     if (has_daily) {
+      .temp_daily_added <- FALSE
+
       if (!is.na(daily_temp_min_col) && .has_data(b_daily_df, daily_temp_min_col)) {
         p_temperature <- p_temperature +
           geom_line(
@@ -762,10 +827,11 @@ if (!exists("extract_elevation_segments", mode = "function")) {
           ) +
           geom_point(
             data = b_daily_df,
-            aes(snap_ts_t, .data[[daily_temp_min_col]]),
-            inherit.aes = FALSE, shape = 21, fill = "white",
+            aes(snap_ts_t, .data[[daily_temp_min_col]], fill = as.character(daily_fell_off)),
+            inherit.aes = FALSE, shape = 21,
             col = "steelblue", size = 2.8, stroke = 1.2
           )
+        .temp_daily_added <- TRUE
       }
       if (!is.na(daily_temp_max_col) && .has_data(b_daily_df, daily_temp_max_col)) {
         p_temperature <- p_temperature +
@@ -776,10 +842,11 @@ if (!exists("extract_elevation_segments", mode = "function")) {
           ) +
           geom_point(
             data = b_daily_df,
-            aes(snap_ts_t, .data[[daily_temp_max_col]]),
-            inherit.aes = FALSE, shape = 21, fill = "white",
+            aes(snap_ts_t, .data[[daily_temp_max_col]], fill = as.character(daily_fell_off)),
+            inherit.aes = FALSE, shape = 21,
             col = "tomato", size = 2.8, stroke = 1.2
           )
+        .temp_daily_added <- TRUE
       }
       if (!is.na(daily_temp_mean_col) && .has_data(b_daily_df, daily_temp_mean_col)) {
         p_temperature <- p_temperature +
@@ -790,10 +857,15 @@ if (!exists("extract_elevation_segments", mode = "function")) {
           ) +
           geom_point(
             data = b_daily_df,
-            aes(snap_ts_t, .data[[daily_temp_mean_col]]),
-            inherit.aes = FALSE, shape = 21, fill = "white",
+            aes(snap_ts_t, .data[[daily_temp_mean_col]], fill = as.character(daily_fell_off)),
+            inherit.aes = FALSE, shape = 21,
             col = "black", size = 2.8, stroke = 1.2
           )
+        .temp_daily_added <- TRUE
+      }
+
+      if (.temp_daily_added) {
+        p_temperature <- p_temperature + .daily_fell_fill_scale()
       }
     }
 
@@ -869,10 +941,11 @@ if (!exists("extract_elevation_segments", mode = "function")) {
         ) +
         geom_point(
           data = b_daily_df,
-          aes(snap_ts_p, .data[[daily_pressure_col]]),
-          inherit.aes = FALSE, shape = 21, fill = "white",
+          aes(snap_ts_p, .data[[daily_pressure_col]], fill = as.character(daily_fell_off)),
+          inherit.aes = FALSE, shape = 21,
           col = "purple", size = 2.8, stroke = 1.2
-        )
+        ) +
+        .daily_fell_fill_scale()
     }
 
     sensor_panels[["pressure"]] <- p_pressure
@@ -970,14 +1043,14 @@ if (!exists("extract_elevation_segments", mode = "function")) {
       p_altitude <- p_altitude +
         geom_point(
           data = b_daily_df[!is.na(b_daily_df$daily_pressure_alt_m), ],
-          aes(cum_dist_km, daily_pressure_alt_m),
+          aes(cum_dist_km, daily_pressure_alt_m, fill = as.character(daily_fell_off)),
           inherit.aes = FALSE,
           shape = 21,
-          fill = "white",
           col = "black",
           size = 2.2,
           stroke = 0.7
-        )
+        ) +
+        .daily_fell_fill_scale()
     }
     # ── Daily standalone panels ──────────────────────────────────────────────
     # VeDBA, temperature, and pressure are overlaid directly on the raw sensor
