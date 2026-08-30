@@ -208,16 +208,21 @@ To compare activity across tag types, both are normalized to **VEDBA per one-sec
 - Per-burst values: ~0.5–20 m/s²
 - Daily totals: ~100–2000 m/s² (varies by activity level)
 
-### TinyfoxBatt V13 (Already Per-Burst)
+### TinyfoxBatt V13 / V13P / V14P
 
 **Per-message VEDBA:** `tinyfox_diff_vedba` (cumulative diff between messages in m/s²)
 
-**Per-burst VEDBA:** `tinyfox_diff_vedba / (dt_prev_hours × 60)`
+**Per-burst VEDBA:** `tinyfox_vedba_rate / 60`
+- `tinyfox_vedba_rate = tinyfox_diff_vedba / dt_prev_hours`
 - `dt_prev_hours` = time from the previous message to the current message (accounts for ±30 min/day clock drift)
 - `tinyfox_diff_vedba` is the change since the previous fix, so it must be paired with the previous inter-message interval
-- Already computed in import pipeline as `tinyfox_vedba_rate / 60` (now using `dt_prev`)
 
-**Expected range (per-burst):**
+**Firmware-specific scaling:**
+- **V13**: baseline scale; no correction needed.
+- **V13P / V14P**: some batches report values ~10× higher than V13. The import pipeline auto-detects this from the stationary baseline and applies a data-driven correction factor. After correction, V13P/V14P per-burst values are on the same scale as V13.
+- Check `.tinyfox_scaling_note` and `.tinyfox_scaling_factor` to see whether correction was applied.
+
+**Expected range (per-burst, after any V13P/V14P correction):**
 - Per-burst values: ~0.5–2.0 m/s²
 - Daily totals: ~1000–2000 m/s² per 24h (varies by activity level)
 
@@ -365,6 +370,8 @@ To **compare daily activity totals** (without normalizing):
 | Temporal resolution (raw) | 4 transmissions (~30 min intervals) | 5 windows (~3 hours) or 40 (36-min windows) | N/A |
 | Sample interval | 1 minute | 2 minutes | N/A (aggregated) |
 | Flight identification | Not directly available | Not directly available | `daily_vedba_flying_n` |
+| VEDBA scaling metadata | `.tinyfox_scaling_note`, `.tinyfox_scaling_factor` | `.vedba_scaling_note` | `.vedba_scaling_note` |
+| Firmware-specific correction | V13P/V14P auto-corrected to V13 baseline | Nanofox per-sample → per-burst auto-correction | Nanofox per-sample → per-burst auto-correction |
 
 ---
 
@@ -382,6 +389,7 @@ To **compare daily activity totals** (without normalizing):
   - Storage: 36-minute windowed sums grouped into daily aggregates
   - **Comparison**: Normalize by dividing by window count × 18 bursts per window (~720)
   - **Post-import correction**: Auto-detected and applied to convert per-sample (÷504) to per-burst (÷18)
+- **Tinyfox V13P/V14P correction**: Some firmware batches report cumulative VEDBA ~10× higher than V13. The import pipeline detects this from the stationary baseline and applies a data-driven correction. Check `.tinyfox_scaling_note` (`"corrected_v13p_to_v13"`, `"corrected_v14p_to_v13"`, `"already_v13_scale"`, etc.) and `.tinyfox_scaling_factor` to confirm correction status.
 - **LSB conversion**: 1 LSB = 3.9 mg for both systems
 - **Gravity offset**: Both remove static 1g component from dynamic acceleration
 - **Key insight**: Same hardware, different transmission/accumulation strategies → normalize by sample count for direct comparison

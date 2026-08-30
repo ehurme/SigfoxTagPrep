@@ -8,7 +8,7 @@
 #'
 #' @details
 #'
-#' \strong{VEDBA Scaling Correction (Temporary Workaround)}
+#' \strong{Nanofox VEDBA Scaling Correction}
 #'
 #' As of August 2026, Nanofox VEDBA in Movebank export uses per-sample scaling
 #' (÷504). The import pipeline auto-detects and corrects this to per-burst scaling
@@ -20,6 +20,27 @@
 #' After correction, vedba_sum represents per-burst values (~10-200 m/s² typical range).
 #' Original per-sample values are preserved in the \code{vedba_sum_orig} column.
 #' The \code{.vedba_scaling_note} metadata column tracks whether correction was applied.
+#'
+#' The same correction is also applied to raw sensor-level \code{vedba} values in the
+#' full multi-sensor object, preserving originals in \code{vedba_orig} and recording
+#' the status in \code{.vedba_sensor_scaling_note}. This makes \code{full$vedba}
+#' directly comparable to Tinyfox per-burst VEDBA and to the corrected \code{vedba_sum}.
+#'
+#' \strong{Tinyfox V13P/V14P VEDBA Scaling Correction}
+#'
+#' Some Tinyfox V13P and V14P firmware batches report cumulative VeDBA values
+#' that are scaled higher than V13. The pipeline detects this from the stationary
+#' baseline (post-fall-off or activity = 0) and applies a data-driven correction
+#' factor so that V13P/V14P per-burst VEDBA is on the same scale as V13.
+#'
+#' Detection: compare the stationary per-burst baseline of V13P/V14P against the
+#' V13 baseline in the same study. If the ratio exceeds \code{threshold_ratio}
+#' (default 2), the data-driven factor is applied.
+#'
+#' Columns added: \code{tinyfox_total_vedba_orig}, \code{tinyfox_diff_vedba_orig},
+#' \code{tinyfox_vedba_rate_orig}, \code{.tinyfox_scaling_note}, and
+#' \code{.tinyfox_scaling_factor}. Use \code{tinyfox_v13p_v14p_force_factor} to
+#' override auto-detection.
 #'
 #' @param study_id Integer or character vector of Movebank study IDs.
 #' @param tag_type Character or named list. When tag type cannot be inferred
@@ -66,6 +87,14 @@
 #'   script_daily_sensor,script_add_moonlit Paths to helper R scripts. Defaults assume the
 #'   \pkg{SigfoxTagPrep} repo is one directory above the working directory.
 #' @param tz Time zone string. Default \code{"UTC"}.
+#' @param movebank_max_retries Integer; maximum Movebank download retries.
+#'   Default \code{3}.
+#' @param movebank_retry_wait Integer; initial wait between retries in seconds.
+#'   Default \code{5}.
+#' @param tinyfox_v13p_v14p_force_factor Numeric or \code{NULL}; when non-NULL,
+#'   this scaling factor is applied to all Tinyfox V13P/V14P VEDBA values,
+#'   bypassing the data-driven detection. Use this only when the dataset contains
+#'   no V13 reference and you know the correct factor. Default \code{NULL}.
 #' @return A list with elements:
 #' \describe{
 #'   \item{\code{sensors_table}}{Full Movebank sensor type table.}
@@ -124,7 +153,8 @@ import_nanofox_movebank <- function(
   script_daily_sensor = "../SigfoxTagPrep/R/mt_add_daily_sensor_metrics.R",
   tz = "UTC",
   movebank_max_retries = 3,
-  movebank_retry_wait = 5
+  movebank_retry_wait = 5,
+  tinyfox_v13p_v14p_force_factor = NULL
 ) {
   suppressPackageStartupMessages({
     require("tidyverse", quietly = TRUE)
@@ -1959,6 +1989,265 @@ import_nanofox_movebank <- function(
   }
 
   # ---------------------------------------------------------------------------
+  # .correct_sensor_vedba_scaling()
+  #
+  # Correct raw per-sample VeDBA sensor values in the full multi-sensor object to
+  # per-burst units. Movebank exports Nanofox VeDBA as per-sample averages (÷504);
+  # this function multiplies by 28 (= 504/18) so each row represents the total
+  # VeDBA for one 1-second accelerometer burst. This makes full$vedba directly
+  # comparable with location-level per-burst values and Tinyfox per-burst VEDBA.
+  #
+  # The function only operates on rows where `vedba` is present and median < 5,
+  # which is the per-sample signature. Original values are preserved in `vedba_orig`
+  # and the metadata column `.vedba_sensor_scaling_note` records the status.
+  # ---------------------------------------------------------------------------
+  .correct_sensor_vedba_scaling <- function(data) {
+    require(dplyr)
+
+    if (!"vedba" %in% names(data)) return(data)
+
+    vedba_vals <- data$vedba[!is.na(data$vedba)]
+    if (length(vedba_vals) == 0) return(data)
+
+    median_vedba <- median(vedba_vals, na.rm = TRUE)
+    correction_factor <- 504 / 18  # 28
+    is_per_sample <- median_vedba < 5
+
+    if (is_per_sample) {
+      .msg(sprintf(
+        "[VEDBA sensor] Detected per-sample scaling (median=%.2f m/s²). Correcting by factor %.1f...",
+        median_vedba, correction_factor
+      ))
+
+      data <- data %>%
+        dplyr::mutate(
+          vedba_orig = vedba,
+          vedba = vedba * correction_factor,
+          `.vedba_sensor_scaling_note` = "corrected_per_sample_to_per_burst"
+        )
+
+      .msg(sprintf(
+        "[VEDBA sensor] Correction applied. Median before: %.2f, after: %.2f m/s²",
+        median_vedba, median(data$vedba, na.rm = TRUE)
+      ))
+    } else {
+      .msg(sprintf(
+        "[VEDBA sensor] Detected per-burst scaling (median=%.2f m/s²). No correction needed.",
+        median_vedba
+      ))
+      data <- data %>%
+        dplyr::mutate(`.vedba_sensor_scaling_note` = "already_per_burst")
+    }
+
+    data
+  }
+
+  # ---------------------------------------------------------------------------
+  # .correct_tinyfox_vedba_scaling()
+  #
+  # Some Tinyfox V13P/V14P firmware batches report cumulative VeDBA values that
+  # are scaled ~10× higher than V13. This is visible in the stationary baseline
+  # (post-fall-off or activity = 0), where V13P/V14P per-burst VEDBA is an order
+  # of magnitude higher than V13. The function detects this offset from the data
+  # and applies a firmware-specific correction.
+  #
+  # Detection logic:
+  #   - Use the stationary baseline for each Tinyfox firmware in the study.
+  #   - Stationary rows are tag_fell_off == TRUE when available, otherwise
+  #     tinyfox_activity_percent_last_24h == 0.
+  #   - Per-burst proxy: tinyfox_vedba_rate / 60 (m/s² per burst).
+  #   - If the V13P/V14P baseline is > threshold_ratio × the V13 baseline,
+  #     apply a correction factor = baseline_v13p_v14p / baseline_v13.
+  #
+  # Correction:
+  #   - tinyfox_total_vedba  <- tinyfox_total_vedba  / factor
+  #   - tinyfox_diff_vedba <- tinyfox_diff_vedba / factor
+  #   - tinyfox_vedba_rate <- tinyfox_vedba_rate / factor
+  #
+  # Returns: data with corrected columns and metadata:
+  #   - *_orig columns preserve original values
+  #   - .tinyfox_scaling_note: correction status
+  #   - .tinyfox_scaling_factor: factor applied (1.0 = no change)
+  #
+  # If force_factor is a non-NULL numeric, the auto-detection is skipped and
+  # that factor is applied to all V13P/V14P rows. This is the fallback for
+  # studies without a V13 reference.
+  # ---------------------------------------------------------------------------
+  .correct_tinyfox_vedba_scaling <- function(
+      data,
+      threshold_ratio = 2.0,
+      min_v13_baseline  = 0.05,
+      force_factor      = NULL
+  ) {
+    require(dplyr)
+
+    required_cols <- c("tag_type", "tag_firmware")
+    if (!all(required_cols %in% names(data))) return(data)
+
+    tiny_cols <- c("tinyfox_total_vedba", "tinyfox_diff_vedba", "tinyfox_vedba_rate")
+    if (!any(tiny_cols %in% names(data))) return(data)
+
+    # Per-burst proxy (m/s² per burst)
+    data <- data %>%
+      dplyr::mutate(
+        ..tinyfox_per_burst = if (
+          "tinyfox_vedba_rate" %in% names(data)
+        ) {
+          tinyfox_vedba_rate / 60
+        } else {
+          NA_real_
+        }
+      )
+
+    is_tiny <- tolower(as.character(data$tag_type)) == "tinyfox"
+    if (!any(is_tiny)) {
+      data$..tinyfox_per_burst <- NULL
+      return(data)
+    }
+
+    # Determine which rows are stationary
+    stationary <- if ("tag_fell_off" %in% names(data)) {
+      is_tiny & data$tag_fell_off == TRUE
+    } else {
+      rep(FALSE, nrow(data))
+    }
+
+    if ("tinyfox_activity_percent_last_24h" %in% names(data)) {
+      stationary <- stationary |
+        (is_tiny & !is.na(data$tinyfox_activity_percent_last_24h) &
+           data$tinyfox_activity_percent_last_24h == 0)
+    }
+
+    # Baseline helper
+    baseline_for_firmware <- function(fw) {
+      rows <- is_tiny & tolower(as.character(data$tag_firmware)) == tolower(fw) &
+        stationary & !is.na(data$..tinyfox_per_burst) &
+        is.finite(data$..tinyfox_per_burst) & data$..tinyfox_per_burst > 0
+      if (sum(rows, na.rm = TRUE) < 3L) {
+        # fall back to the 5th percentile of all non-stationary values
+        vals <- data$..tinyfox_per_burst[is_tiny &
+                                           tolower(as.character(data$tag_firmware)) == tolower(fw) &
+                                           !is.na(data$..tinyfox_per_burst) &
+                                           is.finite(data$..tinyfox_per_burst) &
+                                           data$..tinyfox_per_burst > 0]
+        if (length(vals) < 5L) return(NA_real_)
+        return(as.numeric(quantile(vals, 0.05, na.rm = TRUE)))
+      }
+      median(data$..tinyfox_per_burst[rows], na.rm = TRUE)
+    }
+
+    v13_baseline    <- baseline_for_firmware("V13")
+    v13p_baseline   <- baseline_for_firmware("V13P")
+    v14p_baseline   <- baseline_for_firmware("V14P")
+
+    # Decide factors per firmware
+    factor_v13  <- 1.0
+    factor_v13p <- 1.0
+    factor_v14p <- 1.0
+
+    note_v13  <- "not_v13p_v14p"
+    note_v13p <- "already_v13_scale"
+    note_v14p <- "already_v13_scale"
+
+    apply_factor <- function(target_baseline, ref_baseline, fw_name) {
+      if (is.na(target_baseline) || !is.finite(target_baseline)) {
+        return(list(factor = 1.0, note = "unknown_no_stationary_data"))
+      }
+
+      if (!is.null(force_factor) && is.numeric(force_factor) &&
+          is.finite(force_factor) && force_factor > 1) {
+        return(list(factor = as.numeric(force_factor),
+                    note = paste0("forced_factor_v", tolower(fw_name))))
+      }
+
+      if (!is.na(ref_baseline) && is.finite(ref_baseline) && ref_baseline >= min_v13_baseline) {
+        ratio <- target_baseline / ref_baseline
+        if (ratio > threshold_ratio) {
+          factor <- ratio
+          # Round to one decimal place for cleaner reporting
+          factor <- round(factor, 1)
+          # Avoid correcting for trivial ratios just above threshold
+          if (factor < 1.5) factor <- 1.0
+          if (factor > 1.0) {
+            return(list(
+              factor = factor,
+              note = paste0("corrected_", tolower(fw_name), "_to_v13")
+            ))
+          }
+        }
+      }
+      list(factor = 1.0, note = "already_v13_scale")
+    }
+
+    v13p_res <- apply_factor(v13p_baseline, v13_baseline, "V13P")
+    v13p_res <- v13p_res
+    factor_v13p <- v13p_res$factor
+    note_v13p   <- v13p_res$note
+
+    v14p_res <- apply_factor(v14p_baseline, v13_baseline, "V14P")
+    factor_v14p <- v14p_res$factor
+    note_v14p   <- v14p_res$note
+
+    if (factor_v13p == 1.0 && factor_v14p == 1.0) {
+      .msg(sprintf(
+        "[Tinyfox VEDBA scaling] Stationary baselines: V13=%.3f, V13P=%.3f, V14P=%.3f m/s²/burst. No correction needed.",
+        v13_baseline %||% NA_real_,
+        v13p_baseline %||% NA_real_,
+        v14p_baseline %||% NA_real_
+      ))
+      data <- data %>%
+        dplyr::mutate(
+          `.tinyfox_scaling_note` = "already_v13_scale",
+          `.tinyfox_scaling_factor` = 1.0
+        )
+    } else {
+      .msg(sprintf(
+        "[Tinyfox VEDBA scaling] Stationary baselines: V13=%.3f, V13P=%.3f, V14P=%.3f m/s²/burst. Applying factors: V13P=%.2f, V14P=%.2f",
+        v13_baseline %||% NA_real_,
+        v13p_baseline %||% NA_real_,
+        v14p_baseline %||% NA_real_,
+        factor_v13p, factor_v14p
+      ))
+    }
+
+    # Build a per-row factor vector
+    firmware <- tolower(as.character(data$tag_firmware))
+    row_factor <- rep(1.0, nrow(data))
+    row_note   <- rep(NA_character_, nrow(data))
+
+    row_factor[firmware == "v13p"] <- factor_v13p
+    row_note[firmware == "v13p"]   <- note_v13p
+    row_factor[firmware == "v14p"] <- factor_v14p
+    row_note[firmware == "v14p"]   <- note_v14p
+    row_note[firmware == "v13"]    <- note_v13
+
+    # Apply corrections while preserving originals
+    mutate_list <- list(
+      `.tinyfox_scaling_factor` = row_factor,
+      `.tinyfox_scaling_note` = row_note
+    )
+
+    if ("tinyfox_total_vedba" %in% names(data)) {
+      mutate_list$tinyfox_total_vedba_orig <- data$tinyfox_total_vedba
+      mutate_list$tinyfox_total_vedba <- data$tinyfox_total_vedba / row_factor
+    }
+    if ("tinyfox_diff_vedba" %in% names(data)) {
+      mutate_list$tinyfox_diff_vedba_orig <- data$tinyfox_diff_vedba
+      mutate_list$tinyfox_diff_vedba <- data$tinyfox_diff_vedba / row_factor
+    }
+    if ("tinyfox_vedba_rate" %in% names(data)) {
+      mutate_list$tinyfox_vedba_rate_orig <- data$tinyfox_vedba_rate
+      mutate_list$tinyfox_vedba_rate <- data$tinyfox_vedba_rate / row_factor
+    }
+
+    data <- data %>%
+      dplyr::mutate(!!!mutate_list) %>%
+      dplyr::select(-dplyr::any_of("..tinyfox_per_burst"))
+
+    data
+  }
+
+  # ---------------------------------------------------------------------------
   # TinyFoxBatt per-burst VEDBA (informational reference)
   #
   # Unlike Nanofox, TinyFoxBatt VEDBA is not automatically computed as per-burst
@@ -3039,6 +3328,13 @@ import_nanofox_movebank <- function(
       "correct_vedba_scaling"
     ) %||% b_loc
 
+    # Also correct raw sensor-level VeDBA values in the full object so they are
+    # expressed in per-burst units and directly comparable to Tinyfox per-burst.
+    b <- .safe_try(
+      .correct_sensor_vedba_scaling(b),
+      "correct_sensor_vedba_scaling"
+    ) %||% b
+
     # TinyFox: per-message change in cumulative VeDBA counter.
     # Must run before detect_tag_fell_off_loc so the diff column is available
     # as the activity signal.
@@ -3052,6 +3348,16 @@ import_nanofox_movebank <- function(
     b_loc <- .safe_try(
       .detect_tag_fell_off_loc(b_loc),
       "detect_tag_fell_off_loc"
+    ) %||% b_loc
+
+    # Tinyfox V13P/V14P scaling correction (data-driven).
+    # Runs after tag-fall-off detection so the stationary baseline is available.
+    b_loc <- .safe_try(
+      .correct_tinyfox_vedba_scaling(
+        b_loc,
+        force_factor = tinyfox_v13p_v14p_force_factor
+      ),
+      "correct_tinyfox_vedba_scaling"
     ) %||% b_loc
 
     # Count Sigfox base stations per location fix.
@@ -3081,7 +3387,10 @@ import_nanofox_movebank <- function(
     ) %||% b
 
     for (.col in c("vedba_sum", "avg_temp",
-                   "tinyfox_diff_vedba", "tinyfox_vedba_rate",
+                   "tinyfox_total_vedba", "tinyfox_total_vedba_orig",
+                   "tinyfox_diff_vedba", "tinyfox_diff_vedba_orig",
+                   "tinyfox_vedba_rate", "tinyfox_vedba_rate_orig",
+                   ".tinyfox_scaling_factor", ".tinyfox_scaling_note",
                    "speed_kmh", "step_km")) {
       b <- .safe_try(
         .propagate_col_from_loc(b_loc, b, .col),
@@ -3115,6 +3424,15 @@ import_nanofox_movebank <- function(
       b_daily2 <- .safe_try(
         .add_tinyfox_diff_vedba(b_daily2),
         "add_tinyfox_diff_vedba_daily"
+      ) %||% b_daily2
+
+      # Apply the same Tinyfox V13P/V14P scaling correction to daily rows.
+      b_daily2 <- .safe_try(
+        .correct_tinyfox_vedba_scaling(
+          b_daily2,
+          force_factor = tinyfox_v13p_v14p_force_factor
+        ),
+        "correct_tinyfox_vedba_scaling_daily"
       ) %||% b_daily2
     }
 

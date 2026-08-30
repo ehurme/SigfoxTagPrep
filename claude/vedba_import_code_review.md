@@ -80,6 +80,20 @@ This document tracks implementation status of VEDBA scaling corrections in the S
 
 ---
 
+### Gap #4: NanoFox raw sensor-level `vedba` correction
+**Status:** IMPLEMENTED  
+**Details:** Raw sensor `vedba` values in the full multi-sensor object are per-sample averages (÷504). They are now auto-corrected to per-burst units (×28) during import.  
+**Location:** `.correct_sensor_vedba_scaling()` in `R/import_nanofox_movebank.R` (after `.correct_vedba_scaling()`)  
+**What it does:**
+- Detects per-sample scaling using the same median < 5 m/s² threshold
+- Multiplies `full$vedba` by 28 so each row represents one 1-second burst
+- Preserves original values in `vedba_orig`
+- Adds metadata column `.vedba_sensor_scaling_note`
+
+**Why:** This makes `full$vedba` directly comparable to `location$vedba_sum` (after dividing by burst count) and to Tinyfox per-burst VEDBA, without requiring a separate post-processing script.
+
+---
+
 ## Remaining Considerations
 
 ### TinyFoxBatt Per-Burst Computation (Optional Enhancement)
@@ -155,6 +169,8 @@ Where `dt_prev_hours` is already available from `.add_tinyfox_diff_vedba()` (it 
 - [x] TinyFoxBatt per-burst reference comment added (for future work)
 - [x] `.add_tinyfox_diff_vedba()` updated to use `dt_prev` instead of `dt` for `tinyfox_vedba_rate`
 - [x] Inline docs for `.add_tinyfox_diff_vedba()` updated to explain `dt_prev` usage
+- [x] `.correct_sensor_vedba_scaling()` added to correct raw `full$vedba` to per-burst units
+- [x] Main `import_nanofox_movebank()` roxygen docs updated to describe sensor-level correction
 
 ---
 
