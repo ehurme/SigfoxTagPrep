@@ -42,6 +42,15 @@
 #' \code{.tinyfox_scaling_factor}. Use \code{tinyfox_v13p_v14p_force_factor} to
 #' override auto-detection.
 #'
+#' \strong{Flight Altitude Metrics}
+#'
+#' Climb rate (\code{climb_rate_ms}) is computed for every fix-to-fix interval
+#' as \code{delta_altitude_m / dt_prev}. Each interval is also flagged
+#' \code{is_flight} when \code{vedba_sum > flight_vedba_threshold} (default
+#' 50 m/s\eqn{^2}, per-burst-corrected scale). \code{delta_altitude_flight_m}
+#' and \code{climb_rate_flight_ms} mirror \code{delta_altitude_m} and
+#' \code{climb_rate_ms} but are \code{NA} outside flight intervals.
+#'
 #' @param study_id Integer or character vector of Movebank study IDs.
 #' @param tag_type Character or named list. When tag type cannot be inferred
 #'   automatically from tag metadata, supply it here: a single string for all
@@ -95,6 +104,10 @@
 #'   this scaling factor is applied to all Tinyfox V13P/V14P VEDBA values,
 #'   bypassing the data-driven detection. Use this only when the dataset contains
 #'   no V13 reference and you know the correct factor. Default \code{NULL}.
+#' @param flight_vedba_threshold Numeric; \code{vedba_sum} (per-burst-corrected
+#'   scale) above which a fix-to-fix interval is flagged as \code{is_flight}
+#'   for the purposes of \code{delta_altitude_flight_m} and
+#'   \code{climb_rate_flight_ms}. Default \code{50}.
 #' @return A list with elements:
 #' \describe{
 #'   \item{\code{sensors_table}}{Full Movebank sensor type table.}
@@ -154,7 +167,8 @@ import_nanofox_movebank <- function(
   tz = "UTC",
   movebank_max_retries = 3,
   movebank_retry_wait = 5,
-  tinyfox_v13p_v14p_force_factor = NULL
+  tinyfox_v13p_v14p_force_factor = NULL,
+  flight_vedba_threshold = 50
 ) {
   suppressPackageStartupMessages({
     require("tidyverse", quietly = TRUE)
@@ -1578,6 +1592,59 @@ import_nanofox_movebank <- function(
       "  delta_altitude_m computed (",
       sum(!is.na(delta$delta_altitude_m)),
       " non-NA values)."
+    )
+    x
+  }
+
+  # ---------------------------------------------------------------------------
+  # .add_flight_altitude_metrics()
+  #
+  # Computes climb rate (m/s) from delta_altitude_m / dt_prev, and flags each
+  # fix-to-fix interval as "flight" using vedba_sum (per-burst-corrected scale)
+  # exceeding `threshold`. Must run AFTER vedba_sum scaling correction so the
+  # threshold is meaningful and comparable across tag types.
+  #
+  # Columns added:
+  #   climb_rate_ms          : delta_altitude_m / dt_prev, all intervals (m/s)
+  #   is_flight               : logical, vedba_sum > threshold
+  #   delta_altitude_flight_m : delta_altitude_m where is_flight, else NA
+  #   climb_rate_flight_ms    : climb_rate_ms where is_flight, else NA
+  # ---------------------------------------------------------------------------
+  .add_flight_altitude_metrics <- function(x, threshold = flight_vedba_threshold) {
+    if (!"delta_altitude_m" %in% names(x)) {
+      warning(".add_flight_altitude_metrics: 'delta_altitude_m' column not found; skipping.")
+      return(x)
+    }
+    if (!"dt_prev" %in% names(x)) {
+      warning(".add_flight_altitude_metrics: 'dt_prev' column not found; skipping.")
+      return(x)
+    }
+    if (!"vedba_sum" %in% names(x)) {
+      warning(".add_flight_altitude_metrics: 'vedba_sum' column not found; skipping.")
+      return(x)
+    }
+
+    delta_alt_m <- as.numeric(x$delta_altitude_m)
+    dt_prev_s <- as.numeric(x$dt_prev)
+    climb_rate <- delta_alt_m / dt_prev_s
+    climb_rate[!is.finite(climb_rate)] <- NA_real_
+
+    is_flight <- !is.na(x$vedba_sum) & as.numeric(x$vedba_sum) > threshold
+
+    x$climb_rate_ms <- units::set_units(climb_rate, "m/s")
+    x$is_flight <- is_flight
+    x$delta_altitude_flight_m <- units::set_units(
+      ifelse(is_flight, delta_alt_m, NA_real_), "m"
+    )
+    x$climb_rate_flight_ms <- units::set_units(
+      ifelse(is_flight, climb_rate, NA_real_), "m/s"
+    )
+
+    .msg(
+      "  flight altitude metrics: ",
+      sum(is_flight, na.rm = TRUE),
+      " flight fixes (vedba_sum > ", threshold, "), climb_rate_flight_ms median = ",
+      round(stats::median(climb_rate[is_flight], na.rm = TRUE), 3)
     )
     x
   }
@@ -3360,6 +3427,12 @@ import_nanofox_movebank <- function(
       "correct_tinyfox_vedba_scaling"
     ) %||% b_loc
 
+    # Climb rate + flight-gated altitude change (needs vedba_sum finalized above).
+    b_loc <- .safe_try(
+      .add_flight_altitude_metrics(b_loc),
+      "add_flight_altitude_metrics"
+    ) %||% b_loc
+
     # Count Sigfox base stations per location fix.
     b_loc <- .safe_try(
       .add_n_base_stations(b_loc),
@@ -3391,7 +3464,9 @@ import_nanofox_movebank <- function(
                    "tinyfox_diff_vedba", "tinyfox_diff_vedba_orig",
                    "tinyfox_vedba_rate", "tinyfox_vedba_rate_orig",
                    ".tinyfox_scaling_factor", ".tinyfox_scaling_note",
-                   "speed_kmh", "step_km")) {
+                   "speed_kmh", "step_km",
+                   "delta_altitude_m", "climb_rate_ms", "is_flight",
+                   "delta_altitude_flight_m", "climb_rate_flight_ms")) {
       b <- .safe_try(
         .propagate_col_from_loc(b_loc, b, .col),
         paste0("propagate_", .col, "_full")
@@ -3412,6 +3487,12 @@ import_nanofox_movebank <- function(
     } else {
       b_daily2 <- .make_location_metrics(b_daily)
       b_daily2 <- add_prev_latlon(b_daily2)
+      # Climb rate + flight-gated altitude change (vedba_sum already
+      # propagated onto b before .make_daily() was called above).
+      b_daily2 <- .safe_try(
+        .add_flight_altitude_metrics(b_daily2),
+        "add_flight_altitude_metrics_daily"
+      ) %||% b_daily2
       b_daily2 <- .safe_try(
         .propagate_fell_off(b_loc, b_daily2, use_date = TRUE),
         "propagate_fell_off_daily"
@@ -3719,6 +3800,22 @@ import_nanofox_movebank <- function(
   # ---------------------------------------------------------------------------
   # Summaries
   # ---------------------------------------------------------------------------
+  # Prints flight-altitude summary stats (fix count, is_flight count,
+  # median/mean climb_rate_flight_ms) for one merged output (full/loc/daily).
+  .summarize_flight_altitude <- function(x, label) {
+    if (is.null(x) || nrow(x) == 0 || !"is_flight" %in% names(x)) return(invisible(NULL))
+    n_flight <- sum(as.logical(x$is_flight), na.rm = TRUE)
+    climb <- as.numeric(x$climb_rate_flight_ms)
+    climb <- climb[is.finite(climb)]
+    .msg(
+      "  Flight altitude (", label, "): ", n_flight, " flight fixes of ", nrow(x),
+      "; climb_rate_flight_ms median = ",
+      if (length(climb)) round(stats::median(climb), 3) else NA,
+      ", mean = ",
+      if (length(climb)) round(mean(climb), 3) else NA
+    )
+  }
+
   if (verbose && isTRUE(merge_studies)) {
     .msg("Merged studies: ", paste(study_id, collapse = ", "))
     .msg("Sensor types (merged full):")
@@ -3741,6 +3838,9 @@ import_nanofox_movebank <- function(
         .msg("Cumulative distance column present (location): yes")
       }
     }
+    .summarize_flight_altitude(full_merged, "full")
+    .summarize_flight_altitude(loc_merged, "location")
+    .summarize_flight_altitude(daily_merged, "daily")
   } else if (verbose) {
     .msg("Downloaded ", length(study_id), " studies (not merged).")
   }
