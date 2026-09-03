@@ -1481,3 +1481,132 @@ annotate_era5_gee <- function(
   if (verbose) message("GEE annotation complete.")
   data
 }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# correct_altitude_era5() — local-pressure/temperature altitude correction
+# ═══════════════════════════════════════════════════════════════════════════
+
+#' Correct tag-barometric altitude using local ERA5 surface pressure/temperature
+#'
+#' \code{\link{pressure_to_altitude_m}} (used by the default import pipeline)
+#' assumes the International Standard Atmosphere: fixed sea-level reference
+#' pressure (1013.25 hPa) and a fixed lapse-rate temperature profile. This
+#' function instead uses the actual local surface pressure and 2 m
+#' temperature from ERA5 reanalysis (nearest grid cell/timestep) in the full
+#' hypsometric formula, which corrects for real synoptic pressure variation
+#' and temperature — the two biggest sources of error in barometric altitude
+#' at a fixed location.
+#'
+#' This is \strong{not} run automatically by \code{\link{import_nanofox_movebank}}
+#' or any other pipeline function — call it explicitly as a post-processing
+#' step on \code{location}/\code{daily}/\code{full} output.
+#'
+#' @section Reference frame caveat:
+#' \code{era5_sp} is the modelled pressure at ERA5's own grid-cell orography
+#' height, not true sea level and not the animal's ground-truth elevation.
+#' \code{altitude_m_era5} is therefore "height above the local ERA5 surface,"
+#' not directly the same reference frame as the ISA-based \code{altitude_m}.
+#' Treat differences between the two as approximate, not exact.
+#'
+#' @param data             A \code{move2} or \code{sf} object with timestamps.
+#' @param era5_dir         Path to the EnvData directory (parent of
+#'   \code{single_levels/}), e.g.
+#'   \code{"//10.0.16.7/grpdechmann/Postdoc-EdwardHurme/EnvData"}.
+#' @param tag_pressure_col Column name holding the tag's own barometric
+#'   pressure in hPa. \code{NULL} = auto-detect (\code{pressure_hpa_used},
+#'   \code{tinyfox_pressure_min_last_24h}, \code{min_3h_pressure},
+#'   \code{tag_pressure}, \code{barometric_pressure}).
+#' @param max_time_gap_hours Warn when the nearest ERA5 timestep exceeds this
+#'   distance from the animal fix.
+#' @param verbose Logical; print progress messages?
+#'
+#' @return \code{data} with three new columns:
+#'   \code{altitude_m_era5} (corrected altitude, m), \code{era5_sp_hpa}
+#'   (local ERA5 surface pressure used, hPa), \code{era5_t2m_c} (local ERA5
+#'   2 m temperature used, \eqn{^\circ}C). \code{NA} where the tag pressure
+#'   or matching ERA5 values are unavailable. The existing \code{altitude_m}
+#'   column is never modified.
+#'
+#' @examples
+#' \dontrun{
+#'   out <- import_nanofox_movebank(study_id = 123456789)
+#'   out$location <- correct_altitude_era5(
+#'     out$location,
+#'     era5_dir = "//10.0.16.7/grpdechmann/Postdoc-EdwardHurme/EnvData"
+#'   )
+#' }
+#'
+#' @importFrom move2 mt_time
+#' @importFrom sf st_coordinates
+#' @export
+correct_altitude_era5 <- function(
+    data,
+    era5_dir,
+    tag_pressure_col   = NULL,
+    max_time_gap_hours = 3,
+    verbose             = TRUE
+) {
+  require(terra)
+
+  era5_dir <- gsub("\\\\", "/", era5_dir)  # UNC paths need forward slashes for GDAL
+  stopifnot(inherits(data, "sf"))
+
+  single_dir <- file.path(era5_dir, "single_levels")
+  if (!dir.exists(single_dir)) stop("No single_levels/ folder found under ", era5_dir)
+
+  n <- nrow(data)
+  if (n == 0) { warning("Input data has 0 rows."); return(data) }
+
+  tag_pressure_col <- .era5_detect_col(
+    data, tag_pressure_col,
+    c("pressure_hpa_used", "tinyfox_pressure_min_last_24h",
+      "min_3h_pressure", "tag_pressure", "barometric_pressure"),
+    "tag pressure", verbose
+  )
+  if (is.null(tag_pressure_col)) {
+    warning("correct_altitude_era5: no tag pressure column found/detected; skipping.")
+    return(data)
+  }
+
+  timestamps <- if (inherits(data, "move2")) mt_time(data) else data$timestamp
+  if (is.null(timestamps)) stop("Cannot find timestamps in data.")
+  coords_mat <- sf::st_coordinates(data)
+
+  grib_files <- sort(list.files(single_dir, "\\.grib$", full.names = TRUE))
+  if (length(grib_files) == 0) {
+    warning("correct_altitude_era5: no .grib files found in ", single_dir, "; skipping.")
+    return(data)
+  }
+
+  if (verbose) message("Extracting local surface pressure/temperature ...")
+  data <- .era5_extract_single(data, grib_files, timestamps,
+                                coords_mat, max_time_gap_hours, verbose)
+
+  # Hypsometric formula with local (not ISA-standard) pressure and temperature:
+  #   z = (R * T0 / g) * ln(P0 / P)
+  # R = specific gas constant for dry air (J / (kg K)); g = standard gravity (m/s^2)
+  R_dry <- 287.053
+  g_std <- 9.80665
+
+  p0_hpa  <- as.numeric(data$era5_sp) / 100   # Pa -> hPa
+  t0_k    <- as.numeric(data$era5_t2m)        # already Kelvin
+  p_tag   <- as.numeric(data[[tag_pressure_col]])
+
+  ok  <- is.finite(p0_hpa) & p0_hpa > 0 &
+    is.finite(t0_k) & t0_k > 0 &
+    is.finite(p_tag) & p_tag > 0
+
+  alt <- rep(NA_real_, n)
+  alt[ok] <- (R_dry * t0_k[ok] / g_std) * log(p0_hpa[ok] / p_tag[ok])
+
+  data$altitude_m_era5 <- alt
+  data$era5_sp_hpa     <- p0_hpa
+  data$era5_t2m_c      <- t0_k - 273.15
+
+  if (verbose) {
+    message("  altitude_m_era5: ", sum(ok), " / ", n, " rows corrected using local ERA5 pressure/temperature.")
+  }
+
+  data
+}
