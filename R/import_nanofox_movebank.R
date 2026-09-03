@@ -43,7 +43,11 @@
 #' @param vedba_sum_name Column name for the resulting sum. Default
 #'   \code{"vedba_sum"}.
 #' @param run_elevation Logical; retrieve ground elevation via \pkg{elevatr}.
-#'   Default \code{TRUE}.
+#'   Default \code{TRUE}. When enabled, the synthetic/marked "start" row
+#'   inserted by \code{.add_start()} (the capture/release fix at
+#'   \code{deploy_on_location}) has its \code{altitude_m} set to this ground
+#'   elevation rather than a barometric reading, since bats are caught and
+#'   released at ground level.
 #' @param run_moonlit Logical; attach moonlight/twilight covariates via
 #'   \code{\link{add_moonlit_to_move2}} (requires the \pkg{moonlit} package
 #'   from GitHub). Default \code{TRUE}.
@@ -392,6 +396,18 @@ import_nanofox_movebank <- function(
       "transmission_timestamp", "visible"
     )
 
+    # Pressure/altitude columns are cleared too: a start row is copied from the
+    # deployment's first real fix (base_idx), which — for TinyFox's flat schema —
+    # carries that fix's own tinyfox_pressure_min_last_24h value. Left in place,
+    # .add_altitude_from_pressure_col() would derive the start row's altitude_m
+    # from a real transmission that happened after release, not from the
+    # capture/release event itself. Ground elevation (deploy_on_location) is the
+    # correct starting altitude instead — see .make_location_metrics().
+    .pressure_cols <- c(
+      "barometric_pressure", "min_3h_pressure", "tinyfox_pressure_min_last_24h",
+      "altitude_m"
+    )
+
     n_inserted <- 0L
     start_rows <- vector("list", nrow(td))
     # Indices in x of existing location rows whose timestamp == deploy_on_timestamp.
@@ -530,6 +546,11 @@ import_nanofox_movebank <- function(
       # Clear Sigfox transmission columns — this is a capture/release row, not a
       # real transmission, so inherited values from the template row would mislead.
       for (.c in intersect(.tx_cols, names(start_row))) {
+        start_row[[.c]] <- NA
+      }
+      # Clear pressure/altitude columns copied from the template row — see
+      # .pressure_cols comment above.
+      for (.c in intersect(.pressure_cols, names(start_row))) {
         start_row[[.c]] <- NA
       }
       for (.c in grep("^tinyfox_", names(start_row), value = TRUE)) {
@@ -1675,6 +1696,24 @@ import_nanofox_movebank <- function(
           .msg("  elevation: ", sum(!is.na(elev_vals)), " values fetched from AWS DEM.")
         }
       }, "get_elev_point")
+
+      # ---- Start-row altitude = ground elevation ----
+      # Bats are caught and released at ground level, so the deploy-on-location
+      # elevation — not a barometric reading — is the correct starting altitude
+      # for each track (comments == "start", set by .add_start()).
+      if ("comments" %in% names(b_loc) && "elevation" %in% names(b_loc)) {
+        is_start <- !is.na(b_loc$comments) & b_loc$comments == "start"
+        has_elev <- is_start & !is.na(b_loc$elevation)
+        if (any(has_elev)) {
+          b_loc$altitude_m[has_elev] <- units::set_units(
+            b_loc$elevation[has_elev], "m"
+          )
+          .msg(
+            "  altitude_m: ", sum(has_elev),
+            " start row(s) set to ground elevation (deploy_on_location)."
+          )
+        }
+      }
     }
 
     # ---- Moonlight / twilight covariates (moonlit) ----
