@@ -581,7 +581,9 @@ plot_lagerveld_profile <- function(
     # Legend annotation
     annotate("text", x = -Inf, y = Inf, hjust = -0.1, vjust = 1.5,
              label = paste0("Airspeed (red)  |  Ground speed (green)\n",
-                            "Vmp (purple)  |  Vmr (teal)  |  Infeasible (grey)  |  Terrain (brown)"),
+                            "Vmp (purple) = min-power speed, min energy per unit time\n",
+                            "Vmr (teal) = max-range speed, min energy per unit distance\n",
+                            "Infeasible (grey)  |  Terrain (brown)"),
              col = fg, size = 2.2) +
     scale_x_continuous(
       name   = "Altitude (m)",

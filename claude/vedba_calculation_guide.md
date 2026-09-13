@@ -8,20 +8,21 @@ VEDBA (Vectorial Dynamic Body Acceleration) quantifies overall body movement and
 
 ## Fundamental Differences
 
-| Aspect | TinyfoxBatt V13 | Nanofox |
-|--------|-----------------|---------
-| **Sampling specification** | 28 Hz for 1 second | 28 Hz for 1 second |
-| **Sampling interval** | Every 1 minute | Every 2 minutes |
-| **Accumulation method** | Cumulative between transmissions | 36-minute windowed sums |
-| **Transmission schedule** | 4 messages/day (0, 30, 60, 90 min intervals) | 1 message every 3 hours |
-| **Gap to next day** | 22 hours after final message | 3 hours (continuous rolling window) |
-| **Data granularity** | 4 interval totals + 1 daily summary | ~40 measurements per day (full/daily) or 8 (location) |
+| Aspect                           | TinyfoxBatt V13                              | Nanofox                                               |
+| -------------------------------- | -------------------------------------------- | ----------------------------------------------------- |
+| **Sampling specification** | 28 Hz for 1 second                           | 28 Hz for 1 second                                    |
+| **Sampling interval**      | Every 1 minute                               | Every 2 minutes                                       |
+| **Accumulation method**    | Cumulative between transmissions             | 36-minute windowed sums                               |
+| **Transmission schedule**  | 4 messages/day (0, 30, 60, 90 min intervals) | 1 message every 3 hours                               |
+| **Gap to next day**        | 22 hours after final message                 | 3 hours (continuous rolling window)                   |
+| **Data granularity**       | 4 interval totals + 1 daily summary          | ~40 measurements per day (full/daily) or 8 (location) |
 
 ---
 
 ## TinyfoxBatt V13 VEDBA Calculation
 
 ### Hardware Configuration
+
 ```
 Accelerometer: ±8G range
 Sampling frequency: 28 Hz for 1 second duration
@@ -32,6 +33,7 @@ Bursts per day: ~1,440 (one per minute)
 ```
 
 ### Transmission Schedule
+
 ```
 Message 1: Time 0 min    → VEDBA accumulated in first ~30 min period   (~30 bursts)
 Message 2: Time 30 min   → VEDBA accumulated in next ~30 min period    (~30 bursts)
@@ -44,14 +46,16 @@ Next day Message 1: Time 0 min → cycle repeats
 **Note**: Each message carries the cumulative VEDBA **since the previous transmission**, not absolute daily total. The daily aggregate combines all 4 transmissions.
 
 ### Calculation Process
+
 1. **Sample acquisition**: Every 60 seconds, the accelerometer records 28 samples at 28 Hz (1 second of continuous data)
-2. **VEDBA per sample**: For each of the 28 samples, compute: `VEDBA_sample = √(ax² + ay² + az²) - 1g` 
+2. **VEDBA per sample**: For each of the 28 samples, compute: `VEDBA_sample = √(ax² + ay² + az²) - 1g`
 3. **Burst aggregation**: Sum or average the 28 VEDBA values from this burst
 4. **Cumulative tracking**: Add this burst's value to a running total between transmissions
 5. **Transmission**: Every 30 minutes (4 times per day), the accumulated VEDBA is sent and counter resets
 6. **Daily output**: All 4 transmitted values are summed to produce the daily total
 
 ### Available Variables (Daily Level)
+
 ```
 daily_total_vedba_24h          # Sum of all 4 transmissions over 24 hours (m/s²·hours)
 daily_total_vedba_rate_h       # VEDBA rate normalized per hour (m/s²·h⁻¹)
@@ -61,6 +65,7 @@ daily_total_vedba_24h_n        # Number of bursts recorded in the 24-hour period
 **Note on interpretation**: The raw Sigfox messages contain 4 VEDBA values (one per 30-min interval), while Movebank/processed data aggregates these into the daily summary variables above.
 
 ### Key Details for Analysis
+
 - **Temporal resolution in raw data**: 4 transmissions per day (every ~30 minutes)
 - **Temporal resolution in daily aggregate**: One cumulative value per day
 - **Time unit for rate**: Use **hours** for `vedba_rate_h` (already normalized to per-hour)
@@ -73,6 +78,7 @@ daily_total_vedba_24h_n        # Number of bursts recorded in the 24-hour period
 ## Nanofox VEDBA Calculation
 
 ### Hardware Configuration
+
 ```
 Accelerometer: (same as TinyfoxBatt)
 Sampling frequency: 28 Hz for 1 second duration
@@ -88,6 +94,7 @@ Noise reduction: 0
 ```
 
 ### Calculation Process
+
 1. **Sample acquisition**: Every 2 minutes, record 28 samples at 28 Hz
 2. **VEDBA per sample**: For each of the 28 samples, compute: `VEDBA_sample = √(ax² + ay² + az²) - 1g`
 3. **Burst aggregation**: Sum the 28 VEDBA values from this burst
@@ -96,6 +103,7 @@ Noise reduction: 0
 6. **3-hour rollup**: For transmission, sum the last 5 consecutive 36-minute windows (= 180 minutes = 3 hours)
 
 ### Conversion Formula
+
 ```
 VEDBA (m/s²) = vedbaX_raw * 2600 * 3.9 * 0.00980665
 
@@ -105,6 +113,7 @@ Value range: 0 – 25,357.05 m/s²
 ### Available Variables by Data Type
 
 #### **Full Variables** (36-minute resolution)
+
 - `vedba1` – VeDBA sum 0–36 minutes ago (most recent)
 - `vedba2` – VeDBA sum 36–72 minutes ago
 - `vedba3` – VeDBA sum 72–108 minutes ago
@@ -115,11 +124,13 @@ Value range: 0 – 25,357.05 m/s²
 **Note**: `vedba1` represents the *most recent* 36-minute window; older windows are in vedba2–5.
 
 #### **Location Variables** (3-hour resolution)
+
 - `vedba_sum` – Single 3-hour VEDBA sum only
 
 **Use when**: Reduced temporal granularity is acceptable and file size is important.
 
 #### **Daily Variables** (24-hour aggregates)
+
 ```
 Totals & counts:
   daily_vedba_sum             # Total VEDBA over 24 hours
@@ -146,6 +157,7 @@ Day/night breakdown:
 ```
 
 ### Key Details for Analysis
+
 - **Temporal resolution**: One value per 36 minutes (full), one per 3 hours (location), one per 24 hours (daily)
 - **Time windows**: vedba1–5 represent *consecutive non-overlapping* 36-minute blocks
 - **Daily sampling**: Typically ~40 measurements per day (24 hours ÷ 36 min ≈ 40 windows)
@@ -172,17 +184,20 @@ As of August 2026, Nanofox VEDBA in Movebank export uses **per-sample scaling** 
 Values should now represent VEDBA per one-second burst (per-burst scaling, ÷18):
 
 **By activity state:**
+
 - Rest: ~9 m/s² per burst
 - Moderate activity: ~27 m/s² per burst
 - High activity (flight): ~205 m/s² per burst
 - Daily median (typical mixed activity): ~15–25 m/s² per burst
 
 **Daily aggregates:**
+
 - Typical daily range: ~100–2000 m/s² (sum of all bursts, varies by activity level)
 - Very active day: >2000 m/s²
 - Rest day: <100 m/s²
 
 **Warning signs of incorrect scaling:**
+
 - Median vedba_sum < 5 m/s²: likely still per-sample, correction should have been applied
 - Median vedba_sum > 300 m/s²: likely already per-burst, no correction should be needed
 
@@ -205,6 +220,7 @@ To compare activity across tag types, both are normalized to **VEDBA per one-sec
 **Correction factor:** ×28 (applied automatically on import)
 
 **Expected range after correction:**
+
 - Per-burst values: ~0.5–20 m/s²
 - Daily totals: ~100–2000 m/s² (varies by activity level)
 
@@ -213,16 +229,19 @@ To compare activity across tag types, both are normalized to **VEDBA per one-sec
 **Per-message VEDBA:** `tinyfox_diff_vedba` (cumulative diff between messages in m/s²)
 
 **Per-burst VEDBA:** `tinyfox_vedba_rate / 60`
+
 - `tinyfox_vedba_rate = tinyfox_diff_vedba / dt_prev_hours`
 - `dt_prev_hours` = time from the previous message to the current message (accounts for ±30 min/day clock drift)
 - `tinyfox_diff_vedba` is the change since the previous fix, so it must be paired with the previous inter-message interval
 
 **Firmware-specific scaling:**
+
 - **V13**: baseline scale; no correction needed.
 - **V13P / V14P**: some batches report values ~10× higher than V13. The import pipeline auto-detects this from the stationary baseline and applies a data-driven correction factor. After correction, V13P/V14P per-burst values are on the same scale as V13.
 - Check `.tinyfox_scaling_note` and `.tinyfox_scaling_factor` to see whether correction was applied.
 
 **Expected range (per-burst, after any V13P/V14P correction):**
+
 - Per-burst values: ~0.5–2.0 m/s²
 - Daily totals: ~1000–2000 m/s² per 24h (varies by activity level)
 
@@ -273,19 +292,21 @@ Tinyfoxbatt:
 
 Nanofox (after correction):
   vedba_per_sample = vedba_sum / (daily_vedba_sum_n * 18)
-                   
+                 
   where daily_vedba_sum_n = ~40 windows per day
         each window = 18 bursts
         total bursts = ~40 × 18 = ~720
 ```
 
 #### **Interpretation**
+
 - **vedba_per_sample** = mean activity intensity per 1-second sampling event (m/s²)
 - **Values are directly comparable** between tag types
 - **Same units** for both: VEDBA accumulated per accelerometer burst
 - **Accounts for**: Different sampling densities (1 min vs 2 min) and accumulation strategies automatically
 
 #### **Example Comparison**
+
 ```
 Tag A (TinyfoxBatt): daily_total_vedba_24h = 14,400 m/s²·h, n = 1,440
                     vedba_per_sample = 14,400 / 1,440 = 10.0 m/s²
@@ -298,25 +319,27 @@ Tag B (Nanofox):    daily_vedba_sum = 7,200 m/s², sum_n = 40 windows
 
 ### Data Structure Differences (Raw Values)
 
-| Question | TinyfoxBatt | Nanofox |
-|----------|-------------|---------
-| How many VEDBA values per day? | 1 (daily aggregate) | ~40 (daily) or ~8 (location) or 5 (full, per message) |
-| Time unit for rates? | Hours (vedba_rate_h) | Sums per window (vedba_sum) – must normalize by window count |
-| Can I see activity across the day? | No (daily only) | Yes (use full or daily variables with day/night splits) |
-| Raw transmission frequency | 4 messages/day | 8 messages/day |
-| Temporal granularity of raw data | ~30 minutes per transmission | ~3 hours per transmission |
-| Gap between days | 22 hours after final message | 3 hours (rolling window bridges gap) |
-| **Normalized comparison unit** | **VEDBA per sample** | **VEDBA per sample** |
+| Question                             | TinyfoxBatt                  | Nanofox                                                       |
+| ------------------------------------ | ---------------------------- | ------------------------------------------------------------- |
+| How many VEDBA values per day?       | 1 (daily aggregate)          | ~40 (daily) or ~8 (location) or 5 (full, per message)         |
+| Time unit for rates?                 | Hours (vedba_rate_h)         | Sums per window (vedba_sum) – must normalize by window count |
+| Can I see activity across the day?   | No (daily only)              | Yes (use full or daily variables with day/night splits)       |
+| Raw transmission frequency           | 4 messages/day               | 8 messages/day                                                |
+| Temporal granularity of raw data     | ~30 minutes per transmission | ~3 hours per transmission                                     |
+| Gap between days                     | 22 hours after final message | 3 hours (rolling window bridges gap)                          |
+| **Normalized comparison unit** | **VEDBA per sample**   | **VEDBA per sample**                                    |
 
 ### Old Comparison Methods (Not Recommended)
 
 To **compare daily activity totals** (without normalizing):
+
 1. **TinyfoxBatt**: Use `daily_total_vedba_24h` (sum of 4 transmissions)
 2. **Nanofox**: Use `daily_vedba_sum` (total VEDBA over 24 hours)
 
 **Caveat**: These are not directly comparable because they accumulate different numbers of bursts. Use only when normalizing by sample count.
 
 ### Key Caveats
+
 - **Same sensor hardware**: Both use 28 Hz sampling, but different accumulation strategies
 - **Different temporal windows**: TinyfoxBatt resets every 30 minutes (4×/day); Nanofox uses rolling 36-min windows
 - **Resolution trade-off**: TinyfoxBatt is simpler but only offers 4 data points per day in raw form; Nanofox provides continuous rolling window data (~40 points/day)
@@ -328,6 +351,7 @@ To **compare daily activity totals** (without normalizing):
 ## Practical Guidance for Analysis
 
 ### When Analyzing TinyfoxBatt Data
+
 1. Use **`daily_total_vedba_24h`** for daily totals (combines 4 transmissions)
 2. Use **`daily_total_vedba_rate_h`** for activity intensity (already normalized)
 3. **Normalize to per-sample**: `daily_total_vedba_24h / daily_total_vedba_24h_n`
@@ -337,6 +361,7 @@ To **compare daily activity totals** (without normalizing):
 7. **Be aware**: If a tag misses a transmission, that time window's activity is lost
 
 ### When Analyzing Nanofox Data
+
 1. Choose data type based on temporal needs:
    - **Full**: When fine-grained (36-min) activity patterns matter
    - **Location**: For migration corridor tracking with minimal data
@@ -350,6 +375,7 @@ To **compare daily activity totals** (without normalizing):
 8. **Check metadata**: `.vedba_scaling_note` column indicates if correction was applied
 
 ### Cross-Type Comparison (RECOMMENDED APPROACH)
+
 1. **Always normalize to VEDBA per sample** (mean VEDBA per 1-second burst)
 2. **Formula for TinyfoxBatt**: `daily_total_vedba_24h / daily_total_vedba_24h_n`
 3. **Formula for Nanofox** (after auto-correction): `daily_vedba_sum / (daily_vedba_sum_n * 18)`
@@ -360,30 +386,30 @@ To **compare daily activity totals** (without normalizing):
 
 ## Summary Table: Variable Mapping
 
-| Analysis Need | TinyfoxBatt | Nanofox (Full) | Nanofox (Daily) |
-|---------------|-------------|---|---|
-| Daily activity total (raw) | `daily_total_vedba_24h` | Sum of `vedba1:5` | `daily_vedba_sum` |
-| Daily activity per sample | `daily_total_vedba_24h / daily_total_vedba_24h_n` | `vedba_sum / (5 × 18)` | `daily_vedba_sum / (daily_vedba_sum_n × 18)` |
-| Activity rate (h⁻¹) | `daily_total_vedba_rate_h` | Manual calculation required | `daily_vedba_sum / daily_vedba_sum_n × 1.667` |
-| Day/night comparison | Not available | Must manually segment | `daily_vedba_day_*` vs `daily_vedba_night_*` |
-| Temporal resolution (daily) | 1 per day | 36 minutes | 24 hours |
-| Temporal resolution (raw) | 4 transmissions (~30 min intervals) | 5 windows (~3 hours) or 40 (36-min windows) | N/A |
-| Sample interval | 1 minute | 2 minutes | N/A (aggregated) |
-| Flight identification | Not directly available | Not directly available | `daily_vedba_flying_n` |
-| VEDBA scaling metadata | `.tinyfox_scaling_note`, `.tinyfox_scaling_factor` | `.vedba_scaling_note` | `.vedba_scaling_note` |
-| Firmware-specific correction | V13P/V14P auto-corrected to V13 baseline | Nanofox per-sample → per-burst auto-correction | Nanofox per-sample → per-burst auto-correction |
+| Analysis Need                | TinyfoxBatt                                            | Nanofox (Full)                                  | Nanofox (Daily)                                  |
+| ---------------------------- | ------------------------------------------------------ | ----------------------------------------------- | ------------------------------------------------ |
+| Daily activity total (raw)   | `daily_total_vedba_24h`                              | Sum of`vedba1:5`                              | `daily_vedba_sum`                              |
+| Daily activity per sample    | `daily_total_vedba_24h / daily_total_vedba_24h_n`    | `vedba_sum / (5 × 18)`                       | `daily_vedba_sum / (daily_vedba_sum_n × 18)`  |
+| Activity rate (h⁻¹)        | `daily_total_vedba_rate_h`                           | Manual calculation required                     | `daily_vedba_sum / daily_vedba_sum_n × 1.667` |
+| Day/night comparison         | Not available                                          | Must manually segment                           | `daily_vedba_day_*` vs `daily_vedba_night_*` |
+| Temporal resolution (daily)  | 1 per day                                              | 36 minutes                                      | 24 hours                                         |
+| Temporal resolution (raw)    | 4 transmissions (~30 min intervals)                    | 5 windows (~3 hours) or 40 (36-min windows)     | N/A                                              |
+| Sample interval              | 1 minute                                               | 2 minutes                                       | N/A (aggregated)                                 |
+| Flight identification        | Not directly available                                 | Not directly available                          | `daily_vedba_flying_n`                         |
+| VEDBA scaling metadata       | `.tinyfox_scaling_note`, `.tinyfox_scaling_factor` | `.vedba_scaling_note`                         | `.vedba_scaling_note`                          |
+| Firmware-specific correction | V13P/V14P auto-corrected to V13 baseline               | Nanofox per-sample → per-burst auto-correction | Nanofox per-sample → per-burst auto-correction  |
 
 ---
 
 ## References & Notes
 
 - **Both tags**: Sample at 28 Hz for 1 second per burst (28 samples total)
-- **TinyfoxBatt V13**: 
+- **TinyfoxBatt V13**:
   - Sampling: 1-minute interval → 1,440 bursts/day
   - Transmission: 4 messages/day at 0, 30, 60, 90 min intervals (22-hour gap to next day)
   - Storage: Cumulative totals between transmissions + daily aggregate
   - **Comparison**: Normalize by dividing daily total by burst count (~1,440)
-- **Nanofox**: 
+- **Nanofox**:
   - Sampling: 2-minute interval → 720 bursts/day
   - Transmission: 8 messages/day (every 3 hours)
   - Storage: 36-minute windowed sums grouped into daily aggregates

@@ -20,6 +20,11 @@ wildcloud_quicklook <- function(
     min_quality  = NULL,         # "Poor","Average","Good","Excellent"
     max_radius   = NULL,         # max position radius (m)
     gap_hours    = 3,            # path segment break threshold (hours)
+    msg_interval_min = 60,       # minutes between messages (10Day fw: 60; 30Day fw: 180)
+                                  # used only when sub-window columns carry no explicit
+                                  # "<N> min ago" offset (10Day fw: "VeDBA 5 (raw)".."VeDBA 1 (raw)")
+    vedba_threshold = NULL,      # VeDBA cutoff above which a fix counts as "flying";
+                                  # NULL = auto (75th percentile of nonzero VeDBA)
     # ── plot controls ──────────────────────────────────────────
     plot         = TRUE,         # master switch
     plot_daily   = TRUE,         # P1 daily distance + P2 daily VeDBA
@@ -32,6 +37,13 @@ wildcloud_quicklook <- function(
 ) {
 
   # ── 1. Load data ──────────────────────────────────────────
+  if (is.character(data) && length(data) == 1 && dir.exists(data)) {
+    csv_files <- list.files(data, pattern = "\\.csv$", full.names = TRUE, ignore.case = TRUE)
+    if (length(csv_files) == 0)
+      stop("No CSV files found in directory: ", data)
+    data <- csv_files[which.max(file.mtime(csv_files))]
+    message("Using most recent CSV in directory: ", data)
+  }
   if (is.character(data) && length(data) == 1 && file.exists(data)) {
     message("Reading: ", data)
     dt <- fread(data, encoding = "UTF-8")
@@ -187,6 +199,47 @@ wildcloud_quicklook <- function(
     dt[, (temp_max_col) := lapply(.SD, function(x) as.numeric(gsub("[^0-9.-]", "", x))),
        .SDcols = temp_max_col]
 
+  # ── 9b. Nightly flight-time summary ───────────────────────
+  # Flags each VeDBA sub-window observation as "flying" when above threshold,
+  # then sums flying time (in hours) within each device's sunset->sunrise window.
+  night_activity_dt <- NULL
+  if (has_vedba && length(vedba_cols) > 0) {
+    vedba_long_all <- build_vedba_long(dt, vedba_cols, msg_interval_min)
+
+    threshold_used <- if (!is.null(vedba_threshold)) {
+      vedba_threshold
+    } else {
+      nz <- vedba_long_all$vedba[vedba_long_all$vedba > 0]
+      if (length(nz) > 0) unname(quantile(nz, 0.75, na.rm = TRUE)) else NA_real_
+    }
+    message(sprintf("  VeDBA flight threshold: %.3f %s",
+                     threshold_used,
+                     if (is.null(vedba_threshold)) "(auto: 75th pct of nonzero VeDBA)" else "(user-specified)"))
+
+    vedba_long_all[, flying := !is.na(threshold_used) & vedba > threshold_used]
+
+    night_windows <- get_device_sun_windows(dt, datetime_tz)
+    if (!is.null(night_windows)) {
+      matched <- night_windows[vedba_long_all,
+        on = .(device, sunset <= obs_time, sunrise > obs_time),
+        .(device, night_date, sunset = x.sunset, sunrise = x.sunrise, night_hours,
+          obs_time, vedba, flying, duration_hours)]
+      matched <- matched[!is.na(night_date)]
+      if (nrow(matched) > 0) {
+        night_activity_dt <- matched[, .(
+          n_obs        = .N,
+          n_flying_obs = sum(flying, na.rm = TRUE),
+          flying_hours = sum(duration_hours[flying == TRUE], na.rm = TRUE),
+          night_hours  = night_hours[1]
+        ), by = .(device, night_date, sunset, sunrise)]
+        night_activity_dt[, pct_flying := flying_hours / night_hours]
+        setorder(night_activity_dt, device, night_date)
+        message(sprintf("  Nightly flight summary: %d device-nights, mean %.2f flight hours/night",
+                         nrow(night_activity_dt), mean(night_activity_dt$flying_hours, na.rm = TRUE)))
+      }
+    }
+  }
+
   # ── 10. Per-device summary ────────────────────────────────
   agg_cols <- c("step_dist_m", "speed_ms")
   if (has_vedba) agg_cols <- c(agg_cols, "vedba_sum")
@@ -206,13 +259,15 @@ wildcloud_quicklook <- function(
   plots <- if (plot) make_diagnostic_plots(
     dt, has_vedba, has_pressure, has_temp,
     vedba_cols, pressure_cols, temp_min_col, temp_max_col,
-    gap_hours       = gap_hours,
-    plot_daily      = plot_daily,
-    plot_raw        = plot_raw,
-    plot_temp       = plot_temp,
-    free_y_raw      = free_y_raw,
-    facets_per_page = facets_per_page,
-    plot_dir        = plot_dir
+    night_activity    = night_activity_dt,
+    gap_hours         = gap_hours,
+    msg_interval_min  = msg_interval_min,
+    plot_daily        = plot_daily,
+    plot_raw          = plot_raw,
+    plot_temp         = plot_temp,
+    free_y_raw        = free_y_raw,
+    facets_per_page   = facets_per_page,
+    plot_dir          = plot_dir
   ) else NULL
 
   # ── 12. Return ────────────────────────────────────────────
@@ -223,10 +278,11 @@ wildcloud_quicklook <- function(
   ))
 
   invisible(list(
-    data       = dt,
-    summary    = summary_dt,
-    vedba_cols = vedba_cols,
-    plots      = plots
+    data           = dt,
+    summary        = summary_dt,
+    night_activity = night_activity_dt,
+    vedba_cols     = vedba_cols,
+    plots          = plots
   ))
 }
 
@@ -244,11 +300,88 @@ parse_wildcloud_datetime <- function(x, tz = "UTC") {
   out
 }
 
+# ── Sub-window offset parser ──────────────────────────────
+# 30Day fw columns carry explicit offsets, e.g. "VeDBA sum 144 min ago".
+# 10Day fw columns carry only a countdown index, e.g. "VeDBA 5 (raw)" ..
+# "VeDBA 1 (raw)" -- 5 sub-window sums per message, 5 = oldest (start of
+# the msg_interval_min window), 1 = most recent (offset 0). Single
+# columns with no index (e.g. "Pressure (mbar)") get offset 0.
+parse_offset_minutes <- function(window_names, msg_interval_min = 60) {
+  min_ago <- suppressWarnings(as.numeric(gsub(".*?(\\d+)\\s*min.*", "\\1", window_names)))
+  if (all(!is.na(min_ago))) return(min_ago)
+
+  idx <- suppressWarnings(as.numeric(gsub(".*?(\\d+)[^0-9]*$", "\\1", window_names)))
+  if (all(!is.na(idx))) {
+    n_windows    <- max(idx)
+    sub_interval <- msg_interval_min / n_windows
+    return((idx - 1) * sub_interval)
+  }
+
+  rep(0, length(window_names))
+}
+
+# ── Time-corrected, de-duplicated long VeDBA table ────────
+# One row per device per sub-window observation, with obs_time shifted
+# back by its offset and duration_hours = length of that sub-window bin
+# (used to convert "how many high-VeDBA observations" into flight hours).
+build_vedba_long <- function(dt, vedba_cols, msg_interval_min = 60) {
+  if (length(vedba_cols) == 0) return(data.table())
+  bin_hours <- msg_interval_min / length(vedba_cols) / 60
+
+  vedba_long <- melt(
+    dt[, c("device", "datetime", vedba_cols), with = FALSE],
+    id.vars       = c("device", "datetime"),
+    variable.name = "window", value.name = "vedba"
+  )[!is.na(vedba)]
+  vedba_long[, offset_min := parse_offset_minutes(as.character(window), msg_interval_min)]
+  vedba_long[, obs_time   := datetime - offset_min * 60]
+  setorder(vedba_long, device, obs_time, offset_min)
+  vedba_long <- vedba_long[, .SD[1L], by = .(device, obs_time)]
+  vedba_long[, duration_hours := bin_hours]
+  vedba_long[]
+}
+
+# ── Per-device sunset -> next-sunrise windows ("nights") ──
+# Uses each device's own median coordinates, so sites at different
+# latitudes/longitudes get correct night lengths.
+get_device_sun_windows <- function(dt_full, tz = "UTC") {
+  library(suncalc)
+
+  device_locs <- dt_full[coord_ok == TRUE, .(
+    lat   = median(latitude,  na.rm = TRUE),
+    lon   = median(longitude, na.rm = TRUE),
+    t_min = min(datetime, na.rm = TRUE),
+    t_max = max(datetime, na.rm = TRUE)
+  ), by = device]
+  device_locs <- device_locs[!is.na(lat) & !is.na(lon)]
+  if (nrow(device_locs) == 0) return(NULL)
+
+  windows <- rbindlist(lapply(seq_len(nrow(device_locs)), function(i) {
+    dates <- seq(as.Date(device_locs$t_min[i], tz = tz) - 1,
+                 as.Date(device_locs$t_max[i], tz = tz) + 1, by = "day")
+    sun <- as.data.table(getSunlightTimes(
+      date = dates, lat = device_locs$lat[i], lon = device_locs$lon[i],
+      keep = c("sunset", "sunrise"), tz = tz
+    ))
+    setorder(sun, date)
+    sun[, sunrise_next := shift(sunrise, 1L, type = "lead")]
+    sun <- sun[!is.na(sunrise_next)]
+    data.table(device     = device_locs$device[i],
+               night_date = sun$date,
+               sunset     = sun$sunset,
+               sunrise    = sun$sunrise_next)
+  }))
+  windows[, night_hours := as.numeric(difftime(sunrise, sunset, units = "hours"))]
+  windows
+}
+
 
 make_diagnostic_plots <- function(
     dt, has_vedba, has_pressure, has_temp,
     vedba_cols, pressure_cols, temp_min_col, temp_max_col,
+    night_activity  = NULL,
     gap_hours       = 3,
+    msg_interval_min = 60,
     plot_daily      = TRUE,
     plot_raw        = TRUE,
     plot_temp       = TRUE,
@@ -394,6 +527,21 @@ make_diagnostic_plots <- function(
         theme_bat
     }
 
+    # ── P9: Nightly flight duration ─────────────────────────
+    if (!is.null(night_activity) && nrow(night_activity) > 0) {
+      night_activity[, obs_time := as.POSIXct(night_date, tz = "UTC")]
+
+      plots$nightly_flight_hours <-
+        ggplot(night_activity, aes(obs_time, flying_hours, col = device)) +
+        night_layer(night_rects) +
+        geom_path(alpha = 0.5) +
+        geom_point(size = 1.5) +
+        x_datetime +
+        labs(title = "Estimated nightly flight duration per tag",
+             x = NULL, y = "Flight hours (VeDBA > threshold)") +
+        theme_bat
+    }
+
   } # end plot_daily
 
   # ═══════════════════════════════════════════════════════════
@@ -436,15 +584,7 @@ make_diagnostic_plots <- function(
 
     # ── P5: Raw VeDBA — time-corrected, segmented ───────────
     if (has_vedba && length(vedba_cols) > 0) {
-      vedba_long <- melt(
-        dt[, c("device", "datetime", vedba_cols), with = FALSE],
-        id.vars       = c("device", "datetime"),
-        variable.name = "window", value.name = "vedba"
-      )[!is.na(vedba)]
-      vedba_long[, offset_min := as.numeric(gsub(".*?(\\d+)\\s*min.*", "\\1", window))]
-      vedba_long[, obs_time   := datetime - offset_min * 60]
-      setorder(vedba_long, device, obs_time, offset_min)
-      vedba_long <- vedba_long[, .SD[1L], by = .(device, obs_time)]
+      vedba_long <- build_vedba_long(dt, vedba_cols, msg_interval_min)
       vedba_long <- add_segment_id(vedba_long)
 
       p5_base <-
@@ -469,7 +609,7 @@ make_diagnostic_plots <- function(
         id.vars       = c("device", "datetime"),
         variable.name = "window", value.name = "pressure_mbar"
       )[!is.na(pressure_mbar)]
-      pres_long[, offset_min := as.numeric(gsub(".*?(\\d+)\\s*min.*", "\\1", window))]
+      pres_long[, offset_min := parse_offset_minutes(as.character(window), msg_interval_min)]
       pres_long[, obs_time   := datetime - offset_min * 60]
       setorder(pres_long, device, obs_time, offset_min)
       pres_long <- pres_long[, .SD[1L], by = .(device, obs_time)]

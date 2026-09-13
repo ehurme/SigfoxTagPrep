@@ -329,6 +329,20 @@ scan_night_wind_profile <- function(
     x
   }
 
+  # Ground-track-bearing airspeed. annotate_era5()'s own airspeed_flight relies
+  # on mt_speed()/mt_azimuth() over whatever rows happen to survive upstream
+  # pre-filtering — when that subset isn't a contiguous track (e.g. only the
+  # dep/arr fixes of several widely-spaced migration nights), the lag-based
+  # ground speed pairs unrelated fixes and blows up to hundreds of m/s, which
+  # the sanity clamp then wipes to NA, leaving the panel blank. `bearing` and
+  # `ground_speed` (moth_move2.R) are computed once on the full, contiguous
+  # track before any night-level filtering, so they stay correct here — use
+  # them directly instead of the pipeline's airspeed_flight.
+  .wind_support_bearing <- function(u, v, heading_deg)
+    cos(atan2(u, v) - heading_deg * (pi / 180)) * sqrt(u^2 + v^2)
+  .cross_wind_bearing <- function(u, v, heading_deg)
+    sin(atan2(u, v) - heading_deg * (pi / 180)) * sqrt(u^2 + v^2)
+
   .pt <- function(base_size = 9) {
     bg <- if (theme_dark) "black" else "white"
     fg <- if (theme_dark) "white" else "black"
@@ -429,7 +443,9 @@ scan_night_wind_profile <- function(
   # dt speed spike, ...), not real data — clamp before it reaches any plot.
   .WIND_MAX_MS <- 120
   for (.col in c("wind_support_flight", "crosswind_flight", "wind_speed_flight",
-                 "airspeed_flight", "best_wind_support")) {
+                 "airspeed_flight", "best_wind_support",
+                 "wind_support_10m", "wind_speed_10m", "crosswind_10m",
+                 "wind_support_100m", "wind_speed_100m", "crosswind_100m")) {
     if (.col %in% names(night_df))
       night_df[[.col]] <- .clamp_plausible(night_df[[.col]], .WIND_MAX_MS, .col)
   }
@@ -441,6 +457,82 @@ scan_night_wind_profile <- function(
     }
   }
   rm(.col, .lv, .pfx)
+
+  # ── Bearing-based airspeed (robust alternative to airspeed_flight) ──────────
+  # See note on .wind_support_bearing() above: recompute wind support/crosswind
+  # at the matched flight level from the raw ERA5 u/v components using the
+  # track's own `bearing` + `ground_speed` (both derived from real consecutive
+  # fixes upstream), rather than trusting annotate_era5()'s internal ground
+  # speed, which can be wrong when only a sparse, non-contiguous subset of the
+  # track was passed to annotate_era5().
+  night_df$airspeed_flight_bearing <- NA_real_
+  if (.has(night_df, "bearing") && .has(night_df, "ground_speed") &&
+      "matched_pressure_level" %in% names(night_df)) {
+    u_cols <- paste0("era5_u", pressure_levels)
+    v_cols <- paste0("era5_v", pressure_levels)
+    avail  <- u_cols %in% names(night_df) & v_cols %in% names(night_df)
+    if (any(avail)) {
+      lvls_avail <- pressure_levels[avail]
+      u_mat <- matrix(vapply(u_cols[avail], function(cn) as.numeric(night_df[[cn]]),
+                            numeric(nrow(night_df))), nrow = nrow(night_df))
+      v_mat <- matrix(vapply(v_cols[avail], function(cn) as.numeric(night_df[[cn]]),
+                            numeric(nrow(night_df))), nrow = nrow(night_df))
+      col_idx <- match(night_df$matched_pressure_level, lvls_avail)
+      valid   <- !is.na(col_idx) & !is.na(night_df$bearing) & !is.na(night_df$ground_speed)
+      if (any(valid)) {
+        row_idx <- which(valid)
+        u_m <- u_mat[cbind(row_idx, col_idx[valid])]
+        v_m <- v_mat[cbind(row_idx, col_idx[valid])]
+        ws_b <- .wind_support_bearing(u_m, v_m, night_df$bearing[valid])
+        cw_b <- .cross_wind_bearing(u_m, v_m, night_df$bearing[valid])
+        night_df$airspeed_flight_bearing[valid] <-
+          sqrt((night_df$ground_speed[valid] - ws_b)^2 + cw_b^2)
+      }
+    }
+  }
+  night_df$airspeed_flight_bearing <- .clamp_plausible(
+    night_df$airspeed_flight_bearing, .WIND_MAX_MS, "airspeed_flight_bearing")
+
+  # ── Elevation raster ─────────────────────────────────────────────────────────
+  # Fetched early (needs only t_dep/t_arr fixes, not the wind reshape below)
+  # because the ground-pressure exclusion further down depends on it.
+  dep_row_elev <- df_i %>% filter(timestamp == t_dep)
+  arr_row_elev <- df_i %>% filter(timestamp == t_arr)
+  if (nrow(dep_row_elev) == 0) dep_row_elev <- df_i %>% slice_min(abs(as.numeric(timestamp - t_dep)), n = 1)
+  if (nrow(arr_row_elev) == 0) arr_row_elev <- df_i %>% slice_min(abs(as.numeric(timestamp - t_arr)), n = 1)
+
+  elev_rast <- NULL
+  extent_pts <- tryCatch(
+    sf::st_as_sf(data.frame(lon = c(dep_row_elev$.lon, arr_row_elev$.lon),
+                            lat = c(dep_row_elev$.lat, arr_row_elev$.lat)),
+                 coords = c("lon", "lat"), crs = 4326),
+    error = function(e) NULL
+  )
+  if (!is.null(extent_pts)) {
+    elev_rast <- tryCatch(
+      terra::rast(elevatr::get_elev_raster(extent_pts, z = elev_z, expand = 1)),
+      error = function(e) NULL
+    )
+    if (!is.null(elev_rast))
+      terra::values(elev_rast)[terra::values(elev_rast) < 0] <- 0
+  }
+
+  # ── Ground elevation at each night-window fix ───────────────────────────────
+  # Interpolated (bilinear) from the same raster used for the map background.
+  # Converted to an ISA-equivalent pressure so it can be drawn on the
+  # pressure-axis panels, and used to exclude wind levels that sit below the
+  # terrain surface from every downstream comparison/selection.
+  .alt_to_p_isa <- function(alt_m) 1013.25 * (1 - pmax(alt_m, 0) / 44330)^5.2558
+
+  night_df$ground_elev_m <- rep(NA_real_, nrow(night_df))
+  if (!is.null(elev_rast)) {
+    night_df$ground_elev_m <- tryCatch({
+      ex <- terra::extract(elev_rast, cbind(night_df$.lon, night_df$.lat),
+                           method = "bilinear")
+      pmax(as.numeric(ex[[ncol(ex)]]), 0)
+    }, error = function(e) rep(NA_real_, nrow(night_df)))
+  }
+  night_df$ground_pressure_hPa <- .alt_to_p_isa(night_df$ground_elev_m)
 
   # ── Wind-support reshape (long format for heatmap) ─────────────────────────
   ws_cols   <- paste0("wind_support_", pressure_levels)
@@ -524,49 +616,13 @@ scan_night_wind_profile <- function(
   press_labels <- paste0(press_breaks, "\n(", alt_approx, "m)")
 
   # ── Map preparation ────────────────────────────────────────────────────────
-  dep_row_map <- df_i %>% filter(timestamp == t_dep)
-  arr_row_map <- df_i %>% filter(timestamp == t_arr)
-  if (nrow(dep_row_map) == 0) dep_row_map <- df_i %>% slice_min(abs(as.numeric(timestamp - t_dep)), n = 1)
-  if (nrow(arr_row_map) == 0) arr_row_map <- df_i %>% slice_min(abs(as.numeric(timestamp - t_arr)), n = 1)
+  dep_row_map <- dep_row_elev
+  arr_row_map <- arr_row_elev
 
   xlims <- c(min(dep_row_map$.lon, arr_row_map$.lon) - buffer_deg,
              max(dep_row_map$.lon, arr_row_map$.lon) + buffer_deg)
   ylims <- c(min(dep_row_map$.lat, arr_row_map$.lat) - buffer_deg,
              max(dep_row_map$.lat, arr_row_map$.lat) + buffer_deg)
-
-  # Elevation raster
-  elev_rast <- NULL
-  extent_pts <- tryCatch(
-    sf::st_as_sf(data.frame(lon = c(dep_row_map$.lon, arr_row_map$.lon),
-                            lat = c(dep_row_map$.lat, arr_row_map$.lat)),
-                 coords = c("lon", "lat"), crs = 4326),
-    error = function(e) NULL
-  )
-  if (!is.null(extent_pts)) {
-    elev_rast <- tryCatch(
-      terra::rast(elevatr::get_elev_raster(extent_pts, z = elev_z, expand = 1)),
-      error = function(e) NULL
-    )
-    if (!is.null(elev_rast))
-      terra::values(elev_rast)[terra::values(elev_rast) < 0] <- 0
-  }
-
-  # ── Ground elevation at each night-window fix ───────────────────────────────
-  # Interpolated (bilinear) from the same raster used for the map background.
-  # Converted to an ISA-equivalent pressure so it can be drawn on the
-  # pressure-axis panels, and used to exclude wind levels that sit below the
-  # terrain surface from every downstream comparison/selection.
-  .alt_to_p_isa <- function(alt_m) 1013.25 * (1 - pmax(alt_m, 0) / 44330)^5.2558
-
-  night_df$ground_elev_m <- rep(NA_real_, nrow(night_df))
-  if (!is.null(elev_rast)) {
-    night_df$ground_elev_m <- tryCatch({
-      ex <- terra::extract(elev_rast, cbind(night_df$.lon, night_df$.lat),
-                           method = "bilinear")
-      pmax(as.numeric(ex[[ncol(ex)]]), 0)
-    }, error = function(e) rep(NA_real_, nrow(night_df)))
-  }
-  night_df$ground_pressure_hPa <- .alt_to_p_isa(night_df$ground_elev_m)
 
   # Elevation profile along flight path
   elev_profile <- NULL
@@ -624,20 +680,6 @@ scan_night_wind_profile <- function(
     # Full individual track — thin grey context
     geom_path(data = df_i, aes(.lon, .lat),
               col = "grey60", linewidth = 0.35, alpha = 0.5) +
-    # 100 m wind vectors (cyan, black outline for contrast against any
-    # elevation colour underneath)
-    { if (!is.null(wind_arrows))
-        geom_segment(data = wind_arrows,
-                     aes(x = .lon, y = .lat, xend = lon_end, yend = lat_end),
-                     col = "black", linewidth = 1.1, alpha = 0.9,
-                     arrow = arrow(length = unit(0.09, "cm"), type = "closed"),
-                     inherit.aes = FALSE) } +
-    { if (!is.null(wind_arrows))
-        geom_segment(data = wind_arrows,
-                     aes(x = .lon, y = .lat, xend = lon_end, yend = lat_end),
-                     col = "#00E5FF", linewidth = 0.5, alpha = 0.95,
-                     arrow = arrow(length = unit(0.07, "cm"), type = "closed"),
-                     inherit.aes = FALSE) } +
     # Flight segment
     geom_segment(
       aes(x = dep_row_map$.lon, y = dep_row_map$.lat,
@@ -651,15 +693,44 @@ scan_night_wind_profile <- function(
       size = 1.2, alpha = 0.8
     ) +
     scale_color_viridis_c(option = "plasma", guide = "none") +
-    # Departure (green) and arrival (orange)
-    geom_point(data = dep_row_map, aes(.lon, .lat),
-               col = "#4DAF4A", size = 4, shape = 16) +
-    geom_point(data = arr_row_map, aes(.lon, .lat),
-               col = "#FF7F00", size = 4, shape = 17) +
+    # Departure (green) and arrival (orange) — shape (not colour) carries the
+    # legend so it doesn't collide with the continuous timestamp colour scale
+    # above; actual point colours are fixed via guide override.aes below.
+    geom_point(data = dep_row_map, aes(.lon, .lat, shape = "Departure"),
+               col = "#4DAF4A", size = 4) +
+    geom_point(data = arr_row_map, aes(.lon, .lat, shape = "Arrival"),
+               col = "#FF7F00", size = 4) +
+    # 100 m wind vectors — drawn last (on top) so they stay visible where they
+    # cross the departure/arrival markers; black outline for contrast against
+    # any elevation colour underneath, cyan fill carries the legend.
+    { if (!is.null(wind_arrows))
+        geom_segment(data = wind_arrows,
+                     aes(x = .lon, y = .lat, xend = lon_end, yend = lat_end),
+                     col = "black", linewidth = 1.1, alpha = 0.9,
+                     arrow = arrow(length = unit(0.09, "cm"), type = "closed"),
+                     inherit.aes = FALSE) } +
+    { if (!is.null(wind_arrows))
+        geom_segment(data = wind_arrows,
+                     aes(x = .lon, y = .lat, xend = lon_end, yend = lat_end,
+                         linetype = "Wind (100 m)"),
+                     col = "#00E5FF", linewidth = 0.5, alpha = 0.95,
+                     arrow = arrow(length = unit(0.07, "cm"), type = "closed")) } +
+    scale_shape_manual(name = NULL, values = c(Departure = 16, Arrival = 17)) +
+    scale_linetype_manual(name = NULL, values = c(`Wind (100 m)` = "solid")) +
+    guides(
+      # override.aes is matched positionally to the legend's key order, which
+      # ggplot sorts alphabetically ("Arrival" before "Departure") regardless
+      # of the order the layers were added in above.
+      shape    = guide_legend(order = 1, override.aes = list(
+                   colour = c("#FF7F00", "#4DAF4A"), size = 4)),
+      linetype = guide_legend(order = 2, override.aes = list(
+                   colour = "#00E5FF", linewidth = 0.8))
+    ) +
     coord_sf(xlim = xlims, ylim = ylims, expand = FALSE) +
     labs(title = title_str, x = "Longitude", y = "Latitude") +
     .pt(9) +
-    theme(plot.title = element_text(size = 7.5, face = "bold"))
+    theme(plot.title = element_text(size = 7.5, face = "bold"),
+          legend.key.size = unit(0.35, "cm"))
 
   # ─ Panel 2: Wind-support heatmap ───────────────────────────────────────────
   p_heatmap <- NULL
@@ -672,12 +743,15 @@ scan_night_wind_profile <- function(
     p_heatmap <- ggplot(wind_long,
                         aes(timestamp, pressure_hPa, fill = .data[[fill_var]])) +
       geom_tile(height = tile_h) +
+      # na.value uses a light grey, distinct from the darker grey of the
+      # ground/terrain polygon below — otherwise a missing-data tile and solid
+      # ground read as the same colour.
       { if (has_ws)
           scale_fill_gradient2(low  = "#2166AC", mid = "white", high = "#D73027",
-                               midpoint = 0, na.value = "grey50",
+                               midpoint = 0, na.value = "grey85",
                                name = fill_label)
         else
-          scale_fill_viridis_c(na.value = "grey50", option = "viridis",
+          scale_fill_viridis_c(na.value = "grey85", option = "viridis",
                                name = fill_label) } +
       scale_y_reverse(
         breaks = press_breaks,
@@ -692,23 +766,17 @@ scan_night_wind_profile <- function(
           geom_ribbon(data = night_df %>% filter(!is.na(ground_pressure_hPa)),
                       aes(x = timestamp, ymin = ground_pressure_hPa,
                           ymax = max(press_breaks, na.rm = TRUE) + 20),
-                      fill = "#5C4033", alpha = 0.55, inherit.aes = FALSE) } +
+                      fill = "grey50", alpha = 0.55, inherit.aes = FALSE) } +
       { if (any(!is.na(night_df$ground_pressure_hPa)))
           geom_path(data = night_df %>% filter(!is.na(ground_pressure_hPa)),
                     aes(timestamp, ground_pressure_hPa),
-                    col = "#3E2723", linewidth = 1, inherit.aes = FALSE) } +
-      # Animal's flight pressure — black outline + white fill line so it
-      # stays visible over both the white midpoint of the fill scale and the
-      # ground-shading colour.
+                    col = "grey30", linewidth = 1, inherit.aes = FALSE) } +
+      # Animal's flight pressure — solid black; a white core (as used
+      # previously) sits on the fill scale's white midpoint and disappears.
       { if (!is.null(pressure_col) && .has(night_df, pressure_col))
-          list(
-            geom_path(data = night_df %>% filter(!is.na(.data[[pressure_col]])),
-                      aes(timestamp, .data[[pressure_col]]),
-                      col = "black", linewidth = 2.6, inherit.aes = FALSE),
-            geom_path(data = night_df %>% filter(!is.na(.data[[pressure_col]])),
-                      aes(timestamp, .data[[pressure_col]]),
-                      col = "white", linewidth = 1.4, inherit.aes = FALSE)
-          ) } +
+          geom_path(data = night_df %>% filter(!is.na(.data[[pressure_col]])),
+                    aes(timestamp, .data[[pressure_col]]),
+                    col = "black", linewidth = 1.4, inherit.aes = FALSE) } +
       # Best wind level (ground-aware), gold dashed with a black outline
       { if (.has(night_df, "best_wind_level_ag"))
           list(
@@ -726,8 +794,8 @@ scan_night_wind_profile <- function(
       geom_vline(xintercept = as.numeric(t_arr), col = "#FF7F00",
                  linetype = "dashed", linewidth = 0.8) +
       labs(x = "Time (UTC)", y = "Pressure (hPa)\n[approx. altitude]",
-           subtitle = if (has_ws) "White path = animal flight pressure; gold dashed = best wind level (above ground); brown = ground"
-                      else "White path = animal flight pressure (wind speed shown — heading unavailable)") +
+           subtitle = if (has_ws) "Black path = animal flight pressure; gold dashed = best wind level (above ground); grey = ground"
+                      else "Black path = animal flight pressure (wind speed shown — heading unavailable)") +
       .pt(9) +
       theme(legend.position = "right",
             plot.subtitle = element_text(size = 6, color = "grey60"))
@@ -798,10 +866,10 @@ scan_night_wind_profile <- function(
       geom_ribbon(data = night_df %>% filter(!is.na(ground_pressure_hPa)),
                   aes(x = timestamp, ymin = ground_pressure_hPa,
                       ymax = max(pressure_levels, na.rm = TRUE) + 20),
-                  fill = "#5C4033", alpha = 0.4, inherit.aes = FALSE) +
+                  fill = "grey50", alpha = 0.4, inherit.aes = FALSE) +
       geom_path(data = night_df %>% filter(!is.na(ground_pressure_hPa)),
                 aes(timestamp, ground_pressure_hPa),
-                col = "#3E2723", linewidth = 1, inherit.aes = FALSE)
+                col = "grey30", linewidth = 1, inherit.aes = FALSE)
   }
 
   if (!is.null(pressure_col) && .has(night_df, pressure_col)) {
@@ -877,7 +945,8 @@ scan_night_wind_profile <- function(
     geom_vline(xintercept = as.numeric(t_arr), col = "#FF7F00",
                linetype = "dashed", linewidth = 0.7)
 
-  has_airspeed <- FALSE
+  has_airspeed  <- FALSE
+  airspeed_note <- NULL
 
   if (.has(night_df, "airspeed_flight")) {
     p_airspeed <- p_airspeed +
@@ -886,6 +955,17 @@ scan_night_wind_profile <- function(
       geom_point(data = night_df %>% filter(!is.na(airspeed_flight)),
                  aes(timestamp, airspeed_flight), col = "#D73027", size = 1.2)
     has_airspeed <- TRUE
+  } else if (.has(night_df, "airspeed_flight_bearing")) {
+    # annotate_era5()'s airspeed_flight was unavailable (NA/clamped) — fall
+    # back to the ground-track-bearing estimate, which stays reliable even
+    # when only a sparse subset of the track reached annotate_era5().
+    p_airspeed <- p_airspeed +
+      geom_path(data  = night_df %>% filter(!is.na(airspeed_flight_bearing)),
+                aes(timestamp, airspeed_flight_bearing), col = "#D73027", linewidth = 1) +
+      geom_point(data = night_df %>% filter(!is.na(airspeed_flight_bearing)),
+                 aes(timestamp, airspeed_flight_bearing), col = "#D73027", size = 1.2)
+    has_airspeed  <- TRUE
+    airspeed_note <- "Estimated from ground-track bearing (flight-level airspeed unavailable)"
   } else {
     # Fall back to airspeed at the most common matched level
     as_cols <- paste0("airspeed_", pressure_levels)
@@ -910,8 +990,9 @@ scan_night_wind_profile <- function(
   p_airspeed <- p_airspeed +
     scale_x_datetime(expand = expansion(0)) +
     labs(x = "Time (UTC)", y = "Estimated airspeed (m/s)",
-         subtitle = if (has_airspeed) NULL else "No airspeed data (heading required)") +
-    .pt(9)
+         subtitle = if (!has_airspeed) "No airspeed data (heading required)" else airspeed_note) +
+    .pt(9) +
+    theme(plot.subtitle = element_text(size = 6, color = "grey60"))
 
   # ─ Lagerveld airspeed-altitude profile ────────────────────────────────────
   p_lagerveld   <- NULL
@@ -1060,7 +1141,8 @@ scan_night_wind_profile <- function(
                  "Black = observed (tag pressure)  |  ",
                  "Grey ribbon = feasible altitude range  |  Brown = terrain\n",
                  "Purple ring = at Vmp (", round(vmp_sl_ms, 1),
-                 " m/s)  |  Teal ring = at Vmr (", round(vmr_sl_ms, 1), " m/s), sea-level-adjusted"
+                 " m/s, min-power speed)  |  Teal ring = at Vmr (", round(vmr_sl_ms, 1),
+                 " m/s, max-range speed), sea-level-adjusted"
                )) +
           .pt(9) +
           theme(legend.position = "right",
