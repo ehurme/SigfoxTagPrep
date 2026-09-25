@@ -34,6 +34,15 @@ plot_migration_season <- function(
     levels = grp_levels
   )
 
+  # sample size per group, shown directly in the axis label rather than a
+  # separate caption/legend, so an unexpectedly sparse group (e.g. a season
+  # x migration-status combo with very few nights) is visible at a glance
+  n_by_grp <- table(data$.grp)
+  x_labels <- setNames(
+    paste0(sub("\\.", "\n", names(n_by_grp)), "\n(n=", as.integer(n_by_grp), ")"),
+    names(n_by_grp)
+  )
+
   mig_level <- mig_labels[2]
 
   within_season <- lapply(seasons, function(s) {
@@ -66,7 +75,7 @@ plot_migration_season <- function(
       hide.ns = FALSE,
       tip.length = 0.01
     ) +
-    scale_x_discrete(labels = function(x) sub("\\.", "\n", x)) +
+    scale_x_discrete(labels = x_labels) +
     xlab(NULL) +
     ylab(ylab_lab) +
     theme_classic() +
