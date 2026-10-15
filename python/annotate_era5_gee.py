@@ -123,7 +123,7 @@ def annotate_era5_gee(
     # Valid rows: non-missing coordinates
     valid = df[lon_col].notna() & df[lat_col].notna()
     if verbose and not valid.all():
-        print(f"  {(~valid).sum()} rows with missing coordinates — will be NaN")
+        print(f"  {(~valid).sum()} rows with missing coordinates - will be NaN")
 
     # Initialise output columns
     for col in ERA5_BANDS.values():
@@ -190,7 +190,7 @@ def annotate_era5_gee(
     df = df.drop(columns=["_hour"])
     if verbose:
         n_filled = df["era5_u10"].notna().sum()
-        print(f"Extraction complete — {n_filled}/{valid.sum()} fixes have era5_u10 values")
+        print(f"Extraction complete - {n_filled}/{valid.sum()} fixes have era5_u10 values")
 
     return df
 
@@ -216,7 +216,7 @@ def main():
     try:
         ee.Initialize(**init_kwargs)
     except Exception:
-        print("GEE credentials not found — running ee.Authenticate() ...")
+        print("GEE credentials not found - running ee.Authenticate() ...")
         ee.Authenticate()
         ee.Initialize(**init_kwargs)
 
@@ -233,7 +233,7 @@ def main():
     )
 
     df_out.to_csv(args.output, index=False)
-    print(f"Saved {len(df_out)} rows → {args.output}")
+    print(f"Saved {len(df_out)} rows -> {args.output}")
 
 
 if __name__ == "__main__":

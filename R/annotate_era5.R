@@ -232,6 +232,34 @@ annotate_era5 <- function(
 }
 
 
+# ── GRIB reads must force the classic (non-multidimensional) driver ─────────
+# terra::rast() on these monthly GRIB files silently uses GDAL's multidim API
+# by default on this terra/GDAL combo (terra 1.9.34 + GDAL 3.12.1), which (a)
+# makes terra::time() return NA for every band, and (b) reorders/groups bands
+# by variable name (all T bands, then all U, then all V, ...) instead of the
+# file's real interleaved-per-timestep layout that gdalinfo/terra::describe()
+# still reports — two GDAL access paths silently disagreeing on band order
+# and identity for the same file. `rast(file, md = FALSE)` forces the classic
+# single-array GRIB reader, which restores both a working time() and the
+# interleaved layout every extraction loop below assumes. Pass md = FALSE to
+# every rast() call in this file that opens one of these monthly GRIB files.
+# Year-months (as "YYYY_MM", matching the monthly GRIB filename convention)
+# needed to cover `timestamps`, padded by `pad_months` on each side so a fix
+# near a month boundary can still match the nearest step in the adjacent
+# file. Dependency-free integer month arithmetic (no lubridate %m+% infix)
+# so it works regardless of what's attached in the caller's environment.
+.era5_needed_year_months <- function(timestamps, pad_months = 1) {
+  ts  <- as.POSIXct(timestamps)
+  y   <- as.integer(format(ts, "%Y"))
+  m0  <- as.integer(format(ts, "%m")) - 1L   # 0-based month
+  idx <- unique(y * 12L + m0)
+  idx_pad <- unique(unlist(lapply(-pad_months:pad_months, function(k) idx + k)))
+  y_out <- idx_pad %/% 12L
+  m_out <- idx_pad %% 12L + 1L
+  sprintf("%04d_%02d", y_out, m_out)
+}
+
+
 # Haversine bearing (degrees, 0–360) from (lon1, lat1) to (lon2, lat2).
 # Returns NA wherever either endpoint is missing.
 .era5_bearing <- function(lon1, lat1, lon2, lat2) {
@@ -278,11 +306,23 @@ annotate_era5 <- function(
   grib_files <- gsub("\\\\", "/", grib_files)
   coords_xy  <- coords_mat[, 1:2, drop = FALSE]
 
+  # ── Restrict to the year-months actually needed ──────────────────────────
+  # Each monthly file can hold thousands of hourly bands (~20s to open per
+  # file over a network share), so scanning all of them when only a handful
+  # of months are needed is the dominant cost for this function — filter
+  # before the metadata scan below, not after.
+  n_total    <- length(grib_files)
+  needed_yms <- .era5_needed_year_months(timestamps)
+  keep       <- Reduce(`|`, lapply(needed_yms, function(ym)
+    grepl(paste0("_", ym, "\\.grib$"), grib_files)))
+  grib_files <- grib_files[keep]
+
   # ── Step 1: metadata scan — one open per file, keep only timestamps ─────────
-  if (verbose) message("  Scanning ", length(grib_files), " single-level file(s) ...")
+  if (verbose) message("  Scanning ", length(grib_files), "/", n_total,
+                       " single-level file(s) matching needed months ...")
   catalog <- vector("list", length(grib_files))
   for (fi in seq_along(grib_files)) {
-    r_tmp <- tryCatch(rast(grib_files[fi]), error = function(e) NULL)
+    r_tmp <- tryCatch(rast(grib_files[fi], md = FALSE), error = function(e) NULL)
     if (is.null(r_tmp)) next
     rt <- time(r_tmp)
     rm(r_tmp); gc(verbose = FALSE)
@@ -322,7 +362,7 @@ annotate_era5 <- function(
     if (!any(obs_mask)) next
 
     cat_entry <- catalog[[fi]]
-    r <- tryCatch(rast(cat_entry$file), error = function(e) {
+    r <- tryCatch(rast(cat_entry$file, md = FALSE), error = function(e) {
       if (verbose) message("    [skip] Could not load: ", basename(cat_entry$file))
       NULL
     })
@@ -378,20 +418,29 @@ annotate_era5 <- function(
 
   if (verbose) message("  Pressure levels: ", paste(pressure_levels, collapse = ", "), " hPa")
 
+  needed_yms <- .era5_needed_year_months(timestamps)
+
   for (level in pressure_levels) {
     pattern     <- paste0("era5_wind_", level, "hPa_.*\\.grib$")
     level_files <- gsub("\\\\", "/",
                         sort(list.files(pressure_dir, pattern, full.names = TRUE)))
+    n_total_lvl <- length(level_files)
+
+    # Restrict to needed year-months (see .era5_extract_single() for why).
+    keep <- Reduce(`|`, lapply(needed_yms, function(ym)
+      grepl(paste0("_", ym, "\\.grib$"), level_files)))
+    level_files <- level_files[keep]
 
     if (length(level_files) == 0) {
-      if (verbose) message("    [skip] No files for ", level, " hPa")
+      if (verbose) message("    [skip] No files for ", level, " hPa matching needed months (",
+                           n_total_lvl, " total files at this level)")
       next
     }
 
     # ── Metadata scan for this level ───────────────────────────────────────────
     catalog <- vector("list", length(level_files))
     for (fi in seq_along(level_files)) {
-      r_tmp <- tryCatch(rast(level_files[fi]), error = function(e) NULL)
+      r_tmp <- tryCatch(rast(level_files[fi], md = FALSE), error = function(e) NULL)
       if (is.null(r_tmp)) next
       rt  <- time(r_tmp)
       lnm <- names(r_tmp)
@@ -446,7 +495,7 @@ annotate_era5 <- function(
       if (!any(obs_mask)) next
 
       cat_entry <- catalog[[fi]]
-      r <- tryCatch(rast(cat_entry$file), error = function(e) {
+      r <- tryCatch(rast(cat_entry$file, md = FALSE), error = function(e) {
         if (verbose) message("    [skip] Could not load: ", basename(cat_entry$file))
         NULL
       })
@@ -972,7 +1021,7 @@ annotate_era5_night_avg <- function(
         next
       }
 
-      r  <- terra::rast(f)
+      r  <- terra::rast(f, md = FALSE)
       rt <- as.POSIXct(terra::time(r), tz = tz)
       if (is.null(rt) || length(rt) == 0) {
         if (verbose) message("  [skip] ", ym, " has no time vector.")
@@ -1211,7 +1260,7 @@ annotate_era5_sunset <- function(
         next
       }
 
-      r  <- terra::rast(f)
+      r  <- terra::rast(f, md = FALSE)
       rt <- as.POSIXct(terra::time(r), tz = tz)
       if (is.null(rt) || length(rt) == 0) {
         if (verbose) message("  [skip] ", ym_i, " has no time vector.")

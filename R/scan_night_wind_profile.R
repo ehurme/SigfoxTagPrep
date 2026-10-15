@@ -4,14 +4,29 @@
 #
 # Workflow:
 #   1. Run annotate_era5() on your move2/sf track data to add wind columns at
-#      all pressure levels plus flight-level matching.
+#      all pressure levels plus flight-level matching. Works on GPS fixes
+#      (via height_raw/height_above_ellipsoid + ERA5 MSLP), Sigfox/NanoFox tag
+#      pressure, or a stack of both (mt_stack()) — annotate_era5() picks
+#      per-row priority tag-pressure > GPS-altitude automatically.
 #   2. Call find_complete_nights() to get a table of nights that have both
-#      sufficient displacement and ERA5 pressure coverage.
-#   3. Call scan_night_wind_profile() for each qualifying night to produce a
-#      multi-panel diagnostic PNG.
+#      sufficient displacement and ERA5 pressure coverage. For species with
+#      discrete migratory nights (roost-to-roost), the default
+#      min_displacement_km = 100 filters to real migratory bouts. For species
+#      that fly continuously with no roost return (e.g. common swift, Apus
+#      apus, airborne up to ~10 months), pass min_displacement_km = 0 to keep
+#      every well-covered calendar-day window instead.
+#   3. Call scan_night_wind_profile() for each qualifying night/window to
+#      produce a multi-panel diagnostic PNG.
+#   4. For continuous flyers, also call summarize_wind_altitude() on the full
+#      annotated dataset to see the altitude/wind relationship, diel pattern,
+#      and full-period time series in one go, rather than night-by-night.
 #
 # Designed primarily for 2026 finescale NanoFox data (barometric_pressure =
-# instantaneous pressure every ~36 min).  The pressure-sensor logic mirrors
+# instantaneous pressure every ~36 min), but pressure_col auto-detection
+# falls back through min_3h_pressure / tinyfox_pressure_min_last_24h /
+# flight_pressure_hPa (annotate_era5()'s universal altitude-as-pressure
+# column) so GPS-only individuals with no tag pressure sensor still get a
+# usable flight-altitude trace. The pressure-sensor logic mirrors
 # scan_migration_nights.R: finescale NanoFox is detected when tag_firmware
 # contains "finescale" or barometric_pressure is present and not aggregated.
 #
@@ -80,8 +95,13 @@ find_complete_nights <- function(
 
   # ── Auto-detect tag pressure column ───────────────────────────────────────
   if (is.null(pressure_col)) {
+    # flight_pressure_hPa is annotate_era5()'s universal altitude-as-pressure
+    # column (tag pressure where available, else GPS altitude + MSLP) — kept
+    # last so a real tag-pressure sensor is still preferred when present, but
+    # GPS-only individuals (no barometric_pressure/tinyfox_* column at all,
+    # e.g. raw Movebank GPS studies) still get a usable pressure trace.
     candidates <- c("barometric_pressure", "min_3h_pressure",
-                    "tinyfox_pressure_min_last_24h")
+                    "tinyfox_pressure_min_last_24h", "flight_pressure_hPa")
     pressure_col <- candidates[candidates %in% names(data)][1]
     if (!is.na(pressure_col) && verbose)
       message("find_complete_nights: using pressure column '", pressure_col, "'")
@@ -404,8 +424,11 @@ scan_night_wind_profile <- function(
 
   # ── Auto-detect pressure column ────────────────────────────────────────────
   if (is.null(pressure_col)) {
+    # See find_complete_nights() above for why flight_pressure_hPa is the
+    # last-resort fallback (covers GPS-only individuals with no tag pressure
+    # sensor column at all).
     cands <- c("barometric_pressure", "min_3h_pressure",
-               "tinyfox_pressure_min_last_24h")
+               "tinyfox_pressure_min_last_24h", "flight_pressure_hPa")
     pressure_col <- cands[cands %in% names(df_i)][1]
     if (is.na(pressure_col)) pressure_col <- NULL
     else if (verbose) message("Using pressure column: ", pressure_col)
@@ -1202,6 +1225,246 @@ scan_night_wind_profile <- function(
   }
 
   invisible(p_all)
+}
+
+
+# ── summarize_wind_altitude() ──────────────────────────────────────────────────
+#
+#' Altitude–wind relationship across a full annotated track (any species)
+#'
+#' Unlike \code{\link{scan_night_wind_profile}} (one diagnostic figure per
+#' discrete migratory night with clear departure/arrival roosts),
+#' \code{summarize_wind_altitude} summarises the altitude/wind relationship
+#' across the \emph{entire} annotated dataset — designed for species that fly
+#' continuously over long periods (e.g. common swift, \emph{Apus apus},
+#' airborne for up to ~10 months) where there is no roost-to-roost "night" to
+#' isolate. Produces three panels:
+#' \enumerate{
+#'   \item \strong{Altitude vs. wind support} — scatter with a smoothed trend,
+#'     one colour per individual.
+#'   \item \strong{Diel pattern} — mean (\eqn{\pm}SE) altitude and wind
+#'     support binned by \emph{local solar hour} (UTC hour corrected by
+#'     longitude/15, so it stays meaningful across a track spanning many time
+#'     zones), pooled across the full sampling period.
+#'   \item \strong{Full-period time series} — altitude over calendar time,
+#'     one facet per individual, coloured by wind support, so a multi-month
+#'     deployment can be scanned for wind-driven altitude shifts at a glance.
+#' }
+#'
+#' Altitude is derived uniformly from \code{flight_pressure_hPa} (the
+#' altitude-as-pressure column \code{annotate_era5()} computes for every row
+#' regardless of source — real tag pressure for Sigfox/NanoFox fixes, GPS
+#' altitude + ERA5 MSLP for GPS fixes), so GPS and Sigfox tracks stacked into
+#' one object (e.g. \code{mt_stack(roth, olpe, gps)}) are summarised on the
+#' same footing without per-source branching.
+#'
+#' @param data           sf/move2 object output from \code{annotate_era5()}
+#'   with \code{compute_wind_support = TRUE}.
+#' @param pressure_col   Column to derive altitude from. \code{NULL} =
+#'   auto-detect (\code{barometric_pressure}, \code{min_3h_pressure},
+#'   \code{tinyfox_pressure_min_last_24h}, \code{flight_pressure_hPa}).
+#' @param wind_support_col Column with flight-level wind support (m/s;
+#'   positive = tailwind). Default \code{"wind_support_flight"}.
+#' @param individual_col Column identifying individuals.
+#'   Default \code{"individual_local_identifier"}.
+#' @param hour_bin_width Width (hours) of the local-solar-hour bins for the
+#'   diel panel. Default 2.
+#' @param out_path   Directory to save a combined PNG, or \code{NULL} to
+#'   return the plots only.
+#' @param theme_dark Logical; dark background. Default \code{FALSE}.
+#' @param verbose    Logical. Default \code{TRUE}.
+#'
+#' @return A list with \code{data} (per-fix data frame with derived
+#'   \code{altitude_m}, \code{local_solar_hour} columns), \code{diel_summary}
+#'   (binned means), and \code{plots} (list of the three ggplot objects plus
+#'   \code{combined}).
+#'
+#' @export
+summarize_wind_altitude <- function(
+    data,
+    pressure_col      = NULL,
+    wind_support_col  = "wind_support_flight",
+    individual_col    = "individual_local_identifier",
+    hour_bin_width    = 2,
+    out_path          = NULL,
+    theme_dark        = FALSE,
+    verbose           = TRUE
+) {
+  suppressPackageStartupMessages({
+    library(dplyr)
+    library(sf)
+    library(ggplot2)
+    library(ggpubr)
+  })
+
+  for (.src in c("R/pressure_to_altitude_m.R",
+                 "../SigfoxTagPrep/R/pressure_to_altitude_m.R")) {
+    if (!exists("pressure_to_altitude_m", mode = "function") && file.exists(.src))
+      source(.src)
+  }
+
+  stopifnot(inherits(data, "sf"))
+  stopifnot(individual_col %in% names(data))
+  if (!(wind_support_col %in% names(data)))
+    stop("summarize_wind_altitude: '", wind_support_col, "' not found. ",
+         "Run annotate_era5(..., compute_wind_support = TRUE) first.")
+
+  # ── Auto-detect pressure column (same priority as scan_night_wind_profile) ──
+  if (is.null(pressure_col)) {
+    cands <- c("barometric_pressure", "min_3h_pressure",
+               "tinyfox_pressure_min_last_24h", "flight_pressure_hPa")
+    pressure_col <- cands[cands %in% names(data)][1]
+    if (is.na(pressure_col))
+      stop("summarize_wind_altitude: no pressure/altitude column found. ",
+           "Run annotate_era5() first.")
+    if (verbose) message("Using pressure column: ", pressure_col)
+  }
+
+  data <- data[!sf::st_is_empty(data), ]
+  coords <- sf::st_coordinates(data)
+
+  alt_fn <- if (exists("pressure_to_altitude_m", mode = "function"))
+    pressure_to_altitude_m
+  else
+    function(p) 44330 * (1 - (p / 1013.25)^0.1903)
+
+  df <- data %>%
+    sf::st_drop_geometry() %>%
+    mutate(
+      .individual       = as.character(.data[[individual_col]]),
+      .lon              = coords[, "X"],
+      .lat              = coords[, "Y"],
+      altitude_m        = alt_fn(as.numeric(.data[[pressure_col]])),
+      wind_support      = as.numeric(.data[[wind_support_col]]),
+      .hour_utc         = lubridate::hour(timestamp) +
+                           lubridate::minute(timestamp) / 60 +
+                           lubridate::second(timestamp) / 3600,
+      # Local solar hour: UTC hour shifted by longitude/15 (15 deg per hour),
+      # wrapped to [0, 24) — keeps the diel bin meaningful across a track
+      # spanning many time zones (e.g. a swift's Africa-to-Europe migration),
+      # unlike a fixed-timezone hour-of-day.
+      local_solar_hour  = (.hour_utc + .lon / 15) %% 24
+    ) %>%
+    filter(!is.na(altitude_m), !is.na(wind_support))
+
+  if (nrow(df) == 0) {
+    stop("summarize_wind_altitude: no rows with both altitude and wind support after filtering.")
+  }
+
+  if (verbose)
+    message("summarize_wind_altitude: ", nrow(df), " fixes across ",
+            length(unique(df$.individual)), " individuals.")
+
+  .pt3 <- function(base_size = 9) {
+    bg <- if (theme_dark) "black" else "white"
+    fg <- if (theme_dark) "white" else "black"
+    theme_minimal(base_size = base_size) +
+      theme(
+        panel.background = element_rect(fill = bg, color = NA),
+        plot.background  = element_rect(fill = bg, color = NA),
+        text             = element_text(color = fg),
+        axis.text        = element_text(color = fg),
+        axis.title       = element_text(color = fg),
+        legend.background = element_rect(fill = bg, color = NA),
+        legend.text       = element_text(color = fg),
+        legend.title      = element_text(color = fg),
+        panel.grid        = element_line(
+          color = if (theme_dark) "grey25" else "grey90")
+      )
+  }
+
+  # ─ Panel 1: Altitude vs wind support ───────────────────────────────────────
+  p_scatter <- ggplot(df, aes(wind_support, altitude_m)) +
+    geom_point(aes(col = .individual), size = 0.8, alpha = 0.35) +
+    geom_smooth(method = "gam", formula = y ~ s(x, bs = "cs"),
+                col = if (theme_dark) "white" else "black", linewidth = 1) +
+    geom_vline(xintercept = 0, col = "grey50", linetype = "dotted") +
+    labs(x = "Wind support at flight level (m/s)", y = "Altitude (m)",
+         title = "Altitude vs. wind support",
+         subtitle = paste0("n = ", nrow(df), " fixes, ",
+                            length(unique(df$.individual)), " individuals")) +
+    guides(col = "none") +
+    .pt3()
+
+  # ─ Panel 2: Diel pattern (local solar hour) ────────────────────────────────
+  brks <- seq(0, 24, by = hour_bin_width)
+  df$.hour_bin <- cut(df$local_solar_hour, breaks = brks, include.lowest = TRUE,
+                       right = FALSE)
+  bin_mid <- brks[-length(brks)] + hour_bin_width / 2
+  names(bin_mid) <- levels(df$.hour_bin)
+
+  diel_summary <- df %>%
+    filter(!is.na(.hour_bin)) %>%
+    group_by(.hour_bin) %>%
+    summarise(
+      hour_mid       = bin_mid[as.character(.hour_bin[1])],
+      n              = n(),
+      mean_altitude  = mean(altitude_m, na.rm = TRUE),
+      se_altitude    = sd(altitude_m, na.rm = TRUE) / sqrt(n),
+      mean_wind      = mean(wind_support, na.rm = TRUE),
+      se_wind        = sd(wind_support, na.rm = TRUE) / sqrt(n),
+      .groups = "drop"
+    ) %>%
+    arrange(hour_mid)
+
+  diel_long <- bind_rows(
+    diel_summary %>% transmute(hour_mid, n, variable = "Altitude (m)",
+                                mean = mean_altitude, se = se_altitude),
+    diel_summary %>% transmute(hour_mid, n, variable = "Wind support (m/s)",
+                                mean = mean_wind, se = se_wind)
+  )
+
+  p_diel <- ggplot(diel_long, aes(hour_mid, mean)) +
+    { if (any(diel_long$variable == "Wind support (m/s)"))
+        geom_hline(data = data.frame(variable = "Wind support (m/s)"),
+                   aes(yintercept = 0), col = "grey50", linetype = "dotted") } +
+    geom_ribbon(aes(ymin = mean - se, ymax = mean + se), alpha = 0.25) +
+    geom_path(linewidth = 1) +
+    geom_point(size = 1.5) +
+    facet_wrap(~variable, scales = "free_y", ncol = 1) +
+    scale_x_continuous(breaks = seq(0, 24, by = 6), limits = c(0, 24)) +
+    labs(x = "Local solar hour", y = NULL,
+         title = "Diel pattern (full sampling period, all individuals pooled)",
+         subtitle = paste0(hour_bin_width, "h bins, mean ± SE")) +
+    .pt3()
+
+  # ─ Panel 3: Full-period time series, faceted by individual ────────────────
+  p_timeseries <- ggplot(df, aes(timestamp, altitude_m, col = wind_support)) +
+    geom_point(size = 0.8, alpha = 0.7) +
+    facet_wrap(~.individual, scales = "free_x") +
+    scale_color_gradient2(low = "#2166AC", mid = "white", high = "#D73027",
+                          midpoint = 0, name = "Wind\nsupport\n(m/s)") +
+    labs(x = "Date", y = "Altitude (m)",
+         title = "Altitude over the full sampling period",
+         subtitle = "Colour = wind support at flight level; one panel per individual") +
+    .pt3() +
+    theme(legend.position = "right",
+          axis.text.x = element_text(angle = 45, hjust = 1, size = 6))
+
+  p_combined <- ggarrange(
+    ggarrange(p_scatter, p_diel, ncol = 2),
+    p_timeseries,
+    ncol = 1, heights = c(1, 1.3)
+  )
+
+  if (!is.null(out_path)) {
+    if (!dir.exists(out_path)) dir.create(out_path, recursive = TRUE)
+    fname <- file.path(out_path, "wind_altitude_summary.png")
+    ggplot2::ggsave(fname, p_combined, width = 12, height = 10, dpi = 200,
+                    bg = if (theme_dark) "black" else "white")
+    if (verbose) message("Saved: ", basename(fname))
+  }
+
+  list(
+    data         = df,
+    diel_summary = diel_summary,
+    plots        = list(
+      scatter    = p_scatter,
+      diel       = p_diel,
+      timeseries = p_timeseries,
+      combined   = p_combined
+    )
+  )
 }
 
 

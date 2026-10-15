@@ -364,7 +364,7 @@ get_device_sun_windows <- function(dt_full, tz = "UTC") {
       keep = c("sunset", "sunrise"), tz = tz
     ))
     setorder(sun, date)
-    sun[, sunrise_next := shift(sunrise, 1L, type = "lead")]
+    sun[, sunrise_next := data.table::shift(sunrise, 1L, type = "lead")]
     sun <- sun[!is.na(sunrise_next)]
     data.table(device     = device_locs$device[i],
                night_date = sun$date,
@@ -418,7 +418,7 @@ make_diagnostic_plots <- function(
   # ── Segment ID ───────────────────────────────────────────
   add_segment_id <- function(d, time_col = "obs_time", gap_h = gap_hours) {
     setorderv(d, c("device", time_col))
-    d[, lag_t   := shift(get(time_col), 1L), by = device]
+    d[, lag_t   := data.table::shift(get(time_col), 1L), by = device]
     d[, elapsed := as.numeric(difftime(get(time_col), lag_t, units = "hours"))]
     d[, segment := cumsum(is.na(lag_t) | elapsed > gap_h), by = device]
     d[, c("lag_t", "elapsed") := NULL]
@@ -441,7 +441,7 @@ make_diagnostic_plots <- function(
       keep = c("sunset", "sunrise"), tz = tz
     ))
     setorder(sun, date)
-    sun[, sunrise_next := shift(sunrise, 1L, type = "lead")]
+    sun[, sunrise_next := data.table::shift(sunrise, 1L, type = "lead")]
     rects <- sun[!is.na(sunrise_next), .(xmin = sunset, xmax = sunrise_next)]
     rects[, xmin := pmax(xmin, t_min)]
     rects[, xmax := pmin(xmax, t_max)]
@@ -466,8 +466,10 @@ make_diagnostic_plots <- function(
   # label:     used to name list entries, e.g. "raw_vedba_p1", "raw_vedba_p2".
   # extra_theme: optional theme additions (e.g. legend.position = "right").
   make_pages <- function(base_plot, label, extra_theme = NULL) {
-    page_list <- vector("list", n_pages)
-    for (pg in seq_len(n_pages)) {
+    n_devices_local <- dplyr::n_distinct(base_plot$data$device)
+    n_pages_local   <- max(1L, ceiling(n_devices_local / facets_per_page))
+    page_list <- vector("list", n_pages_local)
+    for (pg in seq_len(n_pages_local)) {
       p <- base_plot +
         facet_wrap_paginate(
           ~device,
@@ -479,10 +481,10 @@ make_diagnostic_plots <- function(
       if (!is.null(extra_theme)) p <- p + extra_theme
       page_list[[pg]] <- p
     }
-    names(page_list) <- if (n_pages == 1)
+    names(page_list) <- if (n_pages_local == 1)
       label
     else
-      paste0(label, "_p", seq_len(n_pages))
+      paste0(label, "_p", seq_len(n_pages_local))
     page_list
   }
 
