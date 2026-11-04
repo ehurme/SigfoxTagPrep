@@ -41,10 +41,38 @@ mt_add_message_timediff <- function(x,
     dplyr::ungroup()
 }
 
+# Night that ends at each daily fix, labelled by the date of its evening
+# (noon-to-noon bat day). Night fixes (sun below horizon at the fix) keep the
+# bat day they fall in; daytime fixes take the night before their calendar
+# date. With daily_method = "noon_roost" this is unique per track, so it is
+# the key for joining night-level data (sensor summaries, night weather) to
+# daily rows; calendar as.Date(timestamp) is not, since an afternoon day fix
+# and that evening's night fix can share a date. Fixes without a usable
+# position fall back to the bat day.
+mt_daily_night_date <- function(x, tz = "UTC", day_anchor_hour = 12) {
+  ts <- move2::mt_time(x)
+  bat_day <- as.Date(ts - lubridate::hours(day_anchor_hour), tz = tz)
+  x_ll <- x
+  if (!sf::st_is_longlat(x_ll)) x_ll <- sf::st_transform(x_ll, 4326)
+  xy <- suppressWarnings(sf::st_coordinates(sf::st_geometry(x_ll)))
+  alt <- rep(NA_real_, length(ts))
+  if (nrow(xy) == length(ts)) {
+    alt <- suncalc::getSunlightPosition(
+      data = data.frame(date = ts, lat = xy[, "Y"], lon = xy[, "X"]),
+      keep = "altitude"
+    )$altitude
+  }
+  out <- as.Date(ts, tz = tz) - 1
+  use_bat_day <- is.na(alt) | alt < 0
+  out[use_bat_day] <- bat_day[use_bat_day]
+  out
+}
+
 mt_add_daily_sensor_metrics <- function(b_all,
                                         b_daily,
                                         tz = "UTC",
                                         day_anchor_hour = 12,
+                                        night_key = c("preceding_night", "bat_day"),
                                         tag_type_col = "tag_type",
                                         model_col = "model",
                                         skip_if_model = c("uWasp", "uwasp"),
@@ -91,6 +119,19 @@ mt_add_daily_sensor_metrics <- function(b_all,
   }
 
   get_bat_day <- function(ts) as.Date(ts - lubridate::hours(day_anchor_hour), tz = tz)
+
+  # Which night's metrics a daily fix carries.
+  #   "preceding_night" (default): mt_daily_night_date(), the night that ends
+  #     at the fix (the flight behind its displacement from the previous
+  #     daily fix).
+  #   "bat_day": legacy get_bat_day(timestamp). Daytime fixes after
+  #     day_anchor_hour then carry the FOLLOWING night, misaligned with the
+  #     displacement into that fix.
+  night_key <- match.arg(night_key)
+  get_daily_night <- function(b) {
+    if (night_key == "bat_day") return(get_bat_day(dplyr::pull(b, !!sym(time_col_daily))))
+    mt_daily_night_date(b, tz = tz, day_anchor_hour = day_anchor_hour)
+  }
 
   # tag types present
   tag_present <- character(0)
@@ -338,7 +379,7 @@ mt_add_daily_sensor_metrics <- function(b_all,
       sf::st_drop_geometry() |>
       tibble::as_tibble()
 
-    b_daily_attr$.bat_day <- get_bat_day(b_daily_attr[[time_col_daily]])
+    b_daily_attr$.bat_day <- get_daily_night(b_daily)
 
     # Precompute column flags (same reason as NanoFox: names(.) in mutate/transmute
     # quosures may not resolve reliably across all dplyr versions).
@@ -429,14 +470,15 @@ mt_add_daily_sensor_metrics <- function(b_all,
     tibble::as_tibble()
 
   key$.row_id  <- seq_len(nrow(key))
-  key$.bat_day <- get_bat_day(key[[time_col_daily]])
+  key$.bat_day <- get_daily_night(b_daily)
 
   sensor_daily_uniq <- sensor_daily |>
     dplyr::group_by(.data[[track_col]], .bat_day) |>
     dplyr::summarise(dplyr::across(dplyr::everything(), ~ dplyr::first(.x)), .groups = "drop")
 
-  # many-to-one join: b_daily rows that share the same bat_day (UTC timestamp
-  # before noon maps to previous night) both receive the same nightly metrics.
+  # many-to-one join: b_daily rows keyed to the same night (see
+  # get_daily_night()) both receive that night's metrics; with
+  # daily_method = "noon_roost" each night has at most one daily row.
   joined <- dplyr::left_join(
     key,
     sensor_daily_uniq,

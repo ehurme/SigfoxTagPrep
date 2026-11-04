@@ -2798,6 +2798,14 @@ import_nanofox_movebank <- function(
     if (!"night_day_id" %in% names(x)) {
       stop("[noon_roost] 'night_day_id' not found.")
     }
+    # Location fixes only, as in mt_filter_daily_solar_noon(): sensor rows
+    # (VeDBA, temperature, pressure) carry no position of their own.
+    is_loc <- if ("sensor_type" %in% names(x)) {
+      tolower(as.character(x$sensor_type)) %in% "location"
+    } else {
+      TRUE
+    }
+    x <- x[is_loc & !sf::st_is_empty(sf::st_geometry(x)), ]
     rep_daily <- x %>%
       dplyr::filter(!stringr::str_detect(.data$night_day_id, "_0$")) %>%
       dplyr::mutate(
@@ -2838,7 +2846,11 @@ import_nanofox_movebank <- function(
           units = "secs"
         )))
       ) %>%
-      dplyr::group_by(.data[[grp_col]], .data$period_id) %>%
+      # Group by roost day (noon_date), not calendar day (period_id): a night
+      # spanning midnight (e.g. fixes at 23:43 and 01:15) is one roost day,
+      # the day after that night. Grouping by calendar day gave such a night
+      # two daily rows and so counted it twice downstream.
+      dplyr::group_by(.data[[grp_col]], .data$noon_date) %>%
       dplyr::arrange(
         .data$night_day == "night",
         .data$dist_to_noon,
@@ -2920,9 +2932,18 @@ import_nanofox_movebank <- function(
     # Grouped by deployment_id when available (finest grouping), so gaps don't
     # bleed across deployments for multi-deployment individuals.
     b_daily$date <- as.Date(b_daily$timestamp)
+    # night ending at each daily fix (unique per track under noon_roost);
+    # use this, not `date`, to key night-level data to daily rows
+    if (exists("mt_daily_night_date", mode = "function")) {
+      b_daily$night_date <- .safe_try(
+        mt_daily_night_date(b_daily, tz = tz, day_anchor_hour = 12),
+        "mt_daily_night_date"
+      )
+    }
     grp_vec <- as.character(b_daily[[move2::mt_track_id_column(b_daily)]])
+    # night_date when available: calendar dates can repeat under noon_roost
     b_daily$diff_date <- ave(
-      as.numeric(b_daily$date),
+      as.numeric(if ("night_date" %in% names(b_daily)) b_daily$night_date else b_daily$date),
       grp_vec,
       FUN = function(d) c(NA_real_, diff(d))
     )

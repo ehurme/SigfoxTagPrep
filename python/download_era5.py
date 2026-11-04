@@ -430,10 +430,11 @@ def main():
         help="Re-download files that already exist (default: skip existing)",
     )
     ap.add_argument(
-        "--verify",
-        action="store_true",
-        default=False,
-        help="Open existing files and re-download any that are incomplete",
+        "--no-verify",
+        dest="verify",
+        action="store_false",
+        default=True,
+        help="Skip completeness check on existing files (just skip them, even if partial)",
     )
     ap.add_argument(
         "--retries",

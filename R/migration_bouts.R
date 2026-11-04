@@ -52,9 +52,11 @@ mt_add_migration_bouts <- function(
     stop("mig_col must be logical, numeric, or coercible character/factor.")
   }
 
-  # Build per-day indicator
+  # Build per-day indicator. A Date time_col (e.g. night_date) is used as-is,
+  # so callers can define "day" themselves instead of calendar UTC date.
+  to_day <- function(t) if (inherits(t, "Date")) t else as.Date(with_tz(t, tz = tz))
   df_day <- df %>%
-    mutate(..date = as.Date(with_tz(..t, tz = tz))) %>%
+    mutate(..date = to_day(..t)) %>%
     group_by(..id, ..date) %>%
     summarise(
       ..mig_day = dplyr::case_when(
@@ -108,7 +110,7 @@ mt_add_migration_bouts <- function(
 
   # Join back onto each fix by id + date
   df_fix <- df %>%
-    mutate(..date = as.Date(with_tz(..t, tz = tz))) %>%
+    mutate(..date = to_day(..t)) %>%
     left_join(df_bouts, by = c("..id", "..date"))
 
   # Add columns to move2 object
@@ -152,7 +154,7 @@ mt_add_migration_bout_n <- function(
   bout_n <- df %>%
     group_by(..id) %>%
     summarise(..n_bouts = suppressWarnings(max(..bout_order, na.rm = TRUE)), .groups = "drop") %>%
-    mutate(..n_bouts = ifelse(is.infinite(..n_bouts) | is.na(..n_bouts), 0L, as.integer(..n_bouts)))
+    mutate(..n_bouts = as.integer(if_else(is.finite(..n_bouts), ..n_bouts, 0)))
 
   df <- df %>% left_join(bout_n, by = "..id")
 

@@ -43,6 +43,7 @@ Requirements:
 
 import argparse
 import sys
+import time
 
 import numpy as np
 import pandas as pd
@@ -78,6 +79,26 @@ ERA5_BANDS = {
 
 ERA5_SCALE = 27830   # metres ≈ ERA5 native 0.25° resolution
 
+# cloud_base_height is masked where there is no cloud base (clear sky), and
+# sampleRegions() drops a point entirely when any selected band is masked -
+# which silently lost every band on clear nights. Unmask it with a sentinel
+# so the point is kept, then map the sentinel back to NaN.
+CBH_BAND     = "cloud_base_height"
+CBH_SENTINEL = -9999
+
+
+def get_info_with_retry(obj, max_retries=4, base_delay=2.0):
+    """getInfo() with exponential backoff for transient GEE errors
+    (rate limits, timeouts, dropped connections). Raises the last error
+    once all attempts are used."""
+    for attempt in range(max_retries + 1):
+        try:
+            return obj.getInfo()
+        except Exception:
+            if attempt == max_retries:
+                raise
+            time.sleep(base_delay * 2 ** attempt)
+
 
 # ── Core extraction function ──────────────────────────────────────────────────
 
@@ -87,6 +108,7 @@ def annotate_era5_gee(
     lat_col="latitude",
     time_col="timestamp",
     max_time_gap_hours=3,
+    max_retries=4,
     verbose=True,
 ):
     """
@@ -100,6 +122,7 @@ def annotate_era5_gee(
     lat_col            : column name for latitude
     time_col           : column name for timestamps (any format pd.to_datetime accepts)
     max_time_gap_hours : warn when the nearest ERA5 hour is farther than this
+    max_retries        : retries per timestep on GEE errors (exponential backoff)
     verbose            : print progress to stdout
 
     Returns
@@ -144,6 +167,8 @@ def annotate_era5_gee(
     if verbose:
         print(f"Extracting ERA5: {len(unique_hours)} timestep(s) × {valid.sum()} fix(es)")
 
+    failed = []   # (timestep, n_rows, error) for timesteps that failed every retry
+
     for i, h in enumerate(unique_hours):
         mask = valid & (df["_hour"] == h)
         sub  = df.loc[mask]
@@ -152,6 +177,8 @@ def annotate_era5_gee(
         t_end   = (pd.Timestamp(h) + pd.Timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S")
 
         img = ic.filterDate(t_start, t_end).first()
+        img = img.addBands(img.select(CBH_BAND).unmask(CBH_SENTINEL),
+                           overwrite=True)
 
         # FeatureCollection — one point per fix, tagged with the DataFrame row index
         features = [
@@ -169,25 +196,32 @@ def annotate_era5_gee(
                 scale=ERA5_SCALE,
                 geometries=False,
             )
-            result = sampled.getInfo()
-
-            for feat in result.get("features", []):
-                props  = feat.get("properties", {})
-                row_id = props.get("_row")
-                if row_id is not None:
-                    for gee_band, out_col in ERA5_BANDS.items():
-                        val = props.get(gee_band)
-                        if val is not None:
-                            df.at[row_id, out_col] = val
-
+            result = get_info_with_retry(sampled, max_retries=max_retries)
         except Exception as exc:
-            if verbose:
-                print(f"  [warn] {t_start}: {exc}")
+            failed.append((t_start, len(sub), str(exc)))
+            print(f"  [warn] {t_start}: {len(sub)} fix(es) failed after "
+                  f"{max_retries} retries: {exc}", file=sys.stderr, flush=True)
+            result = {}
+
+        for feat in result.get("features", []):
+            props  = feat.get("properties", {})
+            row_id = props.get("_row")
+            if row_id is not None:
+                for gee_band, out_col in ERA5_BANDS.items():
+                    val = props.get(gee_band)
+                    if gee_band == CBH_BAND and val == CBH_SENTINEL:
+                        val = None
+                    if val is not None:
+                        df.at[row_id, out_col] = val
 
         if verbose and ((i + 1) % 20 == 0 or i + 1 == len(unique_hours)):
             print(f"  {i + 1}/{len(unique_hours)} timesteps done")
 
     df = df.drop(columns=["_hour"])
+    if failed:
+        print(f"[warn] {len(failed)} timestep(s) / {sum(n for _, n, _ in failed)} "
+              f"fix(es) failed after retries and are NaN; first: "
+              f"{failed[0][0]}: {failed[0][2]}", file=sys.stderr, flush=True)
     if verbose:
         n_filled = df["era5_u10"].notna().sum()
         print(f"Extraction complete - {n_filled}/{valid.sum()} fixes have era5_u10 values")
@@ -208,6 +242,8 @@ def main():
     parser.add_argument("--lat",     default="latitude",   help="Latitude column name")
     parser.add_argument("--time",    default="timestamp",  help="Timestamp column name")
     parser.add_argument("--project", default=None,         help="GEE Cloud project ID")
+    parser.add_argument("--max-retries", type=int, default=4,
+                        help="Retries per timestep on GEE errors (exponential backoff)")
     parser.add_argument("--quiet",   action="store_true",  help="Suppress progress output")
     args = parser.parse_args()
 
@@ -229,6 +265,7 @@ def main():
         lon_col=args.lon,
         lat_col=args.lat,
         time_col=args.time,
+        max_retries=args.max_retries,
         verbose=not args.quiet,
     )
 
