@@ -384,8 +384,8 @@ import_nanofox_movebank <- function(
   #   - Sets sensor_type = "location" so the row is included in b_loc and
   #     calc_displacement() has a capture-location anchor for each deployment.
   #
-  # If deploy_on_timestamp or deploy_on_location are missing from track data,
-  # the deployment is skipped (no start row inserted for it).
+  # If deploy_on_timestamp is missing, the deployment is skipped. Location falls
+  # back deploy_on_location -> capture_location -> first real fix.
   # ---------------------------------------------------------------------------
   .add_start <- function(x) {
     require(sf)
@@ -399,7 +399,6 @@ import_nanofox_movebank <- function(
 
     # Identify required columns in track data
     has_deploy_ts <- "deploy_on_timestamp" %in% names(td)
-    has_deploy_loc <- "deploy_on_location" %in% names(td)
     has_dep_id <- "deployment_id" %in% names(td)
 
     if (!has_deploy_ts) {
@@ -499,14 +498,16 @@ import_nanofox_movebank <- function(
         next
       }
 
-      # Geometry: prefer deploy_on_location from track data.
+      # Geometry: prefer deploy_on_location, else capture_location from track data.
       # After .fix_track_data_lists(), geometry columns become character WKT strings.
-      # Handle sfc, sfg, character WKT, and numeric/NA gracefully.
+      # Handle sfc, sfg, character WKT, and numeric/NA gracefully; empty points
+      # count as missing.
       ref_idx <- first_loc_idx[track_key]
       geom <- NULL
 
-      if (has_deploy_loc) {
-        loc_raw <- td$deploy_on_location[i]
+      for (loc_col in c("deploy_on_location", "capture_location")) {
+        if (!is.null(geom) || !loc_col %in% names(td)) next
+        loc_raw <- td[[loc_col]][i]
         geom <- tryCatch(
           {
             if (inherits(loc_raw, "sfc")) {
@@ -530,6 +531,11 @@ import_nanofox_movebank <- function(
           },
           error = function(e) NULL
         )
+        if (!is.null(geom) && (length(geom) == 0 || all(sf::st_is_empty(geom)))) {
+          geom <- NULL
+        } else if (!is.null(geom) && loc_col == "capture_location") {
+          .msg("  .add_start: ", track_key, " has no deploy_on_location; using capture_location.")
+        }
       }
 
       # Fall back to first real location fix of the deployment
