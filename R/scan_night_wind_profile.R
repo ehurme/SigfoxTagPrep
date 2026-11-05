@@ -85,10 +85,6 @@ find_complete_nights <- function(
     individual_col       = "individual_local_identifier",
     verbose              = TRUE
 ) {
-  suppressPackageStartupMessages({
-    library(dplyr)
-    library(sf)
-  })
 
   stopifnot(inherits(data, "sf"))
   stopifnot(individual_col %in% names(data))
@@ -271,6 +267,11 @@ find_complete_nights <- function(
 #' @param buffer_deg Map padding in degrees. Default 1.5.
 #' @param out_path   Directory to save PNG, or \code{NULL} to return plot only.
 #' @param theme_dark Logical; dark background. Default \code{FALSE}.
+#' @param vmp_sl_ms,vmr_sl_ms Sea-level minimum-power and maximum-range
+#'   airspeeds (m/s); \code{vmr_sl_ms = NULL} uses \code{3^0.25 * vmp_sl_ms}.
+#'   Bats: see \code{\link{bat_flight_params}}.
+#' @param vmp_sd_ms,vmr_sd_ms SDs of the reference airspeed bands (m/s).
+#' @param species_label Optional species name for plot titles.
 #' @param verbose    Logical. Default \code{TRUE}.
 #'
 #' @return Invisibly returns the ggplot object.
@@ -297,35 +298,7 @@ scan_night_wind_profile <- function(
     theme_dark   = FALSE,
     verbose      = TRUE
 ) {
-  suppressPackageStartupMessages({
-    library(dplyr)
-    library(tidyr)
-    library(sf)
-    library(ggplot2)
-    library(ggpubr)
-    library(terra)
-    library(tidyterra)
-    library(rnaturalearth)
-    library(elevatr)
-    library(lubridate)
-  })
 
-  # Source helpers if not loaded
-  for (.src in c("R/pressure_to_altitude_m.R",
-                 "../SigfoxTagPrep/R/pressure_to_altitude_m.R")) {
-    if (!exists("pressure_to_altitude_m", mode = "function") && file.exists(.src))
-      source(.src)
-  }
-  for (.src in c("R/extract_elevation_segments.R",
-                 "../SigfoxTagPrep/R/extract_elevation_segments.R")) {
-    if (!exists("extract_elevation_segments", mode = "function") && file.exists(.src))
-      source(.src)
-  }
-  for (.src in c("R/lagerveld_flight_profile.R",
-                 "../SigfoxTagPrep/R/lagerveld_flight_profile.R")) {
-    if (!exists("compute_night_profiles", mode = "function") && file.exists(.src))
-      source(.src)
-  }
   if (is.null(vmr_sl_ms)) vmr_sl_ms <- vmp_sl_ms * 3^(1/4)
 
   # ── Helpers ────────────────────────────────────────────────────────────────
@@ -693,9 +666,9 @@ scan_night_wind_profile <- function(
   # ─ Panel 1: Map ────────────────────────────────────────────────────────────
   p_map <- ggplot() +
     { if (!is.null(elev_rast))
-        geom_spatraster(data = elev_rast) } +
+        tidyterra::geom_spatraster(data = elev_rast) } +
     { if (!is.null(elev_rast))
-        scale_fill_hypso_c(name = "Elevation (m)", palette = "arctic_bathy",
+        tidyterra::scale_fill_hypso_c(name = "Elevation (m)", palette = "arctic_bathy",
                            limits = c(0, 4000), na.value = NA) } +
     { if (!is.null(countries))
         geom_sf(data = countries, fill = NA,
@@ -1181,7 +1154,7 @@ scan_night_wind_profile <- function(
   # Row 4 (Lagerveld): airspeed-altitude profile | predicted optimal alt over time
 
   bottom_panels <- list(
-    p_ws_lines   %||_plt% ggplot() + .pt() + labs(title = "Wind support per level\n(heading required)"),
+    p_ws_lines %||% (ggplot() + .pt() + labs(title = "Wind support per level\n(heading required)")),
     p_pressure,
     p_comparison,
     p_airspeed
@@ -1196,20 +1169,20 @@ scan_night_wind_profile <- function(
 
   has_lagerveld <- !is.null(p_lagerveld)
 
-  p_top <- ggarrange(p_map, top_right, ncol = 2, widths = c(1, 1.4))
-  p_bot <- ggarrange(plotlist = bottom_panels, ncol = 2, nrow = 2)
+  p_top <- ggpubr::ggarrange(p_map, top_right, ncol = 2, widths = c(1, 1.4))
+  p_bot <- ggpubr::ggarrange(plotlist = bottom_panels, ncol = 2, nrow = 2)
 
   if (has_lagerveld) {
-    p_lag_row <- ggarrange(
+    p_lag_row <- ggpubr::ggarrange(
       p_lagerveld,
-      p_opt_alt_time %||_plt% ggplot() + .pt() + labs(title = "Optimal altitude over time\n(insufficient data)"),
+      p_opt_alt_time %||% (ggplot() + .pt() + labs(title = "Optimal altitude over time\n(insufficient data)")),
       ncol = 2, widths = c(1, 1)
     )
-    p_all <- ggarrange(p_top, p_bot, p_lag_row, ncol = 1,
+    p_all <- ggpubr::ggarrange(p_top, p_bot, p_lag_row, ncol = 1,
                        heights = c(1.6, 2, 1.4))
     fig_h <- 14
   } else {
-    p_all <- ggarrange(p_top, p_bot, ncol = 1, heights = c(1.6, 2))
+    p_all <- ggpubr::ggarrange(p_top, p_bot, ncol = 1, heights = c(1.6, 2))
     fig_h <- 10
   }
 
@@ -1290,18 +1263,7 @@ summarize_wind_altitude <- function(
     theme_dark        = FALSE,
     verbose           = TRUE
 ) {
-  suppressPackageStartupMessages({
-    library(dplyr)
-    library(sf)
-    library(ggplot2)
-    library(ggpubr)
-  })
 
-  for (.src in c("R/pressure_to_altitude_m.R",
-                 "../SigfoxTagPrep/R/pressure_to_altitude_m.R")) {
-    if (!exists("pressure_to_altitude_m", mode = "function") && file.exists(.src))
-      source(.src)
-  }
 
   stopifnot(inherits(data, "sf"))
   stopifnot(individual_col %in% names(data))
@@ -1441,8 +1403,8 @@ summarize_wind_altitude <- function(
     theme(legend.position = "right",
           axis.text.x = element_text(angle = 45, hjust = 1, size = 6))
 
-  p_combined <- ggarrange(
-    ggarrange(p_scatter, p_diel, ncol = 2),
+  p_combined <- ggpubr::ggarrange(
+    ggpubr::ggarrange(p_scatter, p_diel, ncol = 2),
     p_timeseries,
     ncol = 1, heights = c(1, 1.3)
   )
@@ -1469,4 +1431,3 @@ summarize_wind_altitude <- function(
 
 
 # ── Null-coalescing helper for ggplot objects (local to this file) ────────────
-`%||_plt%` <- function(a, b) if (!is.null(a)) a else b

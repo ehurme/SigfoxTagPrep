@@ -427,7 +427,7 @@ wc_multicsv_to_dpl <- function(path,
 
 
 # movebank_df_fsp <- wc_multicsv_to_dpl(
-#   path              = "../../../Dropbox/MPI/Tags/nanofox_pressuretest/tagdata/",
+#   path              = "path/to/Tags/nanofox_pressuretest/tagdata/",
 #   product           = "INF",
 #   firmware          = "nanofoxFineScalePressure",
 #   raw2physical      = TRUE,

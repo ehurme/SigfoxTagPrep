@@ -41,6 +41,7 @@
 #' @param activity_threshold  TinyFox activity-percent threshold used in the
 #'   current fell-off logic (passed through to the sweep).
 #' @param min_inactive_run  Minimum consecutive inactive rows to call fell-off.
+#' @param test_thresholds  Alias for `extra_thresholds`.
 #' @param extra_thresholds  Optional numeric vector of additional absolute
 #'   threshold values to test on top of the adaptive set (e.g. c(5, 50, 200)).
 #'   Useful when you already know the approximate scale for a tag type.
@@ -55,6 +56,7 @@
 #'   $threshold_sweep   — data.frame, one row per tag × threshold candidate
 #'   $flags             — wide summary, one row per tag, logical flag columns
 #'   $suggested_settings — list with recommended parameters per tag
+#' @export
 evaluate_scantrack <- function(
     bats_full,
     tags               = NULL,
@@ -73,7 +75,6 @@ evaluate_scantrack <- function(
   # Resolve alias
   if (!is.null(test_thresholds) && is.null(extra_thresholds))
     extra_thresholds <- test_thresholds
-  require(dplyr)
 
   # ── helpers ─────────────────────────────────────────────────────────────────
   .drop_geo <- function(df) {
@@ -493,6 +494,7 @@ evaluate_scantrack <- function(
 #' @param tag_col       Individual identifier column.
 #' @param verbose       Print per-tag messages.
 #' @return bats_full with `tag_fell_off` column updated.
+#' @export
 revise_tag_fell_off <- function(
     bats_full,
     audit,
@@ -501,13 +503,6 @@ revise_tag_fell_off <- function(
     tag_col       = "individual_local_identifier",
     verbose       = TRUE
 ) {
-  if (!exists("detect_tag_fell_off", mode = "function")) {
-    for (.p in c("R/detect_tag_fell_off.R",
-                 "../SigfoxTagPrep/R/detect_tag_fell_off.R")) {
-      if (file.exists(.p)) { source(.p); break }
-    }
-  }
-
   id_col <- if ("deployment_id" %in% names(bats_full)) "deployment_id" else tag_col
 
   for (tag in names(audit$suggested_settings)) {
@@ -574,27 +569,17 @@ revise_tag_fell_off <- function(
 #' @param sweep_quantiles   Passed to evaluate_scantrack().
 #' @param verbose       Progress messages.
 #' @return Invisible list: $audit, $bats_revised.
+#' @export
 scan_track_audit <- function(
     bats_full,
     bats_loc,
     tags            = NULL,
-    out_dir         = "../../../Dropbox/MPI/Noctule/Plots/ScanTrack/",
+    out_dir         = file.path(tempdir(), "ScanTrack"),
     new_threshold   = NULL,
     extra_thresholds = NULL,
     sweep_quantiles = c(0, 0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95),
     verbose         = TRUE
 ) {
-  for (.p in c("R/scantrack.R", "../SigfoxTagPrep/R/scantrack.R")) {
-    if (file.exists(.p) && !exists("scan_tracks", mode = "function")) {
-      source(.p); break
-    }
-  }
-  for (.p in c("R/detect_tag_fell_off.R", "../SigfoxTagPrep/R/detect_tag_fell_off.R")) {
-    if (file.exists(.p) && !exists("detect_tag_fell_off", mode = "function")) {
-      source(.p); break
-    }
-  }
-
   message("── Step 1: Auditing scantrack data ──")
   audit <- evaluate_scantrack(
     bats_full,

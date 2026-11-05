@@ -18,10 +18,6 @@ plot_variable_env_ridges <- function(
     label_quantile = 0.98,
     verbose = TRUE
 ) {
-  require(dplyr)
-  require(ggplot2)
-  require(ggridges)
-  require(tidyr)
 
   transform <- match.arg(transform)
   p_adjust  <- match.arg(p_adjust)
@@ -171,13 +167,13 @@ plot_variable_env_ridges <- function(
 
   # ---- plot ----
   p <- ggplot(long_data, aes(x = value, y = time, fill = time)) +
-    geom_density_ridges(
+    ggridges::geom_density_ridges(
       scale = ridge_scale, size = 0.3,
       quantile_lines = TRUE, quantiles = 2,
       alpha = 1, vline_size = 0.5, vline_color = "black"
     ) +
     scale_fill_manual(values = colors_vector) +
-    theme_ridges(font_size = 11, font_family = "Helvetica") +
+    ggridges::theme_ridges(font_size = 11, font_family = "Helvetica") +
     theme(
       legend.position = "none",
       plot.title = element_blank(),

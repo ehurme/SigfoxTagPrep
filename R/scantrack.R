@@ -1,30 +1,3 @@
-library(terra)
-library(tidyterra)
-library(dplyr)
-library(sf)
-library(ggplot2)
-library(rnaturalearth)
-library(elevatr)
-library(move2)
-library(ggpubr)
-library(furrr)
-library(future)
-library(purrr)
-library(lubridate)
-
-# Source extract_elevation_segments from whichever path resolves
-if (!exists("extract_elevation_segments", mode = "function")) {
-  for (.p in c(
-    "R/extract_elevation_segments.R",
-    "../SigfoxTagPrep/R/extract_elevation_segments.R"
-  )) {
-    if (file.exists(.p)) {
-      source(.p)
-      break
-    }
-  } 
-  rm(.p)
-}
 
 # Convert pressure (mbar) to altitude (m) via standard barometric formula
 .pressure_to_alt_m <- function(p_mbar, p0_mbar = 1013.25) {
@@ -58,9 +31,6 @@ if (!exists("extract_elevation_segments", mode = "function")) {
   split(x, ids, drop = TRUE)
 }
 
-`%||%` <- function(x, y) {
-  if (is.null(x)) y else x
-}
 
 .pick_first_col <- function(df, candidates, require_data = TRUE) {
   for (cc in candidates) {
@@ -1154,7 +1124,7 @@ scan_tracks <- function(
   bats_full,
   bats_loc,
   bats_daily = NULL,
-  out_dir = "../../../Dropbox/MPI/Noctule/Plots/ScanTrack/",
+  out_dir = file.path(tempdir(), "ScanTrack"),
   tags = NULL,
   overwrite = FALSE,
   elev_z = 5,

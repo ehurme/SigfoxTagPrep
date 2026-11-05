@@ -63,11 +63,23 @@ sigfox_download(
 
 \item{capture_longitude}{Numeric; Longitude of capture location.}
 
+\item{deploy_on_latitude, deploy_on_longitude}{Numeric; deployment (release) location.}
+
 \item{roost}{Character; Roost identifier.}
+
+\item{researcher}{Character; person who deployed the tag.}
 
 \item{tag_type}{Character; Tag version, e.g. tinyfox, nanofox, torpor}
 
 \item{firmware}{Character; Firmware version of the tag}
+
+\item{download}{Logical; download transmissions from the Sigfox database.}
+
+\item{data}{Optional data frame of already downloaded transmissions, used
+instead of downloading.}
+
+\item{movebank}{Logical; \code{data} is a Movebank export whose column names are
+mapped to the Sigfox database names.}
 
 \item{download_attempts}{Numeric; Number of times to retry downloads of the sigfox data}
 }

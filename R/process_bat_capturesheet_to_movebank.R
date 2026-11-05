@@ -11,12 +11,6 @@ process_bat_capturesheet_to_movebank <- function(
     deploy_time_source = c("tag_deployment_time", "capture_time"),
     append_firmware_to_tag_model = TRUE
 ) {
-  suppressPackageStartupMessages({
-    library(dplyr)
-    library(stringr)
-    library(readr)
-    library(lubridate)
-  })
 
   tag_count_order    <- match.arg(tag_count_order)
   deploy_time_source <- match.arg(deploy_time_source)
@@ -294,8 +288,8 @@ process_bat_capturesheet_to_movebank <- function(
 
 
 # mb_ref <- process_bat_capturesheet_to_movebank(
-#   capture_csv = "../../../Dropbox/MPI/Noctule/Data/Freinat/Fall2025_nanofox/Capture_Data_Autumn25_MPI_Sheet.csv",
-#   out_csv     = "../../../Dropbox/MPI/Noctule/Data/Freinat/Fall2025_nanofox/freinat25f-reference-data.csv",
+#   capture_csv = "path/to/Noctule/Data/Freinat/Fall2025_nanofox/Capture_Data_Autumn25_MPI_Sheet.csv",
+#   out_csv     = "path/to/Noctule/Data/Freinat/Fall2025_nanofox/freinat25f-reference-data.csv",
 #   tz          = "CET",
 #   location_name  = "freinat",
 #   deploy_time_source = "tag_deployment_time",

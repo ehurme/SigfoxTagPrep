@@ -34,8 +34,6 @@ migration_ridgeplots <- function(
     bg = "white"
 ) {
   # ---- deps ----
-  require(dplyr)
-  require(ggpubr)
 
   # ---- defaults: variable spec ----
   # Each entry: env_name, env_component, transform, group ("env" or "wind"), optional main_color override
@@ -168,8 +166,8 @@ migration_ridgeplots <- function(
 #   colors = cols,
 #   default_color = "black",
 #   save = TRUE,
-#   out_env_file  = "../../../Dropbox/MPI/Leisleri/Plots/env_daily_leisleri_migration.png",
-#   out_wind_file = "../../../Dropbox/MPI/Leisleri/Plots/wind_daily_leisleri_migration.png",
+#   out_env_file  = "path/to/Leisleri/Plots/env_daily_leisleri_migration.png",
+#   out_wind_file = "path/to/Leisleri/Plots/wind_daily_leisleri_migration.png",
 #   width = 8, height = 11, dpi = 300, bg = "white"
 # )
 #

@@ -56,6 +56,8 @@
 #' @param tinyfox_max_counter_diff Maximum plausible counter increase between
 #'   rows when deriving a diff from cumulative total. Larger values are ignored
 #'   as artifacts. Use \code{Inf} to disable.
+#' @param ... For the wrappers, further arguments passed to
+#'   \code{detect_tag_fell_off()}.
 #' @param overwrite Logical; if \code{TRUE}, recompute \code{tag_fell_off} from
 #'   scratch. If \code{FALSE}, preserve existing \code{TRUE} values.
 #' @param verbose Logical; print per-tag diagnostic messages.

@@ -8,16 +8,6 @@ detect_sigfox_single_base_stations <- function(
     out_csv = NULL,
     out_rds = NULL
 ) {
-  suppressPackageStartupMessages({
-    require(move2)
-    require(dplyr)
-    require(purrr)
-    require(sf)
-    require(jsonlite)
-    require(lubridate)
-    require(stringr)
-    require(tibble)
-  })
 
   .msg <- function(...) if (isTRUE(verbose)) message(...)
 
@@ -105,7 +95,7 @@ detect_sigfox_single_base_stations <- function(
     if (is.na(x_fixed)) {
       return(tibble(ID = character(), N = integer(), RSSI = numeric(), original_row = integer()))
     }
-    df <- tryCatch(fromJSON(x_fixed, simplifyDataFrame = TRUE), error = function(e) NULL)
+    df <- tryCatch(jsonlite::fromJSON(x_fixed, simplifyDataFrame = TRUE), error = function(e) NULL)
     if (is.null(df) || nrow(as.data.frame(df)) == 0) {
       return(tibble(ID = character(), N = integer(), RSSI = numeric(), original_row = integer()))
     }
@@ -224,26 +214,3 @@ detect_sigfox_single_base_stations <- function(
   out
 }
 
-res <- detect_sigfox_single_base_stations(study_id = c(4731778376, 4731733529, 3115801413))
-
-# Any missing IDs left?
-table(is.na(res$b_all$.track_id))
-
-# Top stations by number of points
-res$stations_summary %>% sf::st_drop_geometry() %>% head()
-
-
-res <- detect_sigfox_single_base_stations(
-  study_id = c(
-    4731778376, 4731733529, 3115801413, 3098965953, 3099062915,
-    3097213426, 3099169068, 3115915732, 3127820115, 4584654529
-  ),
-  out_csv = "../../../Dropbox/MPI/Noctule/Data/base_stations_single.csv",
-  out_rds = "../../../Dropbox/MPI/Noctule/Data/base_stations_single.rds"
-)
-
-# station points (sf)
-res$stations_summary
-
-# all location points that were single-station detections
-res$singles_points

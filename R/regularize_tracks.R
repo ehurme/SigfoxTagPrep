@@ -45,6 +45,7 @@
 #' @importFrom sf st_geometry st_coordinates st_transform st_crs st_as_sf st_is_empty
 #' @importFrom move2 mt_track_id
 #' @importFrom data.table data.table setDT rbindlist setattr
+#' @export
 regularize_tracks <- function(x,
                                id_col = "individual_local_identifier",
                                time_col = "timestamp",

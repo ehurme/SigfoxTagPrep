@@ -20,7 +20,6 @@
 
 # ---- Helper: parse "14.06.2025, 17:56:24" as UTC ----
 parse_wc_time_utc <- function(x) {
-  require(lubridate)
   x <- as.character(x)
   x <- gsub(",", "", x)
   lubridate::dmy_hms(x, tz = "UTC")
@@ -28,7 +27,6 @@ parse_wc_time_utc <- function(x) {
 
 # ---- Helper: split "lat, lon" in Position ----
 split_position_wc <- function(df) {
-  require(stringr)
   if (!"Position" %in% names(df)) return(df)
   parts <- stringr::str_split_fixed(df$Position, ",\\s*", 2)
   if (!("latitude [°]" %in% names(df)))  df$`latitude [°]`  <- suppressWarnings(as.numeric(parts[, 1]))
@@ -191,7 +189,6 @@ regularize_tag_model <- function(model_str) {
 # unchanged. Reports any renames performed.
 
 harmonize_wc_columns <- function(df) {
-  require(stringr)
 
   # Canonical name -> regex patterns that match known firmware variants.
   # Order matters: first match wins. Patterns are case-insensitive.
@@ -306,12 +303,6 @@ harmonize_wc_columns <- function(df) {
 #    - min temp range label (3-hr)-> min_temp_range [°C]
 
 wc_wide_to_mb_long <- function(df) {
-  suppressPackageStartupMessages({
-    require(dplyr)
-    require(tidyr)
-    require(stringr)
-    require(lubridate)
-  })
 
   if (!("Time (UTC)" %in% names(df))) return(df)
 
@@ -524,12 +515,6 @@ write_movebank_upload_csvs <- function(
     min_temp_numeric_data = NULL,
     output_dir
 ) {
-  suppressPackageStartupMessages({
-    require(fs)
-    require(readr)
-    require(stringr)
-    require(dplyr)
-  })
 
   if (!fs::dir_exists(output_dir)) fs::dir_create(output_dir)
 
@@ -583,6 +568,62 @@ write_movebank_upload_csvs <- function(
 # 3) Main pipeline function
 # =============================================================================
 
+#' Convert WildCloud exports to Movebank upload CSVs
+#'
+#' Reads raw WildCloud transmissions (a folder of CSVs or one combined CSV) and
+#' an animal reference sheet, harmonises tag model / firmware / sampling
+#' settings, optionally corrects tag clock drift, and writes Movebank-ready
+#' location, VeDBA, barometer, temperature and deployment CSVs to
+#' `output_dir`.
+#'
+#' @param wc_path Directory of WildCloud CSV exports. Supply this or
+#'   `movebank_csv_path`.
+#' @param movebank_csv_path Path to a single combined CSV, used instead of
+#'   `wc_path`.
+#' @param animals_path Animal reference sheet (CSV or Excel) with tag IDs,
+#'   species, capture and deployment information.
+#' @param output_dir Directory the Movebank CSVs are written to (created if
+#'   missing).
+#' @param movebank_project_name Movebank project name used when the reference
+#'   sheet has no per-row project column.
+#' @param species,life_stage Optional single values overriding the reference
+#'   sheet for all animals.
+#' @param animal_id_col Column in the reference sheet to use as Animal ID;
+#'   `NULL` auto-detects.
+#' @param location_abbr Short site code used in fallback Animal IDs
+#'   (e.g. `"Swiss"`).
+#' @param clean_lat_range,clean_lon_range Optional numeric ranges; fixes
+#'   outside them are dropped.
+#' @param sampling_config Optional table of tag model / firmware sampling
+#'   settings replacing the built-in default (see `result$sampling_config`).
+#' @param force_tag_model_family,force_firmware_version,force_vedba_count
+#'   Optional values applied to all tags, overriding the reference sheet.
+#' @param correct_drift Logical; fit a clock-drift model with
+#'   [correct_time_drift()] and correct window start times (needs \pkg{lme4}).
+#' @param programmed_interval Programmed transmission interval in seconds;
+#'   `NULL` infers it per tag.
+#' @param drift_temp_col Temperature column used as a drift covariate, or
+#'   `NULL`.
+#' @param drift_poly_degree,drift_max_filter,drift_min_obs Passed to
+#'   [correct_time_drift()] as `poly_degree`, `max_drift_filter` and
+#'   `min_obs_per_tag`.
+#' @param drift_diagnostics Logical; save drift diagnostic plots to
+#'   `output_dir`.
+#' @return Invisibly, a list with the processed tables (`movebank_df`,
+#'   `animals_mb`, `loc_data`, `vedba_data`, `bar_data`, `temp_data`,
+#'   `min_temp_data`, `min_temp_numeric_data`, `max_temp_data`,
+#'   `deployment_data`) and the `sampling_config` used. When drift correction
+#'   ran, the fitted model is attached as `attr(result, "drift_model")`.
+#' @export
+#' @examples
+#' \dontrun{
+#' wildcloud_to_movebank(
+#'   wc_path = "path/to/wildcloud/",
+#'   animals_path = "path/to/captures.xlsx",
+#'   output_dir = "path/to/movebank/",
+#'   movebank_project_name = "My Sigfox study"
+#' )
+#' }
 wildcloud_to_movebank <- function(
     wc_path              = NULL,
     movebank_csv_path    = NULL,
@@ -607,15 +648,6 @@ wildcloud_to_movebank <- function(
     drift_min_obs        = 5L,
     drift_diagnostics    = FALSE
 ) {
-  suppressPackageStartupMessages({
-    require(dplyr)
-    require(tidyr)
-    require(stringr)
-    require(lubridate)
-    require(readr)
-    require(fs)
-    require(data.table)
-  })
 
   # ---- checks ----
   if (is.null(wc_path) && is.null(movebank_csv_path)) {
@@ -1946,13 +1978,6 @@ update_wildcloud_movebank <- function(
     drift_min_obs         = 5L,
     drift_diagnostics     = FALSE
 ) {
-  suppressPackageStartupMessages({
-    require(dplyr)
-    require(stringr)
-    require(lubridate)
-    require(readr)
-    require(fs)
-  })
 
   # ---- 1. Download existing Movebank deployment info --------------------------------
   message("[update] Querying Movebank for existing deployments in study: ", study_id)
@@ -2198,65 +2223,3 @@ update_wildcloud_movebank <- function(
 }
 
 
-# =============================================================================
-# Example usage
-# =============================================================================
-if (FALSE) {
-  # Source the drift correction module
-  source("./R/correct_time_drift.R")
-
-  # ---- Without drift correction (original behavior) ----
-  result <- wildcloud_to_movebank(
-    wc_path               = "../../../Dropbox/MPI/Noctule/Data/movebank/Switzerland/wildcloud/",
-    animals_path          = "../../../Dropbox/MPI/Noctule/Data/movebank/Switzerland/swiss_MPIAB_captures.xlsx",
-    output_dir            = "../../../Dropbox/MPI/Noctule/Data/movebank/Switzerland/movebank/",
-    force_tag_model_family = "NanoFox",
-    force_firmware_version = "30Days",
-    force_vedba_count = 504,
-    location_abbr         = "Swiss",  # used in fallback Animal.ID, e.g. Nnoc25_01_Swiss_9EC016
-    movebank_project_name = "ICARUS Bats. Nyctalus leisleri Nyctalus noctula. Thurgau, Switzerland"
-  )
-
-  # ---- With drift correction ----
-  result <- wildcloud_to_movebank(
-    wc_path               = "../../../Dropbox/MPI/Noctule/Data/movebank/Switzerland/wildcloud/",
-    animals_path          = "../../../Dropbox/MPI/Noctule/Data/movebank/Switzerland/swiss_MPIAB_captures.xlsx",
-    output_dir            = "../../../Dropbox/MPI/Noctule/Data/movebank/Switzerland/movebank/",
-    force_tag_model_family = "NanoFox",
-    force_firmware_version = "30Days",
-    force_vedba_count = 504,
-    location_abbr         = "Swiss",
-    movebank_project_name = "ICARUS Bats. Nyctalus leisleri Nyctalus noctula. Thurgau, Switzerland",
-    correct_drift         = TRUE,
-    programmed_interval   = 3 * 3600,       # 3-hour schedule; NULL to infer per tag
-    drift_temp_col        = "temperature [°C]", # or NULL to skip temperature term
-    drift_diagnostics     = TRUE            # saves diagnostic plots to output_dir
-  )
-
-  # Inspect the drift model
-  drift_model <- attr(result, "drift_model")
-  summary(drift_model)
-
-  # ---- Custom sampling config ----
-  # If the defaults don't cover your firmware, extend or replace the config.
-  # Check result$sampling_config to see the default table.
-  # The function matches tag_model + software_version from the reference data.
-  # Rows with software_version = "all" are used as model-level fallbacks.
-  # Note: firmware aliases are applied automatically before the config lookup:
-  #   "spring2025bat"  -> "30Days"                (NanoFox 30Days schema)
-  #   "TenDay"         -> "10Day"
-  my_config <- tibble::tribble(
-    ~tag_model,  ~software_version,           ~vedba_count, ~burst_duration_s, ~burst_rate_hz, ~sampling_interval_s, ~sampling_count, ~vedba_type,         ~sensor_schema,     ~notes,
-    "NanoFox",   "30Days",                     504,          1.0,               28,             120,                  18,              "windowed_sum",       "nanofox_30days",   "1s burst @ 28Hz, every 2min, 36min window",
-    "NanoFox",   "30DaysFineScalePressure",     504,          1.0,               28,             120,                  18,              "windowed_sum",       "nanofox_fsp",      "1s burst @ 28Hz; pressure bins replace temp bins",
-    "TinyFox",   "all",                         1440,         1.0,               28,             60,                   1440,            "cumulative_daily",   "tinyfox",          "1s burst @ 28Hz, every 60s"
-  )
-  result <- wildcloud_to_movebank(
-    wc_path               = "../../../Dropbox/MPI/Noctule/Data/movebank/Switzerland/wildcloud/",
-    animals_path          = "../../../Dropbox/MPI/Noctule/Data/movebank/Switzerland/swiss_MPIAB_captures.xlsx",
-    output_dir            = "../../../Dropbox/MPI/Noctule/Data/movebank/Switzerland/movebank/",
-    movebank_project_name = "ICARUS Bats. Nyctalus leisleri Nyctalus noctula. Thurgau, Switzerland",
-    location_abbr         = "Swiss",
-    sampling_config       = my_config
-  )
-}

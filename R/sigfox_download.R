@@ -22,6 +22,13 @@
 #' @param roost Character; Roost identifier.
 #' @param firmware Character; Firmware version of the tag
 #' @param download_attempts Numeric; Number of times to retry downloads of the sigfox data
+#' @param deploy_on_latitude,deploy_on_longitude Numeric; deployment (release) location.
+#' @param researcher Character; person who deployed the tag.
+#' @param download Logical; download transmissions from the Sigfox database.
+#' @param data Optional data frame of already downloaded transmissions, used
+#'   instead of downloading.
+#' @param movebank Logical; `data` is a Movebank export whose column names are
+#'   mapped to the Sigfox database names.
 #' @return A data frame of the deployment data including tracking and bat information.
 #' @examples
 #' \dontrun{
@@ -130,7 +137,7 @@ sigfox_download <- function(tag_ID = NA,
     df <- data
     if(movebank){
       # rename movebank names to match what we have been using
-      df %>% mutate(
+      df <- df %>% mutate(
         tag_ID = tag_local_identifier,
         Device = tag_local_identifier,
         timestamp = ymd_hms(timestamp),
@@ -142,7 +149,7 @@ sigfox_download <- function(tag_ID = NA,
         `Radius (m) (Source/Status)` = as.character(sigfox_computed_location_radius),
         `Total VeDBA` = tinyfox_total_vedba,
         `24h Min. Temperature (??C)` = tinyfox_temperature_min_last_24h,
-        `24h Max. Temperature (??C)` = tinyfox_temperature_min_last_24h,
+        `24h Max. Temperature (??C)` = tinyfox_temperature_max_last_24h,
         `24h Active (%)` = tinyfox_activity_percent_last_24h,
         `24h Min. Pressure (mbar)` = NA_real_,
         `Seq. Number` = sequence_number,

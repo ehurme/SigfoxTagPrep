@@ -14,10 +14,6 @@ extract_sunset_env <- function(
     keep_debug_cols = TRUE,
     verbose = TRUE
 ) {
-  require(terra)
-  require(lubridate)
-  require(dplyr)
-  require(suncalc)
 
   n <- length(timestamps)
   stopifnot(length(latitudes) == n, length(longitudes) == n)
@@ -35,7 +31,7 @@ extract_sunset_env <- function(
 
   open_raster <- function(x) {
     if (inherits(x, "SpatRaster")) return(x)
-    if (is.character(x) && length(x) == 1) return(terra::rast(x))
+    if (is.character(x) && length(x) == 1) return(terra::rast(x, md = FALSE)) # md = FALSE: GDAL multidim mode drops GRIB times
     stop("Each raster_by_year entry must be a SpatRaster or a single file path.")
   }
 
@@ -118,7 +114,7 @@ extract_sunset_env <- function(
 
     r <- open_raster(raster_by_year[[yr_chr]])
     rt <- terra::time(r)
-    if (is.null(rt)) stop("Raster for year ", yr_chr, " has no terra::time() vector.")
+    if (is.null(rt) || all(is.na(rt))) stop("Raster for year ", yr_chr, " has no terra::time() values.")
 
     idx_rows <- which(df$year == yr & !is.na(df$target_time) & !is.na(df$lon_use) & !is.na(df$lat_use))
     if (length(idx_rows) == 0) next
@@ -199,10 +195,10 @@ extract_sunset_env <- function(
 }
 
 # raster_by_year <- list(
-#   "2022" = "../../../Dropbox/MPI/Noctule/Data/ECMWF/2022/ERA_2022.grib",
-#   "2023" = "../../../Dropbox/MPI/Noctule/Data/ECMWF/2023/ERA_2023.grib",
-#   "2024" = "../../../Dropbox/MPI/Noctule/Data/ECMWF/2024/ERA_2024.grib",
-#   "2025" = "../../../Dropbox/MPI/Noctule/Data/ECMWF/2025/ERA_2025.grib"
+#   "2022" = "path/to/Noctule/Data/ECMWF/2022/ERA_2022.grib",
+#   "2023" = "path/to/Noctule/Data/ECMWF/2023/ERA_2023.grib",
+#   "2024" = "path/to/Noctule/Data/ECMWF/2024/ERA_2024.grib",
+#   "2025" = "path/to/Noctule/Data/ECMWF/2025/ERA_2025.grib"
 # )
 #
 # vars <- c("u10","v10","t2m",
@@ -210,7 +206,7 @@ extract_sunset_env <- function(
 #           "u100","v100",
 #           "i10fg","tcc")
 #
-# load("../../../Dropbox/MPI/Noctule/Data/rdata/move_icarus_bats.robj")
+# load("path/to/Noctule/Data/rdata/move_icarus_bats.robj")
 #
 # bats_daily$.row_id <- seq_len(nrow(bats_daily))
 # bats_daily_sunset <- bats_daily
@@ -298,6 +294,6 @@ extract_sunset_env <- function(
 # summary(bats_daily_sunset)
 # # remove extra ID, timestamp, lat, lon, sunset_time, target_time
 #
-# save(bats_daily_sunset, file = "../../../Dropbox/MPI/Noctule/Data/rdata/move_icarus_bats_sunset_env.robj")
+# save(bats_daily_sunset, file = "path/to/Noctule/Data/rdata/move_icarus_bats_sunset_env.robj")
 #
 

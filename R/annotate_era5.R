@@ -62,7 +62,7 @@
 #' @export
 altitude_to_pressure_hPa <- function(alt_m, p0_hpa = 1013.25) {
   alt_m  <- as.numeric(alt_m)
-  p0_hpa <- as.numeric(p0_hpa)
+  p0_hpa <- rep_len(as.numeric(p0_hpa), length(alt_m))
   out <- rep(NA_real_, length(alt_m))
   ok  <- which(is.finite(alt_m) & is.finite(p0_hpa) & p0_hpa > 0)
   out[ok] <- p0_hpa[ok] * (1 - alt_m[ok] / 44330)^5.2558
@@ -101,7 +101,7 @@ altitude_to_pressure_hPa <- function(alt_m, p0_hpa = 1013.25) {
 #'
 #' @param data           A \code{move2} or \code{sf} object with timestamps.
 #' @param era5_dir       Path to directory with ERA5 NetCDF files (e.g.
-#'   \code{"//10.0.16.7/grpdechmann/Postdoc-EdwardHurme/EnvData"}).
+#'   \code{"path/to/EnvData"}).
 #' @param pressure_levels Numeric vector of pressure levels (hPa) to extract.
 #'   Must match the levels present in \code{era5_dir/pressure_levels/}.
 #' @param altitude_col   Column name holding altitude in metres
@@ -124,7 +124,7 @@ altitude_to_pressure_hPa <- function(alt_m, p0_hpa = 1013.25) {
 #'   dat <- movebank_download_study(study_id = 12345)
 #'   dat <- annotate_era5(
 #'     dat,
-#'     era5_dir = "//10.0.16.7/grpdechmann/Postdoc-EdwardHurme/EnvData"
+#'     era5_dir = "path/to/EnvData"
 #'   )
 #'
 #'   # Mixed GPS + Sigfox
@@ -148,7 +148,6 @@ annotate_era5 <- function(
     verbose = TRUE
 ) {
 
-  require(terra)
 
   # ── Validate ──────────────────────────────────────────────────────────────
   era5_dir <- gsub("\\\\", "/", era5_dir)   # UNC paths need forward slashes for GDAL
@@ -802,8 +801,6 @@ annotate_era5_offsets <- function(
     max_time_gap_hours = 3,
     verbose = TRUE
 ) {
-  require(move2)
-  require(sf)
 
   stopifnot(inherits(data, "sf"))
 
@@ -953,10 +950,6 @@ annotate_era5_night_avg <- function(
     coord_crs = "EPSG:4326",
     verbose = TRUE
 ) {
-  require(terra)
-  require(lubridate)
-  require(dplyr)
-  require(sf)
 
   stopifnot(inherits(data, "sf"))
 
@@ -1160,11 +1153,6 @@ annotate_era5_sunset <- function(
     keep_debug_cols = TRUE,
     verbose = TRUE
 ) {
-  require(terra)
-  require(lubridate)
-  require(dplyr)
-  require(suncalc)
-  require(sf)
 
   stopifnot(inherits(data, "sf"))
 
@@ -1401,7 +1389,7 @@ annotate_era5_sunset <- function(
 #'
 #' dat <- annotate_era5_gee(
 #'   data    = leisler,
-#'   python  = "C:/Users/Edward/anaconda3/envs/rgee311/python.exe",
+#'   python  = "path/to/python.exe",
 #'   verbose = TRUE
 #' )
 #' }
@@ -1431,7 +1419,7 @@ annotate_era5_gee <- function(
     if (python == "")
       stop(
         "Python not found on PATH.\n",
-        "Set python = 'C:/Users/Edward/anaconda3/envs/rgee311/python.exe'"
+        "Set python = 'path/to/python.exe'"
       )
   }
   if (!file.exists(python))
@@ -1561,7 +1549,7 @@ annotate_era5_gee <- function(
 #' @param data             A \code{move2} or \code{sf} object with timestamps.
 #' @param era5_dir         Path to the EnvData directory (parent of
 #'   \code{single_levels/}), e.g.
-#'   \code{"//10.0.16.7/grpdechmann/Postdoc-EdwardHurme/EnvData"}.
+#'   \code{"path/to/EnvData"}.
 #' @param tag_pressure_col Column name holding the tag's own barometric
 #'   pressure in hPa. \code{NULL} = auto-detect (\code{pressure_hpa_used},
 #'   \code{tinyfox_pressure_min_last_24h}, \code{min_3h_pressure},
@@ -1582,7 +1570,7 @@ annotate_era5_gee <- function(
 #'   out <- import_nanofox_movebank(study_id = 123456789)
 #'   out$location <- correct_altitude_era5(
 #'     out$location,
-#'     era5_dir = "//10.0.16.7/grpdechmann/Postdoc-EdwardHurme/EnvData"
+#'     era5_dir = "path/to/EnvData"
 #'   )
 #' }
 #'
@@ -1596,7 +1584,6 @@ correct_altitude_era5 <- function(
     max_time_gap_hours = 3,
     verbose             = TRUE
 ) {
-  require(terra)
 
   era5_dir <- gsub("\\\\", "/", era5_dir)  # UNC paths need forward slashes for GDAL
   stopifnot(inherits(data, "sf"))

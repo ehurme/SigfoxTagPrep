@@ -15,11 +15,11 @@ pressure_to_altitude_m <- function(p_hpa, p0_hpa = 1013.25) {
   # ⛰️ Convert pressure (hPa / mbar) to altitude (m)
   # Vectorized; returns NA for non-positive or missing pressures
   p_hpa <- as.numeric(p_hpa)
-  p0_hpa <- as.numeric(p0_hpa)
+  p0_hpa <- rep_len(as.numeric(p0_hpa), length(p_hpa))
 
   out <- rep(NA_real_, length(p_hpa))
   ok <- which(is.finite(p_hpa) & p_hpa > 0 & is.finite(p0_hpa) & p0_hpa > 0)
-  out[ok] <- 44330 * (1 - (p_hpa[ok] / p0_hpa)^(0.1903))
+  out[ok] <- 44330 * (1 - (p_hpa[ok] / p0_hpa[ok])^(0.1903))
   out
 }
 
@@ -45,6 +45,7 @@ pressure_to_altitude_m <- function(p_hpa, p0_hpa = 1013.25) {
 #'   \code{pressure_hpa_used} columns added. Altitudes above 7000 m are set to
 #'   \code{NA} as sensor errors.
 #' @seealso \code{\link{pressure_to_altitude_m}}
+#' @export
 add_altitude_from_pressure <- function(df,
                                        tag_type_col = "tag_type",
                                        nano_pressure_col = "min_3h_pressure",
@@ -52,14 +53,11 @@ add_altitude_from_pressure <- function(df,
                                        p0_hpa = 1013.25,
                                        altitude_col = "altitude_m",
                                        pressure_used_col = "pressure_hpa_used") {
-  require(dplyr)
-  require(elevatr)
-  require(sf)
 
   df$elevation <- NA
   idx <- which(!sf::st_is_empty(df$geometry) & df$sensor_type == "location" & !is.na(df$lon))
   try({
-    df$elevation[idx] <- get_elev_point(locations = with(df[idx,], data.frame(x = lon, y = lat)),
+    df$elevation[idx] <- elevatr::get_elev_point(locations = with(df[idx,], data.frame(x = lon, y = lat)),
                                         src = "aws", prj = 4326)$elevation
   })
 

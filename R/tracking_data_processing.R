@@ -10,6 +10,7 @@
 #'
 #' @param data A data frame containing the columns `latitude`, `longitude`, and `timestamp`.
 #' @return The input data frame with additional columns for `day_night`, `sunrise`, `sunset`, and `noon`.
+#' @export
 determine_day_night <- function(data) {
   if (!requireNamespace("suncalc", quietly = TRUE)) {
     stop("Package 'suncalc' is required but not installed.")
@@ -62,6 +63,7 @@ determine_day_night <- function(data) {
 #'
 #' @param data A data frame containing the columns `tag_id` and `timestamp`.
 #' @return The input data frame with an additional column for `burst_id`.
+#' @export
 determine_bursts <- function(data) {
   # Ensure timestamp is in POSIXct format for time-based calculations
   data$timestamp <- as.POSIXct(data$timestamp, format = "%Y-%m-%d %H:%M:%S")
@@ -116,6 +118,7 @@ determine_bursts <- function(data) {
 #' @param lon2 Longitude of the second point in degrees.
 #' @param lat2 Latitude of the second point in degrees.
 #' @return Bearing in degrees from the North.
+#' @export
 calculate_bearing <- function(lon1, lat1, lon2, lat2) {
   # Convert degrees to radians
   lat1_rad <- lat1 * (pi / 180)
@@ -142,6 +145,7 @@ calculate_bearing <- function(lon1, lat1, lon2, lat2) {
 #'             and a `timestamp` to ensure the points are in sequential order.
 #' @return The input data frame with an additional column `bearing` indicating the bearing from each point
 #'         to the next in the sequence.
+#' @export
 calculate_bearing_for_sequential_points <- function(data) {
   # Ensure data is sorted by tag_id and timestamp
   data <- data[order(data$tag_id, data$timestamp),]
@@ -185,6 +189,7 @@ calculate_bearing_for_sequential_points <- function(data) {
 #'             and a `timestamp` to ensure the points are in sequential order.
 #' @return The input data frame with an additional column `distance` and `distance_from_start` indicating the distance in meters
 #'         from each point to the next in the sequence and from the origin.
+#' @export
 diff_dist <- function(data) {
   if (!requireNamespace("geosphere", quietly = TRUE)) {
     stop("Package 'geosphere' is required but not installed.")
@@ -234,6 +239,7 @@ diff_dist <- function(data) {
 #' @param data A data frame with tracking data that must include `tag_id`, `timestamp`, and `total_vedba` columns.
 #' @return The input data frame with additional columns `diff_vedba` for the VeDBA difference and
 #'         `diff_time` for the time difference in minutes between each record and its successor.
+#' @export
 diff_time <- function(data) {
   # Ensure data is sorted by tag_id and timestamp
   data <- data[order(data$tag_id, data$timestamp),]
@@ -271,6 +277,7 @@ diff_time <- function(data) {
 #' @param data A data frame with tracking data that must include `tag_id`, `timestamp`, and `total_vedba` columns.
 #' @return The input data frame with additional columns `diff_vedba` for the VeDBA difference and
 #'         `diff_time` for the time difference in minutes between each record and its successor.
+#' @export
 diff_vedba <- function(data) {
   # Ensure data is sorted by tag_id and timestamp
   data <- data[order(data$tag_id, data$timestamp),]
@@ -311,6 +318,7 @@ diff_vedba <- function(data) {
 #' @param vedba_threshold A numeric value representing the threshold below which a tag is considered potentially detached.
 #' @return The input data frame with an additional logical column `tag_fell_off` indicating whether the tag
 #'         is considered to have potentially fallen off.
+#' @export
 tag_fell_off <- function(data, vedba_threshold) {
   # Ensure data is sorted by tag_id and timestamp
   data <- data[order(data$tag_id, data$timestamp),]
@@ -358,6 +366,7 @@ tag_fell_off <- function(data, vedba_threshold) {
 #' @param data A data frame with tracking data including `tag_id`, `timestamp`, `latitude`, `longitude`,
 #'        and other relevant metrics like `total_vedba`.
 #' @return A data frame with daily summaries for each tag.
+#' @export
 regularize_to_daily <- function(data) {
   if (!requireNamespace("dplyr", quietly = TRUE)) {
     stop("Package 'dplyr' is required but not installed.")

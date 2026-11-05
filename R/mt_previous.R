@@ -1,4 +1,3 @@
-library(move2)
 
 # internal utility: shift a numeric vector one step "back" within each track
 .mt_prev_by_track <- function(x, ids) {

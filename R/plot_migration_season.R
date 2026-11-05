@@ -3,10 +3,6 @@
 # Wilcoxon comparisons.
 # colors: named vector, one entry per "<season>.<mig_label>" combo, e.g.
 #   "Spring.Non-migration", "Spring.Migration", "Fall.Non-migration", "Fall.Migration"
-library(move2)
-library(tidyverse)
-library(ggrain)
-library(ggpubr)
 
 plot_migration_season <- function(
   data,
@@ -59,7 +55,7 @@ plot_migration_season <- function(
     data,
     aes(.grp, .y, fill = .grp, col = .grp, group = .grp)
   ) +
-    geom_rain(
+    ggrain::geom_rain(
       alpha = 0.4,
       rain.side = "l",
       boxplot.args = list(color = "black", outlier.shape = NA),

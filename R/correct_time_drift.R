@@ -16,8 +16,6 @@
 # duration by (1 + predicted_drift).
 # =============================================================================
 
-library(dplyr)
-library(lme4)
 
 
 # -----------------------------------------------------------------------------
@@ -56,7 +54,7 @@ library(lme4)
 #'   * `end_corrected`     – Corrected window end = receipt timestamp (POSIXct)
 #'
 #'   The fitted lme4 model is attached as `attr(result, "drift_model")`.
-# -----------------------------------------------------------------------------
+#' @export
 correct_time_drift <- function(
     data,
     tag_col              = "tag_id",
@@ -170,8 +168,8 @@ correct_time_drift <- function(
       poly_degree
     ))
     model <- tryCatch(
-      lmer(fmla, data = fit_data_full, REML = TRUE,
-           control = lmerControl(optimizer = "bobyqa")),
+      lme4::lmer(fmla, data = fit_data_full, REML = TRUE,
+           control = lme4::lmerControl(optimizer = "bobyqa")),
       error = function(e) {
         warning("[drift] Mixed temperature model failed (", conditionMessage(e),
                 ") — trying simpler random slope.")
@@ -185,7 +183,7 @@ correct_time_drift <- function(
   if (is.null(model) && use_temp && nrow(fit_data_full) >= 10) {
     fmla <- drift_observed ~ .temp + (1 | .tag)
     model <- tryCatch(
-      lmer(fmla, data = fit_data_full, REML = TRUE),
+      lme4::lmer(fmla, data = fit_data_full, REML = TRUE),
       error = function(e) {
         warning("[drift] Linear temperature model failed (", conditionMessage(e), ").")
         NULL
@@ -198,7 +196,7 @@ correct_time_drift <- function(
   if (is.null(model) && nrow(fit_data) >= 5) {
     fmla <- drift_observed ~ 1 + (1 | .tag)
     model <- tryCatch(
-      lmer(fmla, data = fit_data, REML = TRUE),
+      lme4::lmer(fmla, data = fit_data, REML = TRUE),
       error = function(e) {
         warning("[drift] Random-intercept model failed (", conditionMessage(e), ").")
         NULL
@@ -286,7 +284,7 @@ correct_time_drift <- function(
 #'   $drift_vs_temp   – Population-level drift ~ temperature with model line
 #'   $drift_by_tag    – Per-tag drift distributions
 #'   $window_shift    – Histogram of window length corrections (seconds)
-# -----------------------------------------------------------------------------
+#' @export
 plot_drift_diagnostics <- function(
     corrected_data,
     tag_col       = "tag_id",
@@ -295,7 +293,6 @@ plot_drift_diagnostics <- function(
 ) {
   if (!requireNamespace("ggplot2", quietly = TRUE))
     stop("ggplot2 is required for diagnostic plots.")
-  library(ggplot2)
 
   plots <- list()
 

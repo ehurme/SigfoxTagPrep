@@ -33,26 +33,9 @@ scan_migration_nights <- function(
   # bats_full is used for sensor data only — convert to plain data frame to avoid
   # move2's filter/rbind dispatcher rejecting duplicate track IDs.
   bats_full <- as.data.frame(bats_full)
-  suppressPackageStartupMessages({
-    library(dplyr)
-    library(sf)
-    library(ggplot2)
-    library(ggpubr)
-    library(terra)
-    library(tidyterra)
-    library(rnaturalearth)
-    library(elevatr)
-  })
 
   if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
 
-  # Source extract_elevation_segments if not already loaded
-  if (!exists("extract_elevation_segments", mode = "function")) {
-    for (.p in c("R/extract_elevation_segments.R",
-                 "../SigfoxTagPrep/R/extract_elevation_segments.R")) {
-      if (file.exists(.p)) { source(.p); break }
-    }
-  }
 
   # Shared panel theme (mirrors scan_track_plot)
   .pt <- function() {
@@ -368,10 +351,10 @@ scan_migration_nights <- function(
 
       # ---- Map panel ----
       p_map <- ggplot() +
-        { if (!is.null(elev_rast)) geom_spatraster(data = elev_rast) } +
-        { if (!is.null(elev_rast)) scale_fill_hypso_c(
+        { if (!is.null(elev_rast)) tidyterra::geom_spatraster(data = elev_rast) } +
+        { if (!is.null(elev_rast)) tidyterra::scale_fill_hypso_c(
             name = "Elevation (m)", palette = "arctic_bathy", limits = c(0, 4000)) } +
-        geom_sf(data = ne_countries(scale = 10), fill = NA,
+        geom_sf(data = rnaturalearth::ne_countries(scale = 10), fill = NA,
                 color = if (theme_dark) "gray70" else "gray80") +
         # full track — thin grey line + faint points + sequence labels
         geom_path(
@@ -673,8 +656,8 @@ scan_migration_nights <- function(
       } else {
         ncols <- if (length(panels) <= 2) 1L else 2L
         nrows <- ceiling(length(panels) / ncols)
-        grid  <- ggarrange(plotlist = unname(panels), ncol = ncols, nrow = nrows)
-        p_all <- ggarrange(p_map, grid, ncol = 1, heights = c(2.5, nrows * 1.0))
+        grid  <- ggpubr::ggarrange(plotlist = unname(panels), ncol = ncols, nrow = nrows)
+        p_all <- ggpubr::ggarrange(p_map, grid, ncol = 1, heights = c(2.5, nrows * 1.0))
       }
 
       fig_h <- 4.5 + ceiling(length(panels) / 2) * 2.0

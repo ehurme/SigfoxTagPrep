@@ -1,0 +1,3575 @@
+# Internal helpers for import_nanofox_movebank().
+# Progress messages go through .msg(), which reads
+# getOption("SigfoxTagPrep.verbose"); import_nanofox_movebank() sets it.
+
+.verbose <- function() isTRUE(getOption("SigfoxTagPrep.verbose", TRUE))
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+.msg <- function(...) if (.verbose()) message(...)
+
+.safe_try <- function(expr, what = "step") {
+  tryCatch(expr, error = function(e) {
+    .msg("\u26a0\ufe0f  ", what, " failed: ", conditionMessage(e))
+    NULL
+  })
+}
+
+# ---------------------------------------------------------------------------
+# .movebank_retry() \u2014 retry a Movebank API call with exponential backoff.
+#
+# Movebank occasionally returns transient failures (e.g. "unknown download
+# error" with HTTP status 200) that succeed on a subsequent attempt. `fn` is
+# a zero-argument closure so the call is only actually issued on each retry.
+# `should_retry(e)` lets callers opt specific error conditions (e.g. "study
+# has no deployments") out of retrying, since those will never succeed.
+# ---------------------------------------------------------------------------
+.movebank_retry <- function(
+  fn,
+  what,
+  max_tries = 3,
+  wait_sec = 5,
+  should_retry = function(e) TRUE
+) {
+  attempt <- 1L
+  repeat {
+    out <- tryCatch(
+      list(ok = TRUE, value = fn()),
+      error = function(e) list(ok = FALSE, error = e)
+    )
+    if (isTRUE(out$ok)) return(out$value)
+    e <- out$error
+    if (attempt >= max_tries || !isTRUE(should_retry(e))) {
+      stop(e)
+    }
+    .msg(
+      "  \u26a0\ufe0f  ", what, " failed (attempt ", attempt, "/", max_tries,
+      "): ", conditionMessage(e), " -- retrying in ", wait_sec, "s..."
+    )
+    Sys.sleep(wait_sec)
+    wait_sec <- wait_sec * 2
+    attempt <- attempt + 1L
+  }
+}
+
+.norm <- function(x) gsub("\\s+", " ", tolower(trimws(as.character(x))))
+
+# Choose the most specific identifier available for movement metrics.
+# Prefer deployment_id, then tag_local_identifier, then individual_local_identifier,
+# and finally the internal move2 track id.
+.metric_group_col <- function(x) {
+  for (nm in c(
+    "deployment_id",
+    "tag_local_identifier",
+    "individual_local_identifier"
+  )) {
+    if (nm %in% names(x) && !all(is.na(x[[nm]]))) return(nm)
+  }
+  NULL
+}
+
+# ---------------------------------------------------------------------------
+# .fill_from_td() — fill an event column from track data by direct lookup
+#
+# Safer than mt_as_event_attribute() for species/taxon because it uses
+# mt_track_id() directly and tolerates factor/int64 type mismatches.
+# Non-destructive: only fills NA positions; never overwrites existing values.
+# td_col   : column name to look for in track data (searched in priority order)
+# event_col: column to create/fill on the event data
+# ---------------------------------------------------------------------------
+.fill_from_td <- function(x, td_col, event_col) {
+  td <- tryCatch(move2::mt_track_data(x), error = function(e) NULL)
+  if (is.null(td)) {
+    return(x)
+  }
+  taxon_src <- intersect(
+    c(
+      td_col,
+      "taxon_canonical_name",
+      "species",
+      "individual_taxon_canonical_name"
+    ),
+    names(td)
+  )[1]
+  if (is.na(taxon_src)) {
+    return(x)
+  }
+  id_col <- move2::mt_track_id_column(x)
+  if (!id_col %in% names(td)) {
+    return(x)
+  }
+  lkp <- stats::setNames(
+    as.character(td[[taxon_src]]),
+    as.character(td[[id_col]])
+  )
+  vals <- unname(lkp[as.character(move2::mt_track_id(x))])
+  if (!event_col %in% names(x) || all(is.na(x[[event_col]]))) {
+    x[[event_col]] <- vals
+  } else {
+    miss <- is.na(x[[event_col]])
+    x[[event_col]][miss] <- vals[miss]
+  }
+  x
+}
+
+# Enforce strict time ordering per track (required by mt_speed / mt_distance).
+.dedupe_timestamps <- function(x) {
+  # The move2 track id column (e.g. individual_local_identifier) determines
+  # which tracks must be contiguous — mt_is_track_id_cleaved requires it.
+  # The metric grouping column (e.g. deployment_id) is finer-grained and used
+  # for deduplication, but the final sort order must put the move2 track id first
+  # so the cleave invariant is satisfied.
+  move2_track_col <- move2::mt_track_id_column(x)
+  grp_col <- .metric_group_col(x)
+  if (is.null(grp_col)) {
+    grp_col <- move2_track_col
+  }
+
+  # Some studies do not include comments; prefer non-start rows only if present.
+  ord_comments <- if ("comments" %in% names(x)) {
+    (is.na(x$comments) | x$comments != "start")
+  } else {
+    rep(TRUE, nrow(x))
+  }
+  ord_event <- if ("event_id" %in% names(x)) {
+    (!is.na(x$event_id))
+  } else {
+    rep(FALSE, nrow(x))
+  }
+  x <- x %>% dplyr::mutate(`..dedupe_order` = ord_comments + 0.1 * ord_event)
+
+  out <- x %>%
+    dplyr::group_by(.data[[grp_col]], .data$timestamp) %>%
+    dplyr::slice_max(
+      order_by = .data$`..dedupe_order`,
+      n = 1,
+      with_ties = FALSE
+    ) %>%
+    dplyr::ungroup() %>%
+    # Sort by move2 track id FIRST (satisfies cleave), then dep_col, then time
+    dplyr::arrange(
+      .data[[move2_track_col]],
+      .data[[grp_col]],
+      .data$timestamp
+    ) %>%
+    dplyr::select(-dplyr::any_of(c("..dedupe_order", "..metric_group_id")))
+  out
+}
+
+# ---------------------------------------------------------------------------
+# .add_start()
+#
+# Inserts one synthetic "start" row per deployment at deploy_on_timestamp,
+# placed at deploy_on_location (the capture/release location).
+#
+# Unlike the sourced mt_add_start(), this implementation:
+#   - Creates one row per DEPLOYMENT (keyed by deployment_id), not per
+#     individual, so multi-deployment individuals get one start row each.
+#   - Fills all event columns (tag_type, sensor_type, individual_local_identifier,
+#     deployment_id, tag_local_identifier, species, sex, etc.) from the first
+#     real location row of that deployment so no columns are NA.
+#   - Sets comments = "start" for downstream deduplication.
+#   - Sets sensor_type = "location" so the row is included in b_loc and
+#     calc_displacement() has a capture-location anchor for each deployment.
+#
+# If deploy_on_timestamp is missing, the deployment is skipped. Location falls
+# back deploy_on_location -> capture_location -> first real fix.
+# ---------------------------------------------------------------------------
+.add_start <- function(x) {
+
+  td <- tryCatch(move2::mt_track_data(x), error = function(e) NULL)
+  if (is.null(td)) {
+    .msg("  .add_start: no track data found; skipping.")
+    return(x)
+  }
+
+  # Identify required columns in track data
+  has_deploy_ts <- "deploy_on_timestamp" %in% names(td)
+  has_dep_id <- "deployment_id" %in% names(td)
+
+  if (!has_deploy_ts) {
+    .msg("  .add_start: deploy_on_timestamp not in track data; skipping.")
+    return(x)
+  }
+
+  # Track id column used by this move2 object
+  track_col <- move2::mt_track_id_column(x)
+
+  # Build a lookup: track_id → first real location row index
+  # Used to copy event-column values so the start row has no NAs.
+  loc_mask <- if ("sensor_type" %in% names(x)) {
+    x$sensor_type == "location" & !is.na(x$sensor_type)
+  } else {
+    rep(TRUE, nrow(x))
+  }
+  track_ids_vec <- as.character(move2::mt_track_id(x))
+
+  # For each track, get the index of its first location row
+  first_loc_idx <- tapply(
+    seq_len(nrow(x))[loc_mask],
+    track_ids_vec[loc_mask],
+    min
+  )
+
+  # td track id column: match the move2 track id so lookups are consistent
+  td_id_col <- if (track_col %in% names(td)) track_col else names(td)[1]
+
+  # Columns that carry Sigfox-transmission metadata and should be NA on start
+  # rows, which represent capture/release events rather than real transmissions.
+  .tx_cols <- c(
+    "event_id", "sequence_number", "format_type", "import_marked_outlier",
+    "sigfox_computed_location_radius", "sigfox_computed_location_source",
+    "sigfox_country", "sigfox_device_type", "sigfox_duplicates",
+    "sigfox_link_quality", "sigfox_lqi", "sigfox_operator",
+    "sigfox_payload", "sigfox_rssi", "transmission_protocol",
+    "transmission_timestamp", "visible"
+  )
+
+  # Pressure/altitude columns are cleared too: a start row is copied from the
+  # deployment's first real fix (base_idx), which — for TinyFox's flat schema —
+  # carries that fix's own tinyfox_pressure_min_last_24h value. Left in place,
+  # .add_altitude_from_pressure_col() would derive the start row's altitude_m
+  # from a real transmission that happened after release, not from the
+  # capture/release event itself. Ground elevation (deploy_on_location) is the
+  # correct starting altitude instead — see .make_location_metrics().
+  .pressure_cols <- c(
+    "barometric_pressure", "min_3h_pressure", "tinyfox_pressure_min_last_24h",
+    "altitude_m"
+  )
+
+  n_inserted <- 0L
+  start_rows <- vector("list", nrow(td))
+  # Indices in x of existing location rows whose timestamp == deploy_on_timestamp.
+  # These are marked "start" in place instead of creating a duplicate row.
+  rows_to_mark_start <- integer(0)
+
+  for (i in seq_len(nrow(td))) {
+    track_key <- as.character(td[[td_id_col]][i])
+
+    # deploy_on_timestamp — skip if missing or unparseable
+    dep_ts_raw <- td$deploy_on_timestamp[i]
+    # May be POSIXct, character (from stringification), or NA
+    dep_ts <- tryCatch(
+      {
+        if (inherits(dep_ts_raw, c("POSIXct", "POSIXlt"))) {
+          dep_ts_raw
+        } else if (
+          is.character(dep_ts_raw) &&
+            !is.na(dep_ts_raw) &&
+            nchar(trimws(dep_ts_raw)) > 0
+        ) {
+          lubridate::ymd_hms(dep_ts_raw, tz = "UTC", quiet = TRUE)
+        } else {
+          NA_real_
+        }
+      },
+      error = function(e) NA_real_
+    )
+    if (length(dep_ts) == 0 || all(is.na(dep_ts))) {
+      next
+    }
+
+    # If a real location row already exists at deploy_on_timestamp for this
+    # deployment, mark it as "start" in place rather than inserting a duplicate
+    # synthetic row that .dedupe_timestamps() would silently discard.
+    existing_at_dep_ts <- which(
+      loc_mask &
+        track_ids_vec == track_key &
+        !is.na(x$timestamp) &
+        x$timestamp == dep_ts
+    )
+    if (length(existing_at_dep_ts) > 0) {
+      rows_to_mark_start <- c(rows_to_mark_start, existing_at_dep_ts[1])
+      n_inserted <- n_inserted + 1L
+      next
+    }
+
+    # Geometry: prefer deploy_on_location, else capture_location from track data.
+    # After .fix_track_data_lists(), geometry columns become character WKT strings.
+    # Handle sfc, sfg, character WKT, and numeric/NA gracefully; empty points
+    # count as missing.
+    ref_idx <- first_loc_idx[track_key]
+    geom <- NULL
+
+    for (loc_col in c("deploy_on_location", "capture_location")) {
+      if (!is.null(geom) || !loc_col %in% names(td)) next
+      loc_raw <- td[[loc_col]][i]
+      geom <- tryCatch(
+        {
+          if (inherits(loc_raw, "sfc")) {
+            sf::st_sfc(loc_raw, crs = sf::st_crs(x))
+          } else if (inherits(loc_raw, "sfg")) {
+            sf::st_sfc(list(loc_raw), crs = sf::st_crs(x))
+          } else if (
+            is.character(loc_raw) &&
+              !is.na(loc_raw) &&
+              nchar(trimws(loc_raw)) > 0 &&
+              grepl(
+                "POINT|LINESTRING|POLYGON|GEOMETRY",
+                loc_raw,
+                ignore.case = TRUE
+              )
+          ) {
+            sf::st_as_sfc(loc_raw, crs = sf::st_crs(x))
+          } else {
+            NULL
+          }
+        },
+        error = function(e) NULL
+      )
+      if (!is.null(geom) && (length(geom) == 0 || all(sf::st_is_empty(geom)))) {
+        geom <- NULL
+      } else if (!is.null(geom) && loc_col == "capture_location") {
+        .msg("  .add_start: ", track_key, " has no deploy_on_location; using capture_location.")
+      }
+    }
+
+    # Fall back to first real location fix of the deployment
+    if (is.null(geom) || length(geom) == 0) {
+      geom <- if (!is.null(ref_idx) && !is.na(ref_idx)) {
+        sf::st_geometry(x)[ref_idx]
+      } else {
+        sf::st_sfc(sf::st_point(), crs = sf::st_crs(x))
+      }
+    }
+
+    # Build the start row from the reference location row (copies all event columns)
+    base_idx <- if (!is.null(ref_idx) && !is.na(ref_idx)) {
+      ref_idx
+    } else {
+      any_idx <- which(track_ids_vec == track_key)[1]
+      if (is.na(any_idx)) {
+        next
+      }
+      any_idx
+    }
+    start_row <- sf::st_as_sf(x[base_idx, , drop = FALSE])
+    class(start_row) <- class(start_row)[!class(start_row) %in% "move2"]
+
+    # Override the deployment-specific fields
+    start_row$timestamp <- dep_ts
+    if ("comments" %in% names(start_row)) {
+      start_row$comments <- "start"
+    } else {
+      start_row$comments <- "start"
+    }
+    tryCatch(
+      sf::st_geometry(start_row) <- sf::st_sfc(
+        geom[[1]],
+        crs = sf::st_crs(x)
+      ),
+      error = function(e) NULL # geometry assignment failed — keep original
+    )
+
+    # After assigning start-row geometry, refresh lon/lat columns
+    if (all(c("lon", "lat") %in% names(start_row))) {
+      xy <- sf::st_coordinates(start_row)
+
+      if (nrow(xy) > 0) {
+        start_row$lon <- as.numeric(xy[1, "X"])
+        start_row$lat <- as.numeric(xy[1, "Y"])
+      } else {
+        start_row$lon <- NA_real_
+        start_row$lat <- NA_real_
+      }
+    }
+
+    # Ensure deployment_id is on the start row (may have been promoted from track data)
+    if (has_dep_id && "deployment_id" %in% names(start_row)) {
+      start_row$deployment_id <- as.character(td$deployment_id[i])
+    }
+
+    # Clear Sigfox transmission columns — this is a capture/release row, not a
+    # real transmission, so inherited values from the template row would mislead.
+    for (.c in intersect(.tx_cols, names(start_row))) {
+      start_row[[.c]] <- NA
+    }
+    # Clear pressure/altitude columns copied from the template row — see
+    # .pressure_cols comment above.
+    for (.c in intersect(.pressure_cols, names(start_row))) {
+      start_row[[.c]] <- NA
+    }
+    for (.c in grep("^tinyfox_", names(start_row), value = TRUE)) {
+      start_row[[.c]] <- NA
+    }
+
+    start_rows[[i]] <- start_row
+    n_inserted <- n_inserted + 1L
+  }
+
+  # Mark in-place: existing location rows whose timestamp == deploy_on_timestamp.
+  if (length(rows_to_mark_start) > 0) {
+    if (!"comments" %in% names(x)) x$comments <- NA_character_
+    x$comments[rows_to_mark_start] <- "start"
+    .msg(
+      "  .add_start: marked ", length(rows_to_mark_start),
+      " existing location row(s) as 'start' (deploy_on_timestamp matches real fix)."
+    )
+  }
+
+  start_rows <- Filter(Negate(is.null), start_rows)
+  if (length(start_rows) == 0) {
+    if (n_inserted == 0L) {
+      .msg(
+        "  .add_start: no valid deploy_on_timestamp found; no start rows inserted."
+      )
+    } else {
+      .msg(
+        "  .add_start: all ", n_inserted,
+        " start rows handled via in-place marking (no synthetic rows needed)."
+      )
+    }
+    return(x)
+  }
+
+  new_rows <- tryCatch(
+    dplyr::bind_rows(start_rows),
+    error = function(e) {
+      .msg(
+        "  .add_start: bind_rows failed (",
+        conditionMessage(e),
+        "); skipping."
+      )
+      NULL
+    }
+  )
+  if (is.null(new_rows)) {
+    return(x)
+  }
+
+  # Combine original + start rows without calling mt_as_move2().
+  # mt_as_move2 would rebuild track data from event rows and error if any
+  # start-row deployment_id isn't in the minimal rebuilt track data.
+  # Instead: strip move2 class, bind as plain sf, re-sort, re-attach class + track data.
+  orig_td_start <- tryCatch(move2::mt_track_data(x), error = function(e) NULL)
+  x_plain <- sf::st_as_sf(x)
+  class(x_plain) <- class(x_plain)[!class(x_plain) %in% "move2"]
+
+  combined <- dplyr::bind_rows(new_rows, x_plain) %>%
+  dplyr::arrange(.data[[track_col]], .data$timestamp)
+
+  xy <- sf::st_coordinates(combined)
+  combined$lon <- as.numeric(xy[, "X"])
+  combined$lat <- as.numeric(xy[, "Y"])
+
+  class(combined) <- c("move2", class(combined))
+  attr(combined, "track_id_column") <- track_col
+  attr(combined, "time_column") <- "timestamp"
+  if (!is.null(orig_td_start)) {
+    combined <- tryCatch(
+      move2::mt_set_track_data(combined, orig_td_start),
+      error = function(e) combined
+    )
+  }
+
+  .msg("  .add_start: inserted ", n_inserted, " deployment start rows.")
+  combined
+}
+
+.add_prev_latlon <- function(x, lat_name = "lat_prev", lon_name = "lon_prev") {
+  if (!inherits(x, "move2")) {
+    stop("x must be a move2 object")
+  }
+  coords <- sf::st_coordinates(x)
+  track_id <- move2::mt_track_id(x)
+  df <- tibble::tibble(
+    track_id = track_id,
+    lon = coords[, "X"],
+    lat = coords[, "Y"]
+  ) %>%
+    group_by(track_id) %>%
+    mutate(!!lon_name := dplyr::lag(lon), !!lat_name := dplyr::lag(lat)) %>%
+    ungroup()
+  x[[lon_name]] <- df[[lon_name]]
+  x[[lat_name]] <- df[[lat_name]]
+  x
+}
+
+.wanted_sensor_ids <- function(study_info, sensor_selected) {
+  study_names <- trimws(unlist(strsplit(
+    as.character(study_info$sensor_type_ids),
+    "\\s*,\\s*"
+  )))
+  matched <- sensor_selected %>%
+    mutate(name_n = .norm(.data$name)) %>%
+    dplyr::filter(.data$name_n %in% .norm(study_names))
+  wanted_ids <- pull(matched, .data$id)
+
+  # TinyFox studies advertise only "sigfox-geolocation"; all tinyfox_* columns
+  # are delivered as extra columns on location rows, not separate sensor rows.
+  unmatched <- dplyr::anti_join(sensor_selected, matched, by = "id")
+  if (nrow(unmatched) > 0) {
+    .msg(
+      "  Note: ",
+      nrow(unmatched),
+      " requested sensor(s) not in study sensor_type_ids ",
+      "(likely stored as flat columns): ",
+      paste(unmatched$external_id, collapse = ", ")
+    )
+  }
+
+  list(wanted_ids = wanted_ids, study_sensor_names = study_names)
+}
+
+.add_event_attrs <- function(x) {
+  # Promote track-level metadata to event columns so they survive filtering,
+  # merging, and subsetting (e.g. .make_location_metrics filters to location rows).
+  # These are the columns most commonly needed for analysis:
+  #   species           — biological identity (via .fill_from_td)
+  #   sex               — individual attribute
+  #   model             — tag hardware model string
+  #   tag_firmware      — firmware version on the tag
+  #   tag_local_identifier — which physical tag was on the animal
+  #   deployment_id     — deployment-level grouping key
+  # NOT promoted: taxon_canonical_name (redundant with species).
+  #
+  # All factor/ordered columns are coerced to character to prevent level-set
+  # conflicts when stacking objects from different studies.
+
+  # ---- Coerce track data int64/factor/ordered → character before joins ----
+  td <- tryCatch(move2::mt_track_data(x), error = function(e) NULL)
+  if (!is.null(td)) {
+    changed <- FALSE
+    for (nm in names(td)) {
+      v <- td[[nm]]
+      if (inherits(v, "integer64") || is.factor(v) || is.ordered(v)) {
+        td[[nm]] <- as.character(v)
+        changed <- TRUE
+      }
+    }
+    if (changed) {
+      x <- tryCatch(move2::mt_set_track_data(x, td), error = function(e) x)
+    }
+  }
+
+  # ---- Promote attributes from track data to event columns ----
+  for (attr in c(
+    "sex",
+    "model",
+    "tag_firmware",
+    "attachment_comments",
+    "tag_local_identifier",
+    "deployment_id"
+  )) {
+    x <- .safe_try(
+      x %>% mt_as_event_attribute(attr, .keep = TRUE),
+      paste0("mt_as_event_attribute(", attr, ")")
+    ) %||%
+      x
+  }
+
+  # ---- species: direct track-data lookup (robust to type mismatches) ----
+  x <- .fill_from_td(x, "taxon_canonical_name", "species")
+  x$species <- as.character(x$species)
+
+  # ---- Coerce all factor/ordered event columns → character ----
+  geom_col <- if (inherits(x, "sf")) attr(x, "sf_column") else character(0)
+  for (nm in setdiff(names(x), geom_col)) {
+    v <- x[[nm]]
+    if (is.factor(v) || is.ordered(v)) {
+      x[[nm]] <- as.character(v)
+    }
+  }
+
+  x
+}
+
+.set_tag_type <- function(x, study_id_current = NULL, tag_type = NULL) {
+  allowed <- c("uWasp", "Nanofox", "Tinyfox")
+
+  # Map any string (model name, firmware label, format_type) to a canonical
+  # tag_type.  NanoFox firmware names ("30Days", "30DaysFineScalePressure")
+  # are included because format_type in Movebank exports often carries the
+  # firmware string rather than the model name.
+  .classify_model <- function(s) {
+    s <- as.character(s)
+    dplyr::case_when(
+      grepl("uWasp|SigfoxGH", s, ignore.case = TRUE)                          ~ "uWasp",
+      grepl("Nano|NanoFox|spring2025bat|30days|30DaysFine", s,
+            ignore.case = TRUE)                                                 ~ "Nanofox",
+      grepl("Tiny|TinyFox|TinyFoxBat|BBX5|BBV6|TV1", s, ignore.case = TRUE)   ~ "Tinyfox",
+      TRUE ~ NA_character_
+    )
+  }
+
+  # Resolve explicit per-study override (validated once here).
+  override <- NULL
+  if (!is.null(tag_type)) {
+    if (is.null(names(tag_type)) && length(tag_type) == 1 && !is.na(tag_type)) {
+      override <- as.character(tag_type)
+    } else if (!is.null(names(tag_type)) && !is.null(study_id_current)) {
+      sid <- as.character(study_id_current)
+      if (sid %in% names(tag_type)) override <- as.character(tag_type[[sid]])
+    }
+    if (!is.null(override) && !is.na(override)) {
+      canonical <- allowed[match(tolower(override), tolower(allowed))]
+      if (is.na(canonical)) {
+        stop(
+          "Invalid tag_type override for study ", study_id_current, ": ",
+          override, ". Allowed values are: ", paste(allowed, collapse = ", ")
+        )
+      }
+      override <- canonical
+    }
+  }
+
+  # Build classification by filling NA slots progressively.
+  # Priority (highest to lowest):
+  #   1. Explicit override
+  #   2. model / tag_model event column  (most reliable — "Nanofox", "Tinyfox")
+  #   3. model / tag_model from track data
+  #   4. format_type column              (firmware label; may omit model name)
+  #   5. Existing tag_type column        (only used to fill surviving gaps)
+  result <- rep(NA_character_, nrow(x))
+
+  # 1) Override fills everything.
+  if (!is.null(override) && !is.na(override)) {
+    result <- rep(override, nrow(x))
+  }
+
+  # 2) Event-level model column.
+  if (any(is.na(result))) {
+    for (col in c("model", "tag_model")) {
+      if (col %in% names(x) && any(!is.na(x[[col]]))) {
+        classified <- .classify_model(as.character(x[[col]]))
+        result[is.na(result)] <- classified[is.na(result)]
+        if (!any(is.na(result))) break
+      }
+    }
+  }
+
+  # 3) Track-data model column.
+  if (any(is.na(result))) {
+    td <- tryCatch(move2::mt_track_data(x), error = function(e) NULL)
+    if (!is.null(td)) {
+      td_model_cols <- intersect(c("tag_model", "model"), names(td))
+      if (length(td_model_cols) > 0) {
+        track_id_vec <- as.character(move2::mt_track_id(x))
+        id_col       <- names(td)[1]
+        td_lookup    <- stats::setNames(
+          .classify_model(as.character(td[[td_model_cols[1]]])),
+          as.character(td[[id_col]])
+        )
+        classified <- td_lookup[track_id_vec]
+        result[is.na(result)] <- classified[is.na(result)]
+      }
+    }
+  }
+
+  # 4) format_type column (firmware / schema label).
+  if (any(is.na(result)) &&
+      "format_type" %in% names(x) &&
+      any(!is.na(x[["format_type"]]))) {
+    classified <- .classify_model(x[["format_type"]])
+    result[is.na(result)] <- classified[is.na(result)]
+  }
+
+  # 5) Existing tag_type column (fill any remaining gaps).
+  if (any(is.na(result)) && "tag_type" %in% names(x)) {
+    existing <- as.character(x$tag_type)
+    existing[!existing %in% allowed] <- NA_character_
+    result[is.na(result) & !is.na(existing)] <- existing[is.na(result) & !is.na(existing)]
+  }
+
+  if (!any(!is.na(result))) {
+    stop(
+      "tag_type could not be inferred for study ",
+      as.character(study_id_current),
+      ". Supply tag_type as a named vector for only the unresolved studies. ",
+      "Allowed values are: ", paste(allowed, collapse = ", "), "."
+    )
+  }
+
+  x$tag_type <- result
+  .msg(
+    "  tag_type distribution: ",
+    paste(
+      names(table(x$tag_type, useNA = "ifany")),
+      table(x$tag_type, useNA = "ifany"),
+      sep = "=", collapse = ", "
+    )
+  )
+  x
+}
+
+.standardise_model_firmware <- function(x, study_id_current = NULL) {
+if (is.null(x) || nrow(x) == 0) return(x)
+
+# Save originals before any transformation
+if (!"model_raw" %in% names(x) && "model" %in% names(x)) {
+  x$model_raw <- as.character(x$model)
+}
+if (!"tag_firmware_raw" %in% names(x) && "tag_firmware" %in% names(x)) {
+  x$tag_firmware_raw <- as.character(x$tag_firmware)
+}
+
+# Only proceed with standardisation if model/firmware columns exist
+if (!"model" %in% names(x) || !"tag_firmware" %in% names(x)) {
+  if (.verbose()) {
+    .msg("  model/firmware columns missing; skipping standardisation")
+  }
+  return(x)
+}
+
+# WORK WITH WHAT'S ALREADY THERE - don't overwrite valid data
+model <- as.character(x$model)
+firmware <- as.character(x$tag_firmware)
+
+# Clean NAs and empty strings
+model[model %in% c("", "NA", "NaN", "NULL")] <- NA_character_
+firmware[firmware %in% c("", "NA", "NaN", "NULL")] <- NA_character_
+
+# Regularize all existing model strings to one of three canonical values.
+# This collapses variants such as "nanofox", "NanoFox" -> "Nanofox",
+# "TinyFoxBatt" -> "Tinyfox", and "SigfoxGH" -> "uWasp".
+model <- dplyr::case_when(
+  grepl("uWasp|SigfoxGH", model, ignore.case = TRUE)          ~ "uWasp",
+  grepl("Nano|NanoFox|spring2025bat|30days|30DaysFine",
+        model, ignore.case = TRUE)                              ~ "Nanofox",
+  grepl("Tiny|TinyFox|TinyFoxBat|BBX5|BBV6|TV1",
+        model, ignore.case = TRUE)                              ~ "Tinyfox",
+  TRUE                                                        ~ model
+)
+
+# If we have tag_type, use it to fill in missing models
+if ("tag_type" %in% names(x)) {
+  tagtype_tok <- tolower(as.character(x$tag_type))
+
+  # Only fill NAs - don't overwrite existing valid models
+  model[is.na(model) & tagtype_tok == "nanofox"] <- "Nanofox"
+  model[is.na(model) & tagtype_tok == "tinyfox"] <- "Tinyfox"
+  model[is.na(model) & tagtype_tok == "uwasp"] <- "uWasp"
+
+  # uWasp has no firmware
+  firmware[model == "uWasp"] <- NA_character_
+}
+
+# Validation
+nano_fw <- c("Daily", "10Days", "30Days", "30DaysFineScalePressure")
+tiny_fw <- c("V13", "V13P", "V14P", "battTorpor", "BBX5", "BBV6", "TV1")
+
+issue <- rep("ok", nrow(x))
+issue[is.na(model)] <- "model_unknown"
+issue[model == "Nanofox" & is.na(firmware)] <- "nanofox_missing_firmware"
+issue[model == "Nanofox" & !is.na(firmware) & !firmware %in% nano_fw] <- "nanofox_invalid_firmware"
+issue[model == "Tinyfox" & is.na(firmware)] <- "tinyfox_missing_firmware"
+issue[model == "Tinyfox" & !is.na(firmware) & !firmware %in% tiny_fw] <- "tinyfox_invalid_firmware"
+
+x$model <- model
+x$tag_firmware <- firmware
+x$model_firmware_ok <- issue == "ok"
+x$model_firmware_issue <- issue
+
+n_unknown <- sum(issue == "model_unknown")
+if (n_unknown > 0) {
+  warning(
+    "study ", study_id_current %||% "?", ": ",
+    n_unknown, " row(s) with unknown tag model (model_firmware_issue = 'model_unknown'). ",
+    "Check 'model' and 'tag_firmware' columns or supply tag_type override.",
+    call. = FALSE
+  )
+}
+
+if (.verbose()) {
+  .msg("  model / firmware check for study ", study_id_current %||% "?", ":")
+  print(
+    sf::st_drop_geometry(x) |>
+      tibble::as_tibble() |>
+      dplyr::count(
+        .data$tag_type,
+        .data$model,
+        .data$tag_firmware,
+        .data$model_firmware_issue,
+        name = "n"
+      ) |>
+      dplyr::arrange(.data$model_firmware_issue, .data$tag_type, .data$model),
+    n = 100
+  )
+}
+
+x
+}
+
+.add_lonlat <- function(x) {
+  coords <- sf::st_coordinates(x)
+  x$lon <- coords[, 1]
+  x$lat <- coords[, 2]
+  x
+}
+
+.label_sensor_type <- function(x, sensor_selected) {
+  x %>%
+    left_join(
+      sensor_selected %>% dplyr::select(id, sensor_type, is_location_sensor),
+      by = c("sensor_type_id" = "id")
+    )
+}
+
+.fix_track_data_lists <- function(x) {
+  # When individual_local_identifier is used as the track ID, Movebank bundles
+  # multiple deployments per individual into list-columns in the track data.
+  # This is EXPECTED move2 behaviour (per move2 team).
+  #
+  # Strategy (exactly as recommended by move2 team):
+  #   1. For list-columns where every entry is identical → scalar (vec_c head).
+  #   2. For list-columns with differing entries → comma-separated string.
+  #   3. Leave any remaining list-columns intact — downstream code must tolerate
+  #      them.  mt_as_event_attribute() correctly handles list-valued track data.
+
+  if (!any(sapply(mt_track_data(x), rlang::is_bare_list))) {
+    return(x)
+  }
+
+  .msg("  Track data has list-columns (multiple deployments per individual).")
+
+  # Step 1: collapse columns where all entries are the same value
+  x <- x |>
+    move2::mutate_track_data(dplyr::across(
+      dplyr::where(
+        ~ rlang::is_bare_list(.x) &&
+          all(purrr::map_lgl(.x, function(y) length(unique(y)) == 1L))
+      ),
+      ~ do.call(vctrs::vec_c, purrr::map(.x, utils::head, 1L))
+    ))
+
+  # Step 2: stringify columns where entries differ across deployments
+  if (any(sapply(mt_track_data(x), rlang::is_bare_list))) {
+    x <- x |>
+      move2::mutate_track_data(dplyr::across(
+        dplyr::where(
+          ~ rlang::is_bare_list(.x) &&
+            any(purrr::map_lgl(.x, function(y) length(unique(y)) != 1L))
+        ),
+        ~ unlist(purrr::map(.x, paste, collapse = ","))
+      ))
+  }
+
+  remaining <- names(mt_track_data(x))[sapply(
+    mt_track_data(x),
+    rlang::is_bare_list
+  )]
+  if (length(remaining) > 0) {
+    .msg(
+      "  Track data: ",
+      length(remaining),
+      " list-column(s) retained (entries differ and cannot be stringified): ",
+      paste(remaining, collapse = ", ")
+    )
+  } else {
+    .msg("  Track data list-columns resolved.")
+  }
+
+  x
+}
+
+# ---------------------------------------------------------------------------
+# .add_altitude_from_pressure_col()
+#
+# Converts any pressure column to altitude_m using the ISA hypsometric formula:
+#   altitude_m = 44330 * (1 - (P / 1013.25) ^ (1/5.255))
+#
+# Handles both tag types with a single unified approach:
+#
+#   TinyFox (flat schema): tinyfox_pressure_min_last_24h [mbar] is a column
+#     on every location row. Convert it directly — no grouping, no joining.
+#     Each row carries its own pressure value.
+#
+#   NanoFox (separate-row schema): min_3h_pressure [mbar] is joined onto
+#     location rows by add_min_pressure_to_locations() before this function.
+#     Convert it directly in the same way.
+#
+# Priority when both columns exist (mixed-tag study):
+#   NanoFox min_3h_pressure > TinyFox tinyfox_pressure_min_last_24h
+#
+# Writes altitude_m [m] to x. Never overwrites an existing non-NA value.
+# ---------------------------------------------------------------------------
+.add_altitude_from_pressure_col <- function(
+  x,
+  P0 = 1013.25,
+  p_min = 396,
+  p_max = 1100
+) {
+  # p_min / p_max: valid pressure range in mbar.
+  #   Values outside this range are sensor errors and are set to NA before
+  #   conversion so they never produce altitude_m values.
+  #   Default range 500–1100 mbar corresponds to ~5600m–sea level altitude.
+  #   The known error value 395 mbar falls well below p_min and is caught here.
+  pressure_to_alt <- function(P) {
+    44330 * (1 - (as.numeric(P) / P0)^(1 / 5.255))
+  }
+
+  .mask_pressure <- function(col_name) {
+    if (!col_name %in% names(x)) {
+      return(invisible(NULL))
+    }
+    raw <- as.numeric(x[[col_name]])
+    bad <- !is.na(raw) & (raw < p_min | raw > p_max)
+    if (any(bad, na.rm = TRUE)) {
+      x[[col_name]][bad] <<- NA_real_
+      .msg(
+        "  pressure: ",
+        sum(bad, na.rm = TRUE),
+        " error value(s) in ",
+        col_name,
+        " set to NA (outside ",
+        p_min,
+        "–",
+        p_max,
+        " mbar)."
+      )
+    }
+  }
+  for (pc in c(
+    "barometric_pressure",
+    "min_3h_pressure",
+    "tinyfox_pressure_min_last_24h"
+  )) {
+    .mask_pressure(pc)
+  }
+
+  # Initialise altitude_m if absent
+  if (!"altitude_m" %in% names(x)) {
+    x$altitude_m <- NA_real_
+  }
+  existing <- !is.na(as.numeric(x$altitude_m))
+
+  # barometric_pressure (NanoFox multi-sensor schema, joined from sensor rows)
+  if ("barometric_pressure" %in% names(x)) {
+    fill <- !existing & !is.na(as.numeric(x$barometric_pressure))
+    if (any(fill, na.rm = TRUE)) {
+      x$altitude_m[fill] <- pressure_to_alt(x$barometric_pressure[fill])
+      existing <- existing | fill
+      .msg(
+        "  altitude_m: ",
+        sum(fill, na.rm = TRUE),
+        " rows filled from barometric_pressure."
+      )
+    }
+  }
+
+  # min_3h_pressure (NanoFox legacy column name)
+  if ("min_3h_pressure" %in% names(x)) {
+    fill <- !existing & !is.na(as.numeric(x$min_3h_pressure))
+    if (any(fill, na.rm = TRUE)) {
+      x$altitude_m[fill] <- pressure_to_alt(x$min_3h_pressure[fill])
+      existing <- existing | fill
+      .msg(
+        "  altitude_m: ",
+        sum(fill, na.rm = TRUE),
+        " rows filled from min_3h_pressure."
+      )
+    }
+  }
+
+  # tinyfox_pressure_min_last_24h (TinyFox flat column on location rows)
+  if ("tinyfox_pressure_min_last_24h" %in% names(x)) {
+    fill <- !existing & !is.na(as.numeric(x$tinyfox_pressure_min_last_24h))
+    if (any(fill, na.rm = TRUE)) {
+      x$altitude_m[fill] <- pressure_to_alt(x$tinyfox_pressure_min_last_24h[
+        fill
+      ])
+      existing <- existing | fill
+      .msg(
+        "  altitude_m: ",
+        sum(fill, na.rm = TRUE),
+        " rows filled from tinyfox_pressure_min_last_24h."
+      )
+    }
+  }
+
+  # Attach units
+  x$altitude_m <- units::set_units(as.numeric(x$altitude_m), "m")
+  x
+}
+
+# .expand_tinyfox_rows()
+#
+# TinyFox downloads store all sensor data as extra columns on location rows.
+# This function unpacks them into separate rows — one per sensor measurement
+# per transmission — so the full object `b` has the same tidy structure as a
+# NanoFox multi-sensor download.
+#
+# Columns processed:
+#
+#   tinyfox_vedba_NNh_ago  [m/s^2]
+#     One row per 1-hour bin.  The suffix NN gives the number of hours before
+#     transmission that the window ENDS.
+#       time_end   = timestamp - (NN - 1) hours
+#       time_start = timestamp - NN hours
+#     sensor_type = "VeDBA"
+#
+#   tinyfox_total_vedba  [m/s^2]
+#     One row covering the full 22-hour activity window.
+#       time_start = timestamp - 22 hours,  time_end = timestamp
+#     sensor_type = "VeDBA"
+#
+#   tinyfox_pressure_min_last_24h  [mbar]
+#     One row, 24-hour window.
+#     sensor_type = "min.baro.pressure"
+#
+#   tinyfox_temperature_min_last_24h / tinyfox_temperature_max_last_24h  [°C]
+#     One row each, 24-hour window.
+#     sensor_type = "avg.temp"
+#
+#   tinyfox_activity_percent_last_24h  [%]
+#     One row, 24-hour window.
+#     sensor_type = "activity"
+#
+# All new rows inherit:
+#   - geometry from their source location row
+#   - individual_local_identifier, tag_type, and all track-level fields
+#   - timestamp set to time_end (Movebank convention)
+#   - all tinyfox_* columns set to NA (those belong only to the location row)
+#
+# The original location rows also receive time_start = time_end = timestamp.
+#
+# Returns a move2/sf object with the original rows plus the new sensor rows,
+# sorted by individual and timestamp.
+# ---------------------------------------------------------------------------
+.expand_tinyfox_rows <- function(x) {
+  # Only run if the characteristic column exists
+  if (
+    !"tinyfox_pressure_min_last_24h" %in% names(x) &&
+      !any(grepl("^tinyfox_vedba_\\d+h_ago$", names(x)))
+  ) {
+    .msg("  .expand_tinyfox_rows: no TinyFox sensor columns found; skipping.")
+    return(x)
+  }
+
+
+  # Strip units from all columns before building sub-tibbles.
+  # Mixed-study downloads may have units-classed columns (e.g. vedba [standard_free_fall])
+  # alongside sub-tibbles that build the same column as plain double via as.numeric().
+  # bind_rows errors on <units> vs <double> clash; strip upfront so every column
+  # in both x and all sub-tibbles is plain numeric.
+  x <- .strip_units_cols(x)
+
+  # Identify column groups
+  vedba_h_cols <- sort(names(x)[grepl("^tinyfox_vedba_\\d+h_ago$", names(x))])
+  total_v_col <- if ("tinyfox_total_vedba" %in% names(x)) {
+    "tinyfox_total_vedba"
+  } else {
+    NULL
+  }
+  pres_col <- if ("tinyfox_pressure_min_last_24h" %in% names(x)) {
+    "tinyfox_pressure_min_last_24h"
+  } else {
+    NULL
+  }
+  tmin_col <- if ("tinyfox_temperature_min_last_24h" %in% names(x)) {
+    "tinyfox_temperature_min_last_24h"
+  } else {
+    NULL
+  }
+  tmax_col <- if ("tinyfox_temperature_max_last_24h" %in% names(x)) {
+    "tinyfox_temperature_max_last_24h"
+  } else {
+    NULL
+  }
+  act_col <- if ("tinyfox_activity_percent_last_24h" %in% names(x)) {
+    "tinyfox_activity_percent_last_24h"
+  } else {
+    NULL
+  }
+
+  # All tinyfox_* columns that will be NA'd on non-location rows
+  all_tf_cols <- c(
+    vedba_h_cols,
+    total_v_col,
+    pres_col,
+    tmin_col,
+    tmax_col,
+    act_col,
+    "tinyfox_tag_activation"
+  ) %>%
+    intersect(names(x))
+
+  # Helper: build a derived-sensor tibble from one scalar column
+  # Each source row → one output row with its own time window
+  .make_scalar_rows <- function(
+    src_col,
+    value_col_name,
+    sensor_lbl,
+    window_hours_start,
+    window_hours_end = 0
+  ) {
+    if (is.null(src_col) || !src_col %in% names(x)) {
+      return(NULL)
+    }
+    vals <- as.numeric(x[[src_col]])
+    keep <- !is.na(vals)
+    if (!any(keep)) {
+      return(NULL)
+    }
+
+    sf::st_as_sf(tibble::tibble(
+      .src_row = seq_len(nrow(x))[keep],
+      individual_local_identifier = x$individual_local_identifier[keep],
+      timestamp = x$timestamp[keep] -
+        lubridate::dhours(window_hours_end),
+      time_start = x$timestamp[keep] -
+        lubridate::dhours(window_hours_start),
+      time_end = x$timestamp[keep] -
+        lubridate::dhours(window_hours_end),
+      sensor_type = sensor_lbl,
+      !!value_col_name := vals[keep],
+      geometry = sf::st_geometry(x)[keep]
+    ))
+  }
+
+  # ---- 1. Hourly VeDBA bins ----
+  # tinyfox_vedba_NNh_ago → N hours before tx is when the window ends.
+  # Window: [tx - NN h, tx - (NN-1) h]
+  vedba_h_rows <- NULL
+  if (length(vedba_h_cols) > 0) {
+    vedba_h_rows <- lapply(vedba_h_cols, function(col) {
+      nn <- as.integer(sub("tinyfox_vedba_(\\d+)h_ago", "\\1", col))
+      vals <- as.numeric(x[[col]])
+      keep <- !is.na(vals)
+      if (!any(keep)) {
+        return(NULL)
+      }
+
+      sf::st_as_sf(tibble::tibble(
+        .src_row = seq_len(nrow(x))[keep],
+        individual_local_identifier = x$individual_local_identifier[keep],
+        time_end = x$timestamp[keep] - lubridate::dhours(nn - 1L),
+        time_start = x$timestamp[keep] - lubridate::dhours(nn),
+        timestamp = x$timestamp[keep] - lubridate::dhours(nn - 1L),
+        sensor_type = "VeDBA",
+        vedba = vals[keep],
+        geometry = sf::st_geometry(x)[keep]
+      ))
+    })
+    vedba_h_rows <- dplyr::bind_rows(Filter(Negate(is.null), vedba_h_rows))
+  }
+
+  # ---- 2. Total VeDBA (full 22-hour window) ----
+  total_v_rows <- .make_scalar_rows(
+    total_v_col,
+    "vedba",
+    "VeDBA",
+    window_hours_start = 22,
+    window_hours_end = 0
+  )
+
+  # ---- 3. Pressure ----
+  pres_rows <- .make_scalar_rows(
+    pres_col,
+    "barometric_pressure",
+    "min.baro.pressure",
+    window_hours_start = 24,
+    window_hours_end = 0
+  )
+
+  # ---- 4. Temperature (min and max as separate rows) ----
+  tmin_rows <- .make_scalar_rows(
+    tmin_col,
+    "external_temperature_min",
+    "avg.temp",
+    window_hours_start = 24,
+    window_hours_end = 0
+  )
+  tmax_rows <- .make_scalar_rows(
+    tmax_col,
+    "external_temperature_max",
+    "avg.temp",
+    window_hours_start = 24,
+    window_hours_end = 0
+  )
+
+  # ---- 5. Activity ----
+  act_rows <- .make_scalar_rows(
+    act_col,
+    "activity_percent",
+    "activity",
+    window_hours_start = 24,
+    window_hours_end = 0
+  )
+
+  # ---- 6. Add time_start / time_end to original location rows ----
+  x$time_start <- x$timestamp
+  x$time_end <- x$timestamp
+  # NA out tinyfox sensor columns on location rows is intentional —
+  # they are now represented as dedicated rows.
+  # (Keep them on location rows for backward compatibility; mark with a note.)
+
+  # ---- 7. Collect all new sensor rows ----
+  new_rows_list <- Filter(
+    Negate(is.null),
+    list(
+      vedba_h_rows,
+      total_v_rows,
+      pres_rows,
+      tmin_rows,
+      tmax_rows,
+      act_rows
+    )
+  )
+
+  if (length(new_rows_list) == 0) {
+    .msg("  .expand_tinyfox_rows: no non-NA sensor values to expand.")
+    return(x)
+  }
+
+  # Helper: create an NA vector that matches the class/units of a source column.
+  # Handles units, factors, and plain vectors safely without vctrs::vec_cast
+  # (which errors on geometry and other complex column types).
+  .typed_na <- function(src, n) {
+    if (inherits(src, "units")) {
+      return(units::set_units(
+        rep(NA_real_, n),
+        units::deparse_unit(src),
+        mode = "standard"
+      ))
+    }
+    if (is.factor(src)) {
+      return(factor(rep(NA_character_, n), levels = levels(src)))
+    }
+    if (is.integer(src)) {
+      return(rep(NA_integer_, n))
+    }
+    if (is.numeric(src)) {
+      return(rep(NA_real_, n))
+    }
+    if (is.logical(src)) {
+      return(rep(NA, n))
+    }
+    if (is.character(src)) {
+      return(rep(NA_character_, n))
+    }
+    if (inherits(src, "POSIXct")) {
+      return(as.POSIXct(rep(NA_real_, n), origin = "1970-01-01", tz = "UTC"))
+    }
+    if (inherits(src, "sfc")) {
+      # geometry — copy a null/empty geometry column
+      return(sf::st_sfc(
+        lapply(seq_len(n), function(...) sf::st_point()),
+        crs = sf::st_crs(src)
+      ))
+    }
+    rep(NA, n) # fallback
+  }
+
+  # Align all sub-tibbles in new_rows_list to the same column schema as x
+  # BEFORE binding, so the internal bind_rows sees consistent types.
+  x_cols <- names(x)
+  x_sf <- sf::st_drop_geometry(.strip_units_cols(x)) # drop geometry + units for type reference
+
+  new_rows_list <- lapply(new_rows_list, function(sub) {
+    n <- nrow(sub)
+    # Add columns present in x but missing from this sub-tibble
+    for (col in setdiff(x_cols, c(names(sub), "geometry"))) {
+      src <- x_sf[[col]]
+      if (is.null(src)) {
+        next
+      }
+      sub[[col]] <- .typed_na(src, n)
+    }
+    # Remove any extra columns not in x (value columns like "vedba", "barometric_pressure")
+    # are kept as they will become NAs in the other sub-tibbles
+    sub
+  })
+
+  # Now bind — all sub-tibbles share the same base columns with matching types
+  new_rows <- dplyr::bind_rows(new_rows_list)
+
+  # Zero out tinyfox_* columns on new rows (those values live on location rows)
+  for (col in intersect(all_tf_cols, names(new_rows))) {
+    new_rows[[col]] <- .typed_na(x[[col]], nrow(new_rows))
+  }
+
+  # Final column alignment: add any remaining x-columns still missing
+  for (col in setdiff(names(x), names(new_rows))) {
+    src <- x[[col]]
+    if (inherits(src, "sfc")) {
+      next
+    } # geometry handled by st_as_sf below
+    new_rows[[col]] <- .typed_na(src, nrow(new_rows))
+  }
+  # Reorder to match x (geometry column may differ in position — that's fine)
+  shared_cols <- intersect(names(x), names(new_rows))
+  new_rows <- new_rows[, shared_cols, drop = FALSE]
+
+  # ---- 8. Stack original + new rows and re-cast to move2 ----
+  # Use only columns present in both to avoid geometry/type conflicts.
+  x_out <- sf::st_as_sf(x)[, shared_cols, drop = FALSE]
+  new_rows_sf <- sf::st_as_sf(new_rows)
+  # Ensure new_rows_sf has the geometry column from their source rows
+  if (!"geometry" %in% names(new_rows_sf)) {
+    sf::st_geometry(new_rows_sf) <- sf::st_geometry(x)[new_rows$.src_row]
+  }
+
+  combined <- dplyr::bind_rows(x_out, new_rows_sf) %>%
+    dplyr::arrange(individual_local_identifier, timestamp)
+
+  # Re-establish move2 class using the same track id as the input object.
+  # Do NOT hardcode individual_local_identifier — the input is keyed to deployment_id.
+  orig_track_col_expand <- move2::mt_track_id_column(x)
+  orig_td_expand <- tryCatch(move2::mt_track_data(x), error = function(e) {
+    NULL
+  })
+  class(combined) <- c("move2", class(combined))
+  attr(combined, "track_id_column") <- orig_track_col_expand
+  attr(combined, "time_column") <- "timestamp"
+  if (!is.null(orig_td_expand)) {
+    combined <- tryCatch(
+      move2::mt_set_track_data(combined, orig_td_expand),
+      error = function(e) combined
+    )
+  }
+
+  n_new <- nrow(combined) - nrow(x)
+  .msg(
+    "  .expand_tinyfox_rows: added ",
+    n_new,
+    " sensor rows. ",
+    "Total rows: ",
+    nrow(combined),
+    " | sensor_type distribution:"
+  )
+  if (.verbose()) {
+    print(table(combined$sensor_type, useNA = "ifany"))
+  }
+
+  combined
+}
+
+# ---------------------------------------------------------------------------
+# .add_delta_altitude()
+#
+# Computes altitude change (m) between consecutive location fixes per track.
+#   Positive = ascending, negative = descending.
+#   Requires `altitude_m` (numeric, metres) from add_altitude_from_pressure().
+#   Result column `delta_altitude_m` carries explicit units = "m" via the
+#   units package, so downstream division by dt gives a unit-safe climb rate.
+# ---------------------------------------------------------------------------
+.add_delta_altitude <- function(x) {
+  if (!"altitude_m" %in% names(x)) {
+    warning(".add_delta_altitude: 'altitude_m' column not found; skipping.")
+    return(x)
+  }
+
+  # Group by the move2 track id (which should already be deployment_id when
+  # called from .make_location_metrics after re-keying).
+  group_vec <- as.character(move2::mt_track_id(x))
+
+  delta <- tibble::tibble(
+    track_id = group_vec,
+    altitude_m = as.numeric(x$altitude_m)
+  ) %>%
+    dplyr::group_by(track_id) %>%
+    dplyr::mutate(delta_altitude_m = altitude_m - dplyr::lag(altitude_m)) %>%
+    dplyr::ungroup()
+
+  x$delta_altitude_m <- units::set_units(delta$delta_altitude_m, "m")
+
+  .msg(
+    "  delta_altitude_m computed (",
+    sum(!is.na(delta$delta_altitude_m)),
+    " non-NA values)."
+  )
+  x
+}
+
+# ---------------------------------------------------------------------------
+# .add_flight_altitude_metrics()
+#
+# Computes climb rate (m/s) from delta_altitude_m / dt_prev, and flags each
+# fix-to-fix interval as "flight" using vedba_sum (per-burst-corrected scale)
+# exceeding `threshold`. Must run AFTER vedba_sum scaling correction so the
+# threshold is meaningful and comparable across tag types.
+#
+# Columns added:
+#   climb_rate_ms          : delta_altitude_m / dt_prev, all intervals (m/s)
+#   is_flight               : logical, vedba_sum > threshold
+#   delta_altitude_flight_m : delta_altitude_m where is_flight, else NA
+#   climb_rate_flight_ms    : climb_rate_ms where is_flight, else NA
+# ---------------------------------------------------------------------------
+.add_flight_altitude_metrics <- function(x, threshold = 50) {
+  if (!"delta_altitude_m" %in% names(x)) {
+    warning(".add_flight_altitude_metrics: 'delta_altitude_m' column not found; skipping.")
+    return(x)
+  }
+  if (!"dt_prev" %in% names(x)) {
+    warning(".add_flight_altitude_metrics: 'dt_prev' column not found; skipping.")
+    return(x)
+  }
+  if (!"vedba_sum" %in% names(x)) {
+    warning(".add_flight_altitude_metrics: 'vedba_sum' column not found; skipping.")
+    return(x)
+  }
+
+  delta_alt_m <- as.numeric(x$delta_altitude_m)
+  dt_prev_s <- as.numeric(x$dt_prev)
+  climb_rate <- delta_alt_m / dt_prev_s
+  climb_rate[!is.finite(climb_rate)] <- NA_real_
+
+  is_flight <- !is.na(x$vedba_sum) & as.numeric(x$vedba_sum) > threshold
+
+  x$climb_rate_ms <- units::set_units(climb_rate, "m/s")
+  x$is_flight <- is_flight
+  x$delta_altitude_flight_m <- units::set_units(
+    ifelse(is_flight, delta_alt_m, NA_real_), "m"
+  )
+  x$climb_rate_flight_ms <- units::set_units(
+    ifelse(is_flight, climb_rate, NA_real_), "m/s"
+  )
+
+  .msg(
+    "  flight altitude metrics: ",
+    sum(is_flight, na.rm = TRUE),
+    " flight fixes (vedba_sum > ", threshold, "), climb_rate_flight_ms median = ",
+    round(stats::median(climb_rate[is_flight], na.rm = TRUE), 3)
+  )
+  x
+}
+
+# ---------------------------------------------------------------------------
+# .make_location_metrics()
+#
+# Computes per-fix movement metrics on a location-only move2 object.
+#
+# Speed        : km/h  — "km/h" is the correct SI-derived units symbol.
+#               "km/hr" is not recognised by the units package and will error.
+# Distance      : km
+# dt            : seconds (numeric; used as-is for climb-rate arithmetic)
+# cum_dist_km   : cumulative distance from first fix per track (km, plain numeric)
+#                 NA at the first fix; controlled by compute_cum_dist parameter.
+# delta_altitude_m: metres with explicit units (via .add_delta_altitude)
+# ---------------------------------------------------------------------------
+.make_location_metrics <- function(
+  x,
+  compute_cum_dist = TRUE,
+  run_elevation = TRUE,
+  run_moonlit = TRUE,
+  moonlit_e = NULL,
+  moonlit_e_from_altitude = FALSE,
+  moonlit_altitude_col = "elevation"
+) {
+  b_loc <- x %>%
+    dplyr::filter(
+      .data$sensor_type == "location",
+      !sf::st_is_empty(.data$geometry)
+    )
+
+  b_loc <- .dedupe_timestamps(b_loc)
+  b_loc$year <- lubridate::year(b_loc$timestamp)
+
+  # ---- Deployment-level grouping vector for metric computation ----
+  # mt_speed(), mt_distance(), etc. group by the move2 track id.  We need them
+  # to respect deployment boundaries (not individual boundaries) so that metrics
+  # don't bridge across tag changes.
+  #
+  # We do NOT re-key the move2 object (which rebuilds track data from scratch and
+  # discards all metadata).  Instead we use deployment_id (or the finest available
+  # grouping column) as a plain character vector for the ave()-based calculations
+  # that we control, while keeping the move2 track id as-is for move2 functions.
+  #
+  # For move2 functions (mt_speed, mt_distance, mt_azimuth, mt_time_lags,
+  # calc_displacement) we temporarily re-key by SWAPPING the track id attribute
+  # on the move2 object — NOT via mt_as_move2() which drops track data.
+  dep_col <- .metric_group_col(b_loc) # deployment_id > tag_local_id > individual_local_id
+  track_col <- move2::mt_track_id_column(b_loc)
+
+  if (
+    !is.null(dep_col) &&
+      dep_col != track_col &&
+      dep_col %in% names(b_loc) &&
+      !all(is.na(b_loc[[dep_col]]))
+  ) {
+    b_loc[[dep_col]] <- as.character(b_loc[[dep_col]])
+
+    # Swap the track id attribute directly — preserves all track data
+    attr(b_loc, "track_id_column") <- dep_col
+
+    .msg(
+      "  Metrics grouped by: ",
+      dep_col,
+      " (",
+      dplyr::n_distinct(b_loc[[dep_col]], na.rm = TRUE),
+      " deployments)"
+    )
+  }
+
+  if (!move2::mt_is_time_ordered(b_loc)) {
+    stop(
+      "Location data still not strictly time-ordered within track after dedupe."
+    )
+  }
+
+  # Ensure the deployment grouping column is a plain character vector so sourced
+  # scripts that do filter(deployment_id %in% tracks) work without type mismatch
+  dep_col_now <- move2::mt_track_id_column(b_loc)
+  if (dep_col_now %in% names(b_loc)) {
+    b_loc[[dep_col_now]] <- as.character(b_loc[[dep_col_now]])
+  }
+
+  b_loc <- b_loc %>%
+    mutate(
+      azimuth = mt_azimuth(.),
+      speed = mt_speed(., units = "km/h"), # km/h: valid SI symbol
+      distance = mt_distance(., units = "km"),
+      dt = mt_time_lags(., "secs")
+    )
+
+  b_loc <- b_loc %>%
+    mt_add_prev_metrics(
+      dist_units = "km",
+      speed_units = "km/h",
+      time_units = "secs"
+    )
+
+  b_loc <- calc_displacement(b_loc)
+
+  # ---- Cumulative distance — grouped by deployment_id ----
+  if (isTRUE(compute_cum_dist) && "distance" %in% names(b_loc)) {
+    # Group by the finest deployment key (dep_col), not individual
+    track_id_vec <- as.character(b_loc[[move2::mt_track_id_column(b_loc)]])
+    dist_numeric <- as.numeric(b_loc$distance)
+    cum_dist <- ave(
+      ifelse(is.na(dist_numeric), 0, dist_numeric),
+      track_id_vec,
+      FUN = cumsum
+    )
+    first_fix <- !duplicated(track_id_vec)
+    cum_dist[first_fix] <- NA_real_
+    b_loc$cum_dist_km <- cum_dist
+  }
+
+  # ---- Altitude from pressure ----
+  b_loc <- .add_altitude_from_pressure_col(b_loc)
+
+  # ---- Ground elevation from AWS DEM (elevatr) ----
+  if (isTRUE(run_elevation) && requireNamespace("elevatr", quietly = TRUE)) {
+    .safe_try({
+      idx <- which(!sf::st_is_empty(b_loc$geometry) & !is.na(b_loc$lon))
+      if (length(idx) > 0) {
+        elev_pts <- data.frame(x = b_loc$lon[idx], y = b_loc$lat[idx])
+        elev_vals <- elevatr::get_elev_point(
+          locations = elev_pts, src = "aws", prj = 4326
+        )$elevation
+        b_loc$elevation <- NA_real_
+        b_loc$elevation[idx] <- elev_vals
+        .msg("  elevation: ", sum(!is.na(elev_vals)), " values fetched from AWS DEM.")
+      }
+    }, "get_elev_point")
+
+    # ---- Start-row altitude = ground elevation ----
+    # Bats are caught and released at ground level, so the deploy-on-location
+    # elevation — not a barometric reading — is the correct starting altitude
+    # for each track (comments == "start", set by .add_start()).
+    if ("comments" %in% names(b_loc) && "elevation" %in% names(b_loc)) {
+      is_start <- !is.na(b_loc$comments) & b_loc$comments == "start"
+      has_elev <- is_start & !is.na(b_loc$elevation)
+      if (any(has_elev)) {
+        b_loc$altitude_m[has_elev] <- units::set_units(
+          b_loc$elevation[has_elev], "m"
+        )
+        .msg(
+          "  altitude_m: ", sum(has_elev),
+          " start row(s) set to ground elevation (deploy_on_location)."
+        )
+      }
+    }
+  }
+
+  # ---- Moonlight / twilight covariates (moonlit) ----
+  if (isTRUE(run_moonlit) && requireNamespace("moonlit", quietly = TRUE)) {
+    b_loc <- .safe_try(
+      add_moonlit_to_move2(
+        b_loc,
+        time_col = "timestamp",
+        e = moonlit_e,
+        e_from_altitude = moonlit_e_from_altitude,
+        altitude_col = moonlit_altitude_col,
+        quiet = !.verbose()
+      ),
+      "add_moonlit_to_move2"
+    ) %||% b_loc
+  }
+
+  # ---- Delta altitude — grouped by deployment_id ----
+  b_loc <- .safe_try(.add_delta_altitude(b_loc), "add_delta_altitude") %||%
+    b_loc
+
+  # ---- Restore original track id attribute ----
+  # Swap back by setting the attribute directly — no mt_as_move2() call,
+  # so track data is preserved exactly as it was.
+  if (
+    move2::mt_track_id_column(b_loc) != track_col &&
+      track_col %in% names(b_loc)
+  ) {
+    attr(b_loc, "track_id_column") <- track_col
+  }
+
+  b_loc
+}
+
+# ---------------------------------------------------------------------------
+# .add_location_sensor_metrics()
+# Join per-transmission VeDBA sum, mean temperature, minimum pressure, and
+# maximum altitude onto location-only rows from the full multi-sensor object.
+#
+# NanoFox: all sensor rows (VeDBA, avg.temp, min.baro.pressure) share the
+#   location row timestamp, so a group_by(individual, timestamp) join works.
+# TinyFox: pressure and temperature expanded rows share the location timestamp
+#   (window_hours_end = 0). VeDBA hourly bins do NOT all share it — the 1h-ago
+#   bin also has timestamp = tx_timestamp, so summing VeDBA rows would
+#   double-count. Patch vedba_sum and avg_temp from flat columns instead.
+#
+# All aggregation runs on sf::st_drop_geometry() to avoid MULTIPOINT geometry.
+# New columns are assigned directly to the move2 object (no geometry touched).
+# ---------------------------------------------------------------------------
+.add_location_sensor_metrics <- function(b_full, b_loc) {
+  if (!"sensor_type" %in% names(b_full)) return(b_loc)
+  join_cols <- c("individual_local_identifier", "timestamp")
+  if (!all(join_cols %in% names(b_full))) return(b_loc)
+
+  df <- sf::st_drop_geometry(b_full)
+
+  has_vedba <- "vedba" %in% names(df)
+  has_temp  <- "external_temperature" %in% names(df)
+  has_pres  <- "barometric_pressure" %in% names(df)
+  has_alt   <- "altitude_m" %in% names(df)
+
+  agg <- df %>%
+    dplyr::group_by(dplyr::across(dplyr::all_of(join_cols))) %>%
+    dplyr::summarise(
+      vedba_sum = if (has_vedba) {
+        v <- as.numeric(vedba[sensor_type == "VeDBA"])
+        v <- v[!is.na(v)]
+        if (length(v) == 0L) NA_real_ else sum(v)
+      } else NA_real_,
+      avg_temp = if (has_temp) {
+        t <- as.numeric(external_temperature[sensor_type == "avg.temp"])
+        t <- t[!is.na(t)]
+        if (length(t) == 0L) NA_real_ else mean(t)
+      } else NA_real_,
+      min_pressure = if (has_pres) {
+        p <- as.numeric(barometric_pressure[sensor_type == "min.baro.pressure"])
+        p <- p[!is.na(p)]
+        if (length(p) == 0L) NA_real_
+        else {
+          pv <- min(p)
+          dplyr::if_else(is.infinite(pv), NA_real_, pv)
+        }
+      } else NA_real_,
+      max_altitude_m = if (has_alt) {
+        a <- as.numeric(altitude_m)
+        a <- a[!is.na(a)]
+        if (length(a) == 0L) NA_real_
+        else {
+          av <- max(a)
+          dplyr::if_else(is.infinite(av), NA_real_, av)
+        }
+      } else NA_real_,
+      .groups = "drop"
+    )
+
+  # Safe join: extract attribute table only, use .row_id, assign columns
+  # directly to the move2 object — geometry is never touched.
+  key <- sf::st_drop_geometry(b_loc) %>%
+    tibble::as_tibble() %>%
+    dplyr::select(dplyr::all_of(join_cols)) %>%
+    dplyr::mutate(.row_id = dplyr::row_number())
+
+  joined <- dplyr::left_join(key, agg, by = join_cols) %>%
+    dplyr::arrange(.row_id)
+
+  new_cols <- c("vedba_sum", "avg_temp", "min_pressure", "max_altitude_m")
+  for (nm in new_cols) {
+    if (nm %in% names(b_loc)) b_loc[[nm]] <- NULL
+  }
+  for (nm in new_cols) {
+    b_loc[[nm]] <- joined[[nm]]
+  }
+
+  # ---- TinyFox flat-column patches ----
+  # vedba_sum: summing VeDBA sensor rows double-counts because the 1h-ago bin
+  # and the total-VeDBA row both have timestamp = tx_timestamp.  Use the flat
+  # column tinyfox_total_vedba (retained on location rows after expansion).
+  if ("tinyfox_total_vedba" %in% names(b_loc) && "tag_type" %in% names(b_loc)) {
+    is_tiny <- !is.na(b_loc$tag_type) &
+      tolower(as.character(b_loc$tag_type)) == "tinyfox"
+    if (any(is_tiny)) {
+      b_loc$vedba_sum[is_tiny] <- as.numeric(b_loc$tinyfox_total_vedba[is_tiny])
+    }
+  }
+  # avg_temp: expanded TinyFox temp rows use external_temperature_min/max, not
+  # external_temperature — so the sensor-row mean is NA.  Patch from flat columns.
+  has_tmin <- "tinyfox_temperature_min_last_24h" %in% names(b_loc)
+  has_tmax <- "tinyfox_temperature_max_last_24h" %in% names(b_loc)
+  if ((has_tmin || has_tmax) && "tag_type" %in% names(b_loc)) {
+    is_tiny <- !is.na(b_loc$tag_type) &
+      tolower(as.character(b_loc$tag_type)) == "tinyfox"
+    if (any(is_tiny)) {
+      tmin <- if (has_tmin) as.numeric(b_loc$tinyfox_temperature_min_last_24h[is_tiny]) else rep(NA_real_, sum(is_tiny))
+      tmax <- if (has_tmax) as.numeric(b_loc$tinyfox_temperature_max_last_24h[is_tiny]) else rep(NA_real_, sum(is_tiny))
+      avg_vals <- rowMeans(cbind(tmin, tmax), na.rm = TRUE)
+      avg_vals[is.nan(avg_vals)] <- NA_real_
+      b_loc$avg_temp[is_tiny] <- avg_vals
+    }
+  }
+
+  .msg(
+    "  location sensor metrics: vedba_sum=", sum(!is.na(b_loc$vedba_sum)),
+    " avg_temp=", sum(!is.na(b_loc$avg_temp)),
+    " min_pressure=", sum(!is.na(b_loc$min_pressure)),
+    " max_altitude_m=", sum(!is.na(b_loc$max_altitude_m)),
+    " rows"
+  )
+  b_loc
+}
+
+# ---------------------------------------------------------------------------
+# .add_tinyfox_diff_vedba()
+# Compute per-message change in tinyfox_total_vedba and the time-normalised
+# rate (VeDBA units per hour) so that fixes with different inter-message
+# intervals are comparable when applying an activity threshold.
+#
+#   tinyfox_diff_vedba     — raw counter change between consecutive fixes;
+#                            NA for the first fix per deployment and for
+#                            negative diffs (counter resets / overflows).
+#
+#   tinyfox_vedba_rate     — tinyfox_diff_vedba / dt_prev_hours; NA wherever
+#                            diff is NA or dt_prev is zero / missing.
+#
+# Uses `dt_prev` (seconds, time from the previous fix to the current fix) rather
+# than `dt` because `tinyfox_diff_vedba` is the change since the previous fix.
+# `dt_prev` is produced by mt_add_prev_metrics() in .make_location_metrics().
+# Falls back to NA rate if `dt_prev` is absent.
+#
+# Grouped by deployment track so re-deployments do not carry over the
+# previous tag's cumulative total.
+# ---------------------------------------------------------------------------
+.add_tinyfox_diff_vedba <- function(x) {
+  if (!"tinyfox_total_vedba" %in% names(x)) return(x)
+  if (!"tag_type" %in% names(x))            return(x)
+
+  has_dt_prev <- "dt_prev" %in% names(x)
+  track_col <- move2::mt_track_id_column(x)
+
+  x$tinyfox_diff_vedba <- NA_real_
+  x$tinyfox_vedba_rate <- NA_real_
+
+  tracks <- unique(as.character(x[[track_col]]))
+  for (trk in tracks) {
+    idx <- which(as.character(x[[track_col]]) == trk)
+    tt  <- tolower(as.character(na.omit(x$tag_type[idx])[1]))
+    if (length(tt) == 0L || is.na(tt) || tt != "tinyfox") next
+
+    tv <- as.numeric(x$tinyfox_total_vedba[idx])
+    d  <- c(NA_real_, diff(tv))
+    d[!is.na(d) & d < 0] <- NA_real_   # resets / overflows
+    x$tinyfox_diff_vedba[idx] <- d
+
+    if (has_dt_prev) {
+      dt_h <- as.numeric(x$dt_prev[idx]) / 3600   # dt_prev is in seconds
+      rate <- d / dt_h
+      rate[!is.finite(rate)] <- NA_real_       # guard against dt_prev == 0
+      x$tinyfox_vedba_rate[idx] <- rate
+    }
+  }
+
+  .msg(
+    "  tinyfox_diff_vedba: ", sum(!is.na(x$tinyfox_diff_vedba)),
+    "  tinyfox_vedba_rate: ", sum(!is.na(x$tinyfox_vedba_rate)),
+    " rows computed."
+  )
+  x
+}
+
+# ---------------------------------------------------------------------------
+# .correct_vedba_scaling()
+#
+# Nanofox VEDBA in current Movebank export is scaled as per-sample average (÷504)
+# but should be per-burst average (÷18). This function detects and corrects the
+# scaling issue post-import.
+#
+# Detection logic:
+#   - Per-sample (current Movebank data): typical median < 5 m/s²
+#   - Per-burst (correct): typical median 10-30 m/s²
+#   - Threshold: if median(vedba_sum) < 5, assume per-sample and correct
+#
+# Correction: vedba_sum_corrected = vedba_sum × (504/18) = vedba_sum × 28
+#
+# Returns: data with corrected vedba_sum column (per-burst) and metadata columns:
+#   - vedba_sum_orig: original per-sample values (for transparency/reversibility)
+#   - .vedba_scaling_note: correction status ("corrected_per_sample_to_per_burst"
+#     or "already_per_burst")
+#
+# Expected ranges after correction (realistic bat activity):
+#   - Rest: ~9 m/s²
+#   - Moderate activity: ~27 m/s²
+#   - High activity (flight): ~205 m/s²
+#   - Daily median (mixed activity): ~18 m/s²
+# ---------------------------------------------------------------------------
+.correct_vedba_scaling <- function(data) {
+
+  # Return early if no vedba column
+  if (!"vedba_sum" %in% names(data)) return(data)
+
+  vedba_vals <- data$vedba_sum[!is.na(data$vedba_sum)]
+  if (length(vedba_vals) == 0) return(data)
+
+  median_vedba <- median(vedba_vals, na.rm = TRUE)
+
+  # Detection: if median < 5, likely per-sample (÷504); needs correction
+  # Conversion: per_sample_vedba × (504/18) = per_burst_vedba
+  # Or: per_sample_vedba × 28 = per_burst_vedba
+
+  is_per_sample <- median_vedba < 5
+  correction_factor <- 504 / 18  # 28
+
+  if (is_per_sample) {
+    .msg(sprintf(
+      "[VEDBA] Detected per-sample scaling (median=%.2f m/s²). ",
+      median_vedba
+    ),
+    sprintf("Correcting by factor %.1f (÷18 instead of ÷504)...", correction_factor)
+    )
+
+    data <- data %>%
+      dplyr::mutate(
+        vedba_sum_orig = vedba_sum,
+        vedba_sum = vedba_sum * correction_factor,
+        `.vedba_scaling_note` = "corrected_per_sample_to_per_burst"
+      )
+
+    .msg(sprintf(
+      "[VEDBA] Correction applied. Median before: %.2f, after: %.2f m/s²",
+      median_vedba, median(data$vedba_sum, na.rm = TRUE)
+    ))
+  } else {
+    .msg(sprintf(
+      "[VEDBA] Detected per-burst scaling (median=%.2f m/s²). No correction needed.",
+      median_vedba
+    ))
+    data <- data %>%
+      dplyr::mutate(`.vedba_scaling_note` = "already_per_burst")
+  }
+
+  data
+}
+
+# ---------------------------------------------------------------------------
+# .correct_sensor_vedba_scaling()
+#
+# Correct raw per-sample VeDBA sensor values in the full multi-sensor object to
+# per-burst units. Movebank exports Nanofox VeDBA as per-sample averages (÷504);
+# this function multiplies by 28 (= 504/18) so each row represents the total
+# VeDBA for one 1-second accelerometer burst. This makes full$vedba directly
+# comparable with location-level per-burst values and Tinyfox per-burst VEDBA.
+#
+# The function only operates on rows where `vedba` is present and median < 5,
+# which is the per-sample signature. Original values are preserved in `vedba_orig`
+# and the metadata column `.vedba_sensor_scaling_note` records the status.
+# ---------------------------------------------------------------------------
+.correct_sensor_vedba_scaling <- function(data) {
+
+  if (!"vedba" %in% names(data)) return(data)
+
+  vedba_vals <- data$vedba[!is.na(data$vedba)]
+  if (length(vedba_vals) == 0) return(data)
+
+  median_vedba <- median(vedba_vals, na.rm = TRUE)
+  correction_factor <- 504 / 18  # 28
+  is_per_sample <- median_vedba < 5
+
+  if (is_per_sample) {
+    .msg(sprintf(
+      "[VEDBA sensor] Detected per-sample scaling (median=%.2f m/s²). Correcting by factor %.1f...",
+      median_vedba, correction_factor
+    ))
+
+    data <- data %>%
+      dplyr::mutate(
+        vedba_orig = vedba,
+        vedba = vedba * correction_factor,
+        `.vedba_sensor_scaling_note` = "corrected_per_sample_to_per_burst"
+      )
+
+    .msg(sprintf(
+      "[VEDBA sensor] Correction applied. Median before: %.2f, after: %.2f m/s²",
+      median_vedba, median(data$vedba, na.rm = TRUE)
+    ))
+  } else {
+    .msg(sprintf(
+      "[VEDBA sensor] Detected per-burst scaling (median=%.2f m/s²). No correction needed.",
+      median_vedba
+    ))
+    data <- data %>%
+      dplyr::mutate(`.vedba_sensor_scaling_note` = "already_per_burst")
+  }
+
+  data
+}
+
+# ---------------------------------------------------------------------------
+# .correct_tinyfox_vedba_scaling()
+#
+# Some Tinyfox V13P/V14P firmware batches report cumulative VeDBA values that
+# are scaled ~10× higher than V13. This is visible in the stationary baseline
+# (post-fall-off or activity = 0), where V13P/V14P per-burst VEDBA is an order
+# of magnitude higher than V13. The function detects this offset from the data
+# and applies a firmware-specific correction.
+#
+# Detection logic:
+#   - Use the stationary baseline for each Tinyfox firmware in the study.
+#   - Stationary rows are tag_fell_off == TRUE when available, otherwise
+#     tinyfox_activity_percent_last_24h == 0.
+#   - Per-burst proxy: tinyfox_vedba_rate / 60 (m/s² per burst).
+#   - If the V13P/V14P baseline is > threshold_ratio × the V13 baseline,
+#     apply a correction factor = baseline_v13p_v14p / baseline_v13.
+#
+# Correction:
+#   - tinyfox_total_vedba  <- tinyfox_total_vedba  / factor
+#   - tinyfox_diff_vedba <- tinyfox_diff_vedba / factor
+#   - tinyfox_vedba_rate <- tinyfox_vedba_rate / factor
+#
+# Returns: data with corrected columns and metadata:
+#   - *_orig columns preserve original values
+#   - .tinyfox_scaling_note: correction status
+#   - .tinyfox_scaling_factor: factor applied (1.0 = no change)
+#
+# If force_factor is a non-NULL numeric, the auto-detection is skipped and
+# that factor is applied to all V13P/V14P rows. This is the fallback for
+# studies without a V13 reference.
+# ---------------------------------------------------------------------------
+.correct_tinyfox_vedba_scaling <- function(
+    data,
+    threshold_ratio = 2.0,
+    min_v13_baseline  = 0.05,
+    force_factor      = NULL
+) {
+
+  required_cols <- c("tag_type", "tag_firmware")
+  if (!all(required_cols %in% names(data))) return(data)
+
+  tiny_cols <- c("tinyfox_total_vedba", "tinyfox_diff_vedba", "tinyfox_vedba_rate")
+  if (!any(tiny_cols %in% names(data))) return(data)
+
+  # Per-burst proxy (m/s² per burst)
+  data <- data %>%
+    dplyr::mutate(
+      ..tinyfox_per_burst = if (
+        "tinyfox_vedba_rate" %in% names(data)
+      ) {
+        tinyfox_vedba_rate / 60
+      } else {
+        NA_real_
+      }
+    )
+
+  is_tiny <- tolower(as.character(data$tag_type)) == "tinyfox"
+  if (!any(is_tiny)) {
+    data$..tinyfox_per_burst <- NULL
+    return(data)
+  }
+
+  # Determine which rows are stationary
+  stationary <- if ("tag_fell_off" %in% names(data)) {
+    is_tiny & data$tag_fell_off == TRUE
+  } else {
+    rep(FALSE, nrow(data))
+  }
+
+  if ("tinyfox_activity_percent_last_24h" %in% names(data)) {
+    stationary <- stationary |
+      (is_tiny & !is.na(data$tinyfox_activity_percent_last_24h) &
+         data$tinyfox_activity_percent_last_24h == 0)
+  }
+
+  # Baseline helper
+  baseline_for_firmware <- function(fw) {
+    rows <- is_tiny & tolower(as.character(data$tag_firmware)) == tolower(fw) &
+      stationary & !is.na(data$..tinyfox_per_burst) &
+      is.finite(data$..tinyfox_per_burst) & data$..tinyfox_per_burst > 0
+    if (sum(rows, na.rm = TRUE) < 3L) {
+      # fall back to the 5th percentile of all non-stationary values
+      vals <- data$..tinyfox_per_burst[is_tiny &
+                                         tolower(as.character(data$tag_firmware)) == tolower(fw) &
+                                         !is.na(data$..tinyfox_per_burst) &
+                                         is.finite(data$..tinyfox_per_burst) &
+                                         data$..tinyfox_per_burst > 0]
+      if (length(vals) < 5L) return(NA_real_)
+      return(as.numeric(quantile(vals, 0.05, na.rm = TRUE)))
+    }
+    median(data$..tinyfox_per_burst[rows], na.rm = TRUE)
+  }
+
+  v13_baseline    <- baseline_for_firmware("V13")
+  v13p_baseline   <- baseline_for_firmware("V13P")
+  v14p_baseline   <- baseline_for_firmware("V14P")
+
+  # Decide factors per firmware
+  factor_v13  <- 1.0
+  factor_v13p <- 1.0
+  factor_v14p <- 1.0
+
+  note_v13  <- "not_v13p_v14p"
+  note_v13p <- "already_v13_scale"
+  note_v14p <- "already_v13_scale"
+
+  apply_factor <- function(target_baseline, ref_baseline, fw_name) {
+    # A forced factor bypasses detection, so it must not depend on the baseline.
+    if (!is.null(force_factor) && is.numeric(force_factor) &&
+        is.finite(force_factor) && force_factor > 1) {
+      return(list(factor = as.numeric(force_factor),
+                  note = paste0("forced_factor_v", tolower(fw_name))))
+    }
+
+    if (is.na(target_baseline) || !is.finite(target_baseline)) {
+      return(list(factor = 1.0, note = "unknown_no_stationary_data"))
+    }
+
+    if (!is.na(ref_baseline) && is.finite(ref_baseline) && ref_baseline >= min_v13_baseline) {
+      ratio <- target_baseline / ref_baseline
+      if (ratio > threshold_ratio) {
+        factor <- ratio
+        # Round to one decimal place for cleaner reporting
+        factor <- round(factor, 1)
+        # Avoid correcting for trivial ratios just above threshold
+        if (factor < 1.5) factor <- 1.0
+        if (factor > 1.0) {
+          return(list(
+            factor = factor,
+            note = paste0("corrected_", tolower(fw_name), "_to_v13")
+          ))
+        }
+      }
+    }
+    list(factor = 1.0, note = "already_v13_scale")
+  }
+
+  v13p_res <- apply_factor(v13p_baseline, v13_baseline, "V13P")
+  v13p_res <- v13p_res
+  factor_v13p <- v13p_res$factor
+  note_v13p   <- v13p_res$note
+
+  v14p_res <- apply_factor(v14p_baseline, v13_baseline, "V14P")
+  factor_v14p <- v14p_res$factor
+  note_v14p   <- v14p_res$note
+
+  if (factor_v13p == 1.0 && factor_v14p == 1.0) {
+    .msg(sprintf(
+      "[Tinyfox VEDBA scaling] Stationary baselines: V13=%.3f, V13P=%.3f, V14P=%.3f m/s²/burst. No correction needed.",
+      v13_baseline %||% NA_real_,
+      v13p_baseline %||% NA_real_,
+      v14p_baseline %||% NA_real_
+    ))
+    data <- data %>%
+      dplyr::mutate(
+        `.tinyfox_scaling_note` = "already_v13_scale",
+        `.tinyfox_scaling_factor` = 1.0
+      )
+  } else {
+    .msg(sprintf(
+      "[Tinyfox VEDBA scaling] Stationary baselines: V13=%.3f, V13P=%.3f, V14P=%.3f m/s²/burst. Applying factors: V13P=%.2f, V14P=%.2f",
+      v13_baseline %||% NA_real_,
+      v13p_baseline %||% NA_real_,
+      v14p_baseline %||% NA_real_,
+      factor_v13p, factor_v14p
+    ))
+  }
+
+  # Build a per-row factor vector
+  firmware <- tolower(as.character(data$tag_firmware))
+  row_factor <- rep(1.0, nrow(data))
+  row_note   <- rep(NA_character_, nrow(data))
+
+  row_factor[firmware == "v13p"] <- factor_v13p
+  row_note[firmware == "v13p"]   <- note_v13p
+  row_factor[firmware == "v14p"] <- factor_v14p
+  row_note[firmware == "v14p"]   <- note_v14p
+  row_note[firmware == "v13"]    <- note_v13
+
+  # Apply corrections while preserving originals
+  mutate_list <- list(
+    `.tinyfox_scaling_factor` = row_factor,
+    `.tinyfox_scaling_note` = row_note
+  )
+
+  if ("tinyfox_total_vedba" %in% names(data)) {
+    mutate_list$tinyfox_total_vedba_orig <- data$tinyfox_total_vedba
+    mutate_list$tinyfox_total_vedba <- data$tinyfox_total_vedba / row_factor
+  }
+  if ("tinyfox_diff_vedba" %in% names(data)) {
+    mutate_list$tinyfox_diff_vedba_orig <- data$tinyfox_diff_vedba
+    mutate_list$tinyfox_diff_vedba <- data$tinyfox_diff_vedba / row_factor
+  }
+  if ("tinyfox_vedba_rate" %in% names(data)) {
+    mutate_list$tinyfox_vedba_rate_orig <- data$tinyfox_vedba_rate
+    mutate_list$tinyfox_vedba_rate <- data$tinyfox_vedba_rate / row_factor
+  }
+
+  data <- data %>%
+    dplyr::mutate(!!!mutate_list) %>%
+    dplyr::select(-dplyr::any_of("..tinyfox_per_burst"))
+
+  data
+}
+
+# ---------------------------------------------------------------------------
+# TinyFoxBatt per-burst VEDBA (informational reference)
+#
+# Unlike Nanofox, TinyFoxBatt VEDBA is not automatically computed as per-burst
+# because it requires the actual dt (time between messages, accounting for drift).
+#
+# To compute per-burst VEDBA for TinyFoxBatt:
+#   vedba_per_burst = tinyfox_diff_vedba / (dt_prev_hours × 60)
+#
+# Where dt_prev_hours is the time from the previous fix to the current fix
+# (from timestamp differences).  Because tinyfox_diff_vedba is the change
+# since the previous message, it must be divided by the previous inter-message
+# interval, not the forward interval `dt`.
+# See `.add_tinyfox_diff_vedba()` for how this is computed. The dt_prev column
+# is produced by mt_add_prev_metrics() in `.make_location_metrics()`.
+#
+# When per-burst VEDBA is needed for TinyFoxBatt, this can be added as a
+# post-import step similar to the Nanofox correction above.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# .detect_tag_fell_off_loc()
+# Per-deployment tag-fell-off detection on the location-only object.
+# Routes to detect_tag_fell_off() with method- and column-appropriate
+# arguments depending on the tag_type of each deployment track.
+#
+# NanoFox: vedba_sum > nanofox_vedba_threshold → active
+# TinyFox: tinyfox_vedba_rate > tinyfox_vedba_rate_threshold (VeDBA / hour)
+#          OR tinyfox_activity_percent_last_24h > tinyfox_activity_threshold → active
+#          Rate (diff / dt_hours) is used rather than the raw diff so that
+#          longer inter-message gaps do not unfairly suppress the activity signal.
+#          Falls back to tinyfox_diff_vedba if rate is unavailable.
+# uWasp:   distance > dist_threshold → active (noisy; marked as best-effort)
+#
+# The first post-active location row is kept as tag_fell_off = FALSE because
+# the tag physically moved to that coordinate before detaching.
+# ---------------------------------------------------------------------------
+.detect_tag_fell_off_loc <- function(
+    b_loc,
+    nanofox_vedba_threshold      = 1,
+    tinyfox_vedba_rate_threshold = 2440,    # VeDBA / hour; 0 = any activity
+    tinyfox_activity_threshold   = 1,
+    uwasp_dist_threshold         = 0.5,  # km — above Sigfox jitter radius
+    min_inactive_run             = 3L
+) {
+  if (!"tag_type" %in% names(b_loc)) return(b_loc)
+
+  track_col <- move2::mt_track_id_column(b_loc)
+  b_loc$tag_fell_off <- FALSE
+
+  tracks <- unique(as.character(b_loc[[track_col]]))
+
+  for (trk in tracks) {
+    idx <- which(as.character(b_loc[[track_col]]) == trk)
+    if (length(idx) <= 1L) next
+
+    tt <- tolower(as.character(
+      na.omit(b_loc$tag_type[idx])[1]
+    ))
+    if (length(tt) == 0L || is.na(tt)) next
+
+    sub <- b_loc[idx, , drop = FALSE]
+
+    if (tt == "nanofox") {
+      if (!"vedba_sum" %in% names(sub)) next
+      sub <- detect_tag_fell_off(
+        sub,
+        method           = "Nanofox",
+        tag_col          = track_col,
+        vedba_col        = "vedba_sum",
+        vedba_threshold  = nanofox_vedba_threshold,
+        min_inactive_run = min_inactive_run
+      )
+    } else if (tt == "tinyfox") {
+      fw <- if ("tag_firmware" %in% names(sub)) {
+        tolower(as.character(na.omit(sub$tag_firmware)[1]))
+      } else {
+        NA_character_
+      }
+
+      # TinyFoxBatt V13/V13P/V14P:
+      # activity_percent_last_24h is the most reliable detachment signal.
+      # The cumulative VeDBA counter can continue to show low-level increments
+      # after detachment, so do NOT let it keep the tag active when activity is 0.
+      has_activity <- "tinyfox_activity_percent_last_24h" %in% names(sub) &&
+        any(!is.na(sub$tinyfox_activity_percent_last_24h))
+
+      if (has_activity) {
+        sub <- detect_tag_fell_off(
+          sub,
+          method = "Tinyfox",
+          tag_col = track_col,
+          vedba_col = "tinyfox_vedba_rate",
+          activity_col = "tinyfox_activity_percent_last_24h",
+          vedba_threshold = tinyfox_vedba_rate_threshold,
+          activity_threshold = tinyfox_activity_threshold,
+          min_inactive_run = min_inactive_run,
+          tinyfox_signal = "activity_first"
+        )
+      } else {
+        # Fallback only if activity percent is absent.
+        vedba_col <- if ("tinyfox_vedba_rate" %in% names(sub) &&
+                        any(!is.na(sub$tinyfox_vedba_rate))) {
+          "tinyfox_vedba_rate"
+        } else if ("tinyfox_diff_vedba" %in% names(sub)) {
+          "tinyfox_diff_vedba"
+        } else {
+          "vedba_sum"
+        }
+        sub <- detect_tag_fell_off(
+          sub,
+          method = "Tinyfox",
+          tag_col = track_col,
+          vedba_col = vedba_col,
+          activity_col = "__missing_activity_col__",
+          vedba_threshold = tinyfox_vedba_rate_threshold,
+          activity_threshold = Inf,
+          min_inactive_run = min_inactive_run
+        )
+      }
+    } else if (tt == "uwasp") {
+      if (!"distance" %in% names(sub)) next
+      sub <- detect_tag_fell_off(
+        sub,
+        method           = "uWasp",
+        tag_col          = track_col,
+        dist_col         = "distance",
+        dist_threshold   = uwasp_dist_threshold,
+        min_inactive_run = min_inactive_run
+      )
+
+    } else {
+      next
+    }
+
+    b_loc$tag_fell_off[idx] <- sub$tag_fell_off
+  }
+
+  n_fell <- sum(b_loc$tag_fell_off, na.rm = TRUE)
+  if (n_fell > 0) {
+    .msg("  tag_fell_off: ", n_fell, " / ", nrow(b_loc), " location rows flagged.")
+  }
+  b_loc
+}
+
+# ---------------------------------------------------------------------------
+# .propagate_fell_off()
+# Propagate tag_fell_off flags from b_loc onto b (full) and b_daily2.
+#
+# b_loc drives the detection because it has vedba_sum from sensor rows joined
+# onto location rows.  Once we know the per-deployment cutoff timestamp
+# (earliest row where tag_fell_off == TRUE in b_loc), we stamp all rows in
+# the target object that occur at or after that cutoff as tag_fell_off = TRUE.
+#
+# This timestamp-cutoff approach works correctly for all row types in b:
+#   - NanoFox sensor rows share the location row timestamp → always matched
+#   - TinyFox hourly VeDBA bins have offset timestamps (T - N h) and are
+#     flagged when their timestamp >= cutoff, i.e. they are from a post-
+#     detachment transmission window
+# ---------------------------------------------------------------------------
+.propagate_fell_off <- function(b_loc, target, use_date = FALSE) {
+  if (is.null(target) || nrow(target) == 0L) return(target)
+  target$tag_fell_off <- FALSE
+  if (!"tag_fell_off" %in% names(b_loc)) return(target)
+  if (!any(b_loc$tag_fell_off, na.rm = TRUE)) return(target)
+
+  loc_tc <- move2::mt_track_id_column(b_loc)
+  tgt_tc <- move2::mt_track_id_column(target)
+
+  # Pick the best common join column: prefer deployment_id, else track id
+  join_col <- if (
+    "deployment_id" %in% names(b_loc) && "deployment_id" %in% names(target)
+  ) {
+    "deployment_id"
+  } else if (loc_tc %in% names(target)) {
+    loc_tc
+  } else if (tgt_tc %in% names(b_loc)) {
+    tgt_tc
+  } else {
+    return(target)
+  }
+
+  # Earliest fell-off timestamp per deployment
+  cutoffs <- sf::st_drop_geometry(b_loc) %>%
+    tibble::as_tibble() %>%
+    dplyr::filter(isTRUE(.data$tag_fell_off) | .data$tag_fell_off == TRUE) %>%
+    dplyr::group_by(dplyr::across(dplyr::all_of(join_col))) %>%
+    dplyr::summarise(cutoff_ts = min(.data$timestamp, na.rm = TRUE), .groups = "drop")
+
+  if (nrow(cutoffs) == 0L) return(target)
+
+  df_t <- sf::st_drop_geometry(target) %>%
+    tibble::as_tibble() %>%
+    dplyr::select(dplyr::all_of(c(join_col, "timestamp"))) %>%
+    dplyr::mutate(.row_id = dplyr::row_number()) %>%
+    dplyr::left_join(cutoffs, by = join_col)
+
+  # Daily rows use solar-noon timestamps which can be earlier on the same
+  # calendar day than the exact fell-off transmission — compare dates only
+  if (use_date) {
+    flag_rows <- which(
+      !is.na(df_t$cutoff_ts) &
+        as.Date(df_t$timestamp) >= as.Date(df_t$cutoff_ts)
+    )
+  } else {
+    flag_rows <- which(!is.na(df_t$cutoff_ts) & df_t$timestamp >= df_t$cutoff_ts)
+  }
+  if (length(flag_rows) > 0L) target$tag_fell_off[flag_rows] <- TRUE
+
+  n_fell  <- sum(target$tag_fell_off, na.rm = TRUE)
+  n_total <- nrow(target)
+  if (n_fell > 0L) {
+    .msg("  tag_fell_off propagated: ", n_fell, " / ", n_total, " rows flagged.")
+  }
+  target
+}
+
+# ---------------------------------------------------------------------------
+# .add_n_base_stations()
+# Parse n_base_stations (number of unique Sigfox base stations that heard the
+# transmission) from whichever raw field is present, tried in priority order:
+#
+#   base_stations_id_rssi_reps — pipe-separated stations:
+#     "148A3, -127, 1 | 099F, -132, 1"  → count(|) + 1
+#
+#   antennas — JSON-like array of station objects:
+#     [{ID:..., RSSI:..., N:...}, ...]   → count({)
+#
+#   sigfox_duplicates — same pipe-separated format as base_stations_id_rssi_reps;
+#     used when Movebank lacks a dedicated base_station_id column and the
+#     station list is stored in this fallback field instead.
+#
+# NA is returned for rows where no field is present or parseable.
+# Only location rows are expected to carry these fields.
+# ---------------------------------------------------------------------------
+.count_pipe_stations <- function(s) {
+  # Count stations in a pipe-separated string: "ID, RSSI, N | ID, RSSI, N"
+  # Returns NA for missing/empty strings.
+  has <- !is.na(s) & nzchar(trimws(s))
+  out <- rep(NA_integer_, length(s))
+  if (any(has)) {
+    out[has] <- as.integer(
+      nchar(s[has]) - nchar(gsub("|", "", s[has], fixed = TRUE)) + 1L
+    )
+  }
+  out
+}
+
+.add_n_base_stations <- function(x) {
+  df <- sf::st_drop_geometry(x)
+  n  <- rep(NA_integer_, nrow(df))
+
+  if ("base_stations_id_rssi_reps" %in% names(df)) {
+    cnt <- .count_pipe_stations(as.character(df$base_stations_id_rssi_reps))
+    n[!is.na(cnt)] <- cnt[!is.na(cnt)]
+  }
+
+  if ("antennas" %in% names(df)) {
+    ant <- as.character(df$antennas)
+    has <- !is.na(ant) & nzchar(trimws(ant)) & ant != "[]" & is.na(n)
+    if (any(has)) {
+      brace_count <- nchar(ant[has]) - nchar(gsub("{", "", ant[has], fixed = TRUE))
+      n[has] <- as.integer(brace_count)
+    }
+  }
+
+  if ("sigfox_duplicates" %in% names(df)) {
+    cnt <- .count_pipe_stations(as.character(df$sigfox_duplicates))
+    fill <- !is.na(cnt) & is.na(n)
+    n[fill] <- cnt[fill]
+  }
+
+  x$n_base_stations <- n
+  .msg("  n_base_stations: ", sum(!is.na(n)), " / ", nrow(x), " rows parsed.")
+  x
+}
+
+# ---------------------------------------------------------------------------
+# .propagate_n_base_stations()
+# Join n_base_stations from b_loc onto a target object (b_full or b_daily2)
+# by deployment + timestamp. Only location rows get a non-NA value; all other
+# rows receive NA.
+# ---------------------------------------------------------------------------
+.propagate_n_base_stations <- function(b_loc, target) {
+  if (is.null(target) || nrow(target) == 0L) return(target)
+  if (!"n_base_stations" %in% names(b_loc))   return(target)
+
+  join_col <- if ("deployment_id" %in% names(b_loc) && "deployment_id" %in% names(target)) {
+    "deployment_id"
+  } else {
+    loc_tc <- move2::mt_track_id_column(b_loc)
+    if (loc_tc %in% names(target)) loc_tc else return(target)
+  }
+
+  lookup <- sf::st_drop_geometry(b_loc) %>%
+    tibble::as_tibble() %>%
+    dplyr::select(dplyr::all_of(c(join_col, "timestamp", "n_base_stations"))) %>%
+    dplyr::filter(!is.na(.data$n_base_stations))
+
+  if (nrow(lookup) == 0L) return(target)
+
+  df_t <- sf::st_drop_geometry(target) %>%
+    tibble::as_tibble() %>%
+    dplyr::select(dplyr::all_of(c(join_col, "timestamp"))) %>%
+    dplyr::mutate(.row_id = dplyr::row_number()) %>%
+    dplyr::left_join(lookup, by = c(join_col, "timestamp"))
+
+  target$n_base_stations <- NA_integer_
+  target$n_base_stations[df_t$.row_id] <- as.integer(df_t$n_base_stations)
+  target
+}
+
+# ---------------------------------------------------------------------------
+# .propagate_col_from_loc()
+# Generic helper: join a single column from b_loc onto a target object
+# (b_full, b_daily2) by deployment + timestamp. Rows in target that do not
+# match a location row receive NA.
+# ---------------------------------------------------------------------------
+.propagate_col_from_loc <- function(b_loc, target, col) {
+  if (is.null(target) || nrow(target) == 0L) return(target)
+  if (!col %in% names(b_loc))                 return(target)
+
+  join_col <- if ("deployment_id" %in% names(b_loc) && "deployment_id" %in% names(target)) {
+    "deployment_id"
+  } else {
+    loc_tc <- move2::mt_track_id_column(b_loc)
+    if (loc_tc %in% names(target)) loc_tc else return(target)
+  }
+
+  lookup <- sf::st_drop_geometry(b_loc) %>%
+    tibble::as_tibble() %>%
+    dplyr::select(dplyr::all_of(c(join_col, "timestamp", col))) %>%
+    dplyr::filter(!is.na(.data[[col]]))
+
+  if (nrow(lookup) == 0L) return(target)
+
+  df_t <- sf::st_drop_geometry(target) %>%
+    tibble::as_tibble() %>%
+    dplyr::select(dplyr::all_of(c(join_col, "timestamp"))) %>%
+    dplyr::mutate(.row_id = dplyr::row_number()) %>%
+    dplyr::left_join(lookup, by = c(join_col, "timestamp"))
+
+  target[[col]] <- NA_real_
+  target[[col]][df_t$.row_id] <- df_t[[col]]
+  target
+}
+
+
+# ---------------------------------------------------------------------------
+# .add_night_day_id()
+# ---------------------------------------------------------------------------
+.add_night_day_id <- function(x) {
+  if (!requireNamespace("suncalc", quietly = TRUE)) {
+    warning(".add_night_day_id: suncalc not available; skipping.")
+    return(x)
+  }
+  if (!all(c("lon", "lat") %in% names(x))) {
+    coords <- sf::st_coordinates(x)
+    x$lon <- coords[, 1]
+    x$lat <- coords[, 2]
+  }
+  df <- tibble::tibble(
+    .row_idx = seq_len(nrow(x)),
+    individual = x$individual_local_identifier,
+    timestamp = x$timestamp,
+    lon = x$lon,
+    lat = x$lat
+  ) %>%
+    dplyr::filter(
+      !is.na(.data$lon),
+      !is.na(.data$lat),
+      !is.na(.data$timestamp)
+    )
+
+  if (nrow(df) == 0) {
+    x$night_day_id <- NA_character_
+    return(x)
+  }
+
+  sun_pos <- suncalc::getSunlightPosition(
+    data = data.frame(date = df$timestamp, lat = df$lat, lon = df$lon),
+    keep = "altitude"
+  )
+  df$night_day <- ifelse(sun_pos$altitude < 0, "night", "day")
+  df <- df %>%
+    dplyr::group_by(.data$individual) %>%
+    dplyr::mutate(
+      first_date = as.Date(min(.data$timestamp, na.rm = TRUE)),
+      period = as.integer(as.Date(.data$timestamp) - .data$first_date)
+    ) %>%
+    dplyr::ungroup()
+  df$night_day_id <- paste(df$night_day, df$period, sep = "_")
+
+  out_vec <- rep(NA_character_, nrow(x))
+  out_vec[df$.row_idx] <- df$night_day_id
+  x$night_day_id <- out_vec
+
+  .msg(
+    "  night_day_id assigned. Unique: ",
+    dplyr::n_distinct(df$night_day_id),
+    " | night: ",
+    sum(df$night_day == "night"),
+    " | day: ",
+    sum(df$night_day == "day")
+  )
+  x
+}
+
+# ---------------------------------------------------------------------------
+# .select_daily_daytime_only()
+# ---------------------------------------------------------------------------
+.select_daily_daytime_only <- function(x, tz = "UTC") {
+  if (!inherits(x, c("move2", "sf"))) {
+    stop("x must be a move2/sf object")
+  }
+  hr <- lubridate::hour(x$timestamp)
+  flying_window <- hr >= 21 | hr < 5
+  .msg(
+    "  [daytime_only] Removing ",
+    sum(flying_window, na.rm = TRUE),
+    " fixes in 21:00-05:00 UTC flight window."
+  )
+  x_day <- x[!flying_window, ]
+  if (nrow(x_day) == 0) {
+    warning("[daytime_only] No fixes remain.")
+    return(NULL)
+  }
+  mt_thin_daily_solar_noon(x_day, tz = tz)
+}
+
+# ---------------------------------------------------------------------------
+# .select_daily_noon_roost()
+# ---------------------------------------------------------------------------
+.select_daily_noon_roost <- function(x) {
+  if (!"night_day_id" %in% names(x)) {
+    stop("[noon_roost] 'night_day_id' not found.")
+  }
+  # Location fixes only, as in mt_filter_daily_solar_noon(): sensor rows
+  # (VeDBA, temperature, pressure) carry no position of their own.
+  is_loc <- if ("sensor_type" %in% names(x)) {
+    tolower(as.character(x$sensor_type)) %in% "location"
+  } else {
+    TRUE
+  }
+  x <- x[is_loc & !sf::st_is_empty(sf::st_geometry(x)), ]
+  rep_daily <- x %>%
+    dplyr::filter(!stringr::str_detect(.data$night_day_id, "_0$")) %>%
+    dplyr::mutate(
+      night_day_split = stringr::str_split_fixed(.data$night_day_id, "_", 2),
+      night_day = night_day_split[, 1],
+      period_id = night_day_split[, 2]
+    ) %>%
+    dplyr::select(-night_day_split)
+  .msg(
+    "  [noon_roost] Period-0 removed. Remaining: ",
+    nrow(rep_daily),
+    " of ",
+    nrow(x)
+  )
+
+  grp_col <- .metric_group_col(rep_daily)
+  if (is.null(grp_col)) {
+    rep_daily$`..metric_group_id` <- as.character(move2::mt_track_id(
+      rep_daily
+    ))
+    grp_col <- "..metric_group_id"
+  }
+
+  rep_daily <- rep_daily %>%
+    dplyr::mutate(
+      noon_date = dplyr::case_when(
+        .data$night_day == "night" & lubridate::hour(.data$timestamp) >= 12 ~
+          as.Date(.data$timestamp) + 1,
+        TRUE ~ as.Date(.data$timestamp)
+      ),
+      noon_time = as.POSIXct(
+        paste0(.data$noon_date, " 12:00:00"),
+        tz = "UTC"
+      ),
+      dist_to_noon = abs(as.numeric(difftime(
+        .data$timestamp,
+        .data$noon_time,
+        units = "secs"
+      )))
+    ) %>%
+    # Group by roost day (noon_date), not calendar day (period_id): a night
+    # spanning midnight (e.g. fixes at 23:43 and 01:15) is one roost day,
+    # the day after that night. Grouping by calendar day gave such a night
+    # two daily rows and so counted it twice downstream.
+    dplyr::group_by(.data[[grp_col]], .data$noon_date) %>%
+    dplyr::arrange(
+      .data$night_day == "night",
+      .data$dist_to_noon,
+      .by_group = TRUE
+    ) %>%
+    dplyr::slice(1) %>%
+    dplyr::ungroup()
+
+  .msg(
+    "  [noon_roost] Selected ",
+    nrow(rep_daily),
+    " daily points across ",
+    dplyr::n_distinct(rep_daily[[grp_col]]),
+    " groups (",
+    grp_col,
+    ")."
+  )
+  rep_daily %>%
+    dplyr::select(
+      -dplyr::any_of(c(
+        "night_day",
+        "period_id",
+        "noon_date",
+        "noon_time",
+        "dist_to_noon"
+      ))
+    )
+}
+
+# ---------------------------------------------------------------------------
+# .make_daily()
+# ---------------------------------------------------------------------------
+.make_daily <- function(x, daily_method = "solar_noon", tz = "UTC") {
+  method <- match.arg(
+    daily_method,
+    c("solar_noon", "daytime_only", "noon_roost")
+  )
+  b_daily <- switch(
+    method,
+    "solar_noon" = {
+      .msg("Daily method: solar_noon")
+      .safe_try(
+        mt_thin_daily_solar_noon(x, tz = tz),
+        "mt_thin_daily_solar_noon"
+      )
+    },
+    "daytime_only" = {
+      .msg("Daily method: daytime_only (excludes 21:00-05:00 UTC)")
+      .safe_try(.select_daily_daytime_only(x, tz = tz), "select_daily_daytime_only")
+    },
+    "noon_roost" = {
+      .msg("Daily method: noon_roost")
+      .safe_try(.select_daily_noon_roost(x), "select_daily_noon_roost")
+    }
+  )
+  if (is.null(b_daily) || nrow(b_daily) == 0) {
+    warning(".make_daily(): no rows returned for method '", method, "'.")
+    return(b_daily)
+  }
+  b_daily <- .safe_try(
+    mt_add_daily_sensor_metrics(
+      b_all = x,
+      b_daily = b_daily,
+      tz = tz,
+      day_anchor_hour = 12
+    ),
+    "mt_add_daily_sensor_metrics"
+  ) %||%
+    b_daily
+
+  # ---- diff_date: days elapsed between consecutive daily fixes per deployment ----
+  # For a perfect daily dataset every value is 1.
+  # Values > 1 indicate gaps (missed days); NA at the first fix of each deployment.
+  # Grouped by deployment_id when available (finest grouping), so gaps don't
+  # bleed across deployments for multi-deployment individuals.
+  b_daily$date <- as.Date(b_daily$timestamp)
+  # night ending at each daily fix (unique per track under noon_roost);
+  # use this, not `date`, to key night-level data to daily rows
+  b_daily$night_date <- .safe_try(
+    mt_daily_night_date(b_daily, tz = tz, day_anchor_hour = 12),
+    "mt_daily_night_date"
+  )
+  grp_vec <- as.character(b_daily[[move2::mt_track_id_column(b_daily)]])
+  # night_date when available: calendar dates can repeat under noon_roost
+  b_daily$diff_date <- ave(
+    as.numeric(if ("night_date" %in% names(b_daily)) b_daily$night_date else b_daily$date),
+    grp_vec,
+    FUN = function(d) c(NA_real_, diff(d))
+  )
+
+  .msg(
+    "  diff_date: ",
+    sum(b_daily$diff_date == 1, na.rm = TRUE),
+    " consecutive day pairs, ",
+    sum(b_daily$diff_date > 1, na.rm = TRUE),
+    " gaps (>1 day)."
+  )
+
+  b_daily
+}
+
+# ---------------------------------------------------------------------------
+# Per-study download + processing
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Column utilities (used by .download_one_study, .merge_stack, and output loop)
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Column utilities — defined before .download_one_study so all downstream
+# code (expand_tinyfox, output loop, .merge_stack) can call them freely.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Column utilities — defined before .download_one_study so all downstream
+# code (expand_tinyfox, output loop, .merge_stack) can call them freely.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Merge studies
+# ---------------------------------------------------------------------------
+# Strip units from a move2/sf object before stacking so that columns that
+# carry units in one study but not another (or carry different units) don't
+# cause bind_rows to error.  Units metadata is recorded as an attribute on
+# each column so it can be reattached if needed; stripping to double is safe
+# because the physical meaning is preserved by the column name.
+.strip_units_cols <- function(obj) {
+  if (is.null(obj) || !is.data.frame(obj)) {
+    return(obj)
+  }
+  for (col in names(obj)) {
+    if (inherits(obj[[col]], "units")) {
+      obj[[col]] <- as.numeric(obj[[col]])
+    }
+  }
+  obj
+}
+.na_like <- function(src, n) {
+  if (inherits(src, "POSIXct")) {
+    return(as.POSIXct(rep(NA_real_, n), origin = "1970-01-01", tz = "UTC"))
+  }
+  if (is.double(src)) {
+    return(rep(NA_real_, n))
+  }
+  if (is.integer(src)) {
+    return(rep(NA_integer_, n))
+  }
+  if (is.character(src)) {
+    return(rep(NA_character_, n))
+  }
+  if (is.logical(src)) {
+    return(rep(NA, n))
+  }
+  rep(NA_character_, n) # safe fallback
+}
+
+# ---------------------------------------------------------------------------
+# Column type normalisation for cross-study binding
+# ---------------------------------------------------------------------------
+# Converts an sf/tibble to a maximally bind-safe form:
+#   - units columns → plain numeric
+#   - ordered/factor columns → character (avoids level-set conflicts)
+#   - int64 (bit64) columns → character (avoids integer overflow in bind)
+# Geometry column is left untouched.
+.normalise_cols <- function(x) {
+  geom_col <- if (inherits(x, "sf")) attr(x, "sf_column") else NULL
+  for (nm in names(x)) {
+    if (!is.null(geom_col) && nm == geom_col) {
+      next
+    }
+    v <- x[[nm]]
+    if (inherits(v, "units")) {
+      x[[nm]] <- as.numeric(v)
+      next
+    }
+    if (is.ordered(v) || is.factor(v)) {
+      x[[nm]] <- as.character(v)
+      next
+    }
+    if (inherits(v, "integer64")) {
+      x[[nm]] <- as.character(v)
+      next
+    }
+  }
+  x
+}
+
+# ---------------------------------------------------------------------------
+# .drop_all_na_cols() — remove columns where every value (non-geometry) is NA
+#
+# Keeps geometry and move2 metadata intact. Applied to all three output objects
+# (full, location, daily) per study and after merging so analysts never see
+# columns that are entirely empty.
+# ---------------------------------------------------------------------------
+.drop_all_na_cols <- function(x) {
+if (is.null(x) || nrow(x) == 0) {
+  return(x)
+}
+
+geom_col <- if (inherits(x, "sf")) attr(x, "sf_column") else character(0)
+
+always_keep <- c(
+  "tag_type",
+  "model",
+  "tag_firmware",
+  "model_raw",
+  "tag_firmware_raw",
+  "model_firmware_ok",
+  "model_firmware_issue"
+)
+
+keep <- vapply(
+  names(x),
+  function(nm) {
+    if (nm %in% geom_col) return(TRUE)
+    if (nm %in% always_keep) return(TRUE)
+
+    v <- x[[nm]]
+    if (inherits(v, "sfc")) return(TRUE)
+
+    !all(is.na(v))
+  },
+  logical(1)
+)
+
+dropped <- names(x)[!keep]
+if (length(dropped) > 0) {
+  .msg(
+    "  Dropping ",
+    length(dropped),
+    " all-NA column(s): ",
+    paste(dropped, collapse = ", ")
+  )
+}
+
+x[, keep, drop = FALSE]
+}
+
+# ---------------------------------------------------------------------------
+# .normalise_one() — normalise a single move2 object before stacking
+#
+# Prepares a move2 object for mt_stack() by:
+#   1. Ensuring it is keyed to deployment_id
+#   2. Normalising event column types (units→numeric, ordered/factor→character,
+#      integer64→character) so bind_rows across studies doesn't see type clashes
+#   3. Normalising track data column types the same way so mt_stack track-data
+#      merge doesn't see clashes (e.g. capture_location <dbl> vs <chr>)
+# ---------------------------------------------------------------------------
+.normalise_one <- function(x) {
+  # Ensure keyed to deployment_id
+  if (
+    move2::mt_track_id_column(x) != "deployment_id" &&
+      "deployment_id" %in% names(x)
+  ) {
+    x$deployment_id <- as.character(x$deployment_id)
+    attr(x, "track_id_column") <- "deployment_id"
+  }
+
+  # Normalise event columns
+  x <- .normalise_cols(x)
+
+  # Normalise track data columns
+  td <- tryCatch(move2::mt_track_data(x), error = function(e) NULL)
+  if (!is.null(td)) {
+    changed <- FALSE
+    for (nm in names(td)) {
+      v <- td[[nm]]
+      if (inherits(v, "units")) {
+        td[[nm]] <- as.numeric(v)
+        changed <- TRUE
+      } else if (is.ordered(v)) {
+        td[[nm]] <- as.character(v)
+        changed <- TRUE
+      } else if (is.factor(v)) {
+        td[[nm]] <- as.character(v)
+        changed <- TRUE
+      } else if (inherits(v, "integer64")) {
+        td[[nm]] <- as.character(v)
+        changed <- TRUE
+      }
+      # Leave sfc geometry columns intact — that is the whole point
+    }
+    if (changed) {
+      x <- tryCatch(move2::mt_set_track_data(x, td), error = function(e) x)
+    }
+  }
+  x
+}
+# Replace contiguous runs of exact-zero temperature spanning ≥ 48 h with NA.
+# Exact zeros lasting multiple days are not biologically plausible for bats.
+.mask_zero_temp_run <- function(vals, times, min_span_h = 48) {
+  n <- length(vals)
+  if (n == 0L) return(vals)
+  exact_zero <- !is.na(vals) & vals == 0
+  if (!any(exact_zero)) return(vals)
+  r    <- rle(exact_zero)
+  ends <- cumsum(r$lengths)
+  strt <- ends - r$lengths + 1L
+  for (i in seq_along(r$values)) {
+    if (!r$values[i]) next
+    idx    <- strt[i]:ends[i]
+    span_h <- as.numeric(difftime(times[max(idx)], times[min(idx)], units = "hours"))
+    if (!is.na(span_h) && span_h >= min_span_h) vals[idx] <- NA_real_
+  }
+  vals
+}
+
+.download_one_study <- function(
+  id,
+  sensor_selected,
+  tag_type = NULL,
+  movebank_max_retries = 3,
+  movebank_retry_wait = 5,
+  location_metric_args = list(),
+  run_daily_metrics = TRUE,
+  daily_method = "solar_noon",
+  tz = "UTC",
+  tinyfox_v13p_v14p_force_factor = NULL,
+  flight_vedba_threshold = 50
+) {
+  .loc_metrics <- function(x) do.call(.make_location_metrics, c(list(x), location_metric_args))
+
+  .msg("Downloading study: ", id)
+  si <- .movebank_retry(
+    function() move2::movebank_download_study_info(study_id = id),
+    what = paste0("movebank_download_study_info(", id, ")"),
+    max_tries = movebank_max_retries,
+    wait_sec = movebank_retry_wait
+  )
+  w <- .wanted_sensor_ids(si, sensor_selected)
+  wanted_ids <- w$wanted_ids
+  if (length(wanted_ids) == 0) {
+    stop(
+      "Study ",
+      id,
+      " has no matching sensors.\n",
+      "Study: ",
+      paste(w$study_sensor_names, collapse = ", "),
+      "\n",
+      "Requested: ",
+      paste(sensor_selected$name, collapse = ", ")
+    )
+  }
+
+  b <- tryCatch(
+    .movebank_retry(
+      function() {
+        move2::movebank_download_study(
+          study_id = id,
+          sensor_type_id = wanted_ids
+        )
+      },
+      what = paste0("movebank_download_study(", id, ")"),
+      max_tries = movebank_max_retries,
+      wait_sec = movebank_retry_wait,
+      should_retry = function(e) {
+        !grepl(
+          "none seem to be deployed|deployment_id.*NA",
+          conditionMessage(e),
+          ignore.case = TRUE
+        )
+      }
+    ),
+    error = function(e) {
+      msg <- conditionMessage(e)
+      if (grepl("none seem to be deployed|deployment_id.*NA", msg, ignore.case = TRUE)) {
+        .msg(
+          "  Skipping study ", id,
+          ": no deployments defined in Movebank (deployment_id is NA for all records)."
+        )
+        return(NULL)
+      }
+      stop(e)
+    }
+  )
+  if (is.null(b)) return(NULL)
+
+  # ---------------------------------------------------------------------------
+  # Re-key to deployment_id immediately after download.
+  #
+  # Each deployment is its own move2 track (one track data row per deployment).
+  # This means:
+  #   - No list-columns ever — no stringification of geometry
+  #   - capture_location / deploy_on_location stay as proper sfc POINT columns
+  #   - mt_stack() across studies works without type clashes
+  #
+  # individual_local_identifier and deployment_id are promoted to event columns
+  # so individual- and deployment-level grouping both work without track data.
+  #
+  # mt_as_move2() rebuilds track data from event rows and loses track-data-only
+  # columns (capture_location, deploy_on_location, etc.).  We therefore:
+  #   1. Save the original track data (with geometry intact).
+  #   2. Add deployment_id as an event column by joining from track data.
+  #   3. Re-key via attr swap (not mt_as_move2) — preserves track data exactly.
+  #   4. Re-attach the saved track data, re-indexed by deployment_id.
+  # ---------------------------------------------------------------------------
+  b <- tryCatch(
+    {
+      orig_td <- move2::mt_track_data(b)
+      orig_track_col <- move2::mt_track_id_column(b)
+
+      # ---- Promote individual_local_identifier to event column ----
+      if (
+        !"individual_local_identifier" %in% names(b) &&
+          "individual_local_identifier" %in% names(orig_td)
+      ) {
+        lkp <- stats::setNames(
+          as.character(orig_td$individual_local_identifier),
+          as.character(orig_td[[orig_track_col]])
+        )
+        b$individual_local_identifier <- unname(lkp[as.character(move2::mt_track_id(
+          b
+        ))])
+      }
+      if (
+        !"individual_local_identifier" %in% names(b) ||
+          all(is.na(b$individual_local_identifier))
+      ) {
+        b$individual_local_identifier <- as.character(move2::mt_track_id(b))
+      }
+
+      # ---- If already keyed to deployment_id, coerce to character for join safety ----
+      if (orig_track_col == "deployment_id") {
+        if ("deployment_id" %in% names(b)) {
+          b$deployment_id <- as.character(b$deployment_id)
+        }
+        if (
+          "deployment_id" %in%
+            names(orig_td) &&
+            !is.character(orig_td$deployment_id)
+        ) {
+          orig_td$deployment_id <- as.character(orig_td$deployment_id)
+          b <- tryCatch(
+            move2::mt_set_track_data(b, orig_td),
+            error = function(e) b
+          )
+        }
+        b
+      } else if ("deployment_id" %in% names(orig_td)) {
+        # ---- Coerce track data deployment_id to character immediately ----
+        # This prevents mt_as_event_attribute() join failures caused by
+        # int64 (track data) vs character (event col) type mismatch.
+        orig_td$deployment_id <- as.character(orig_td$deployment_id)
+
+        # ---- Build deployment_id event column from mt_track_id ----
+        # Use mt_track_id(b) rather than b[[orig_track_col]] because the
+        # original track id column may not exist as an event column.
+        track_id_vec <- as.character(move2::mt_track_id(b))
+        dep_lkp <- stats::setNames(
+          as.character(orig_td$deployment_id),
+          as.character(orig_td[[orig_track_col]])
+        )
+        b$deployment_id <- as.character(dep_lkp[track_id_vec])
+
+        # ---- Swap track id attribute (preserves track data intact) ----
+        attr(b, "track_id_column") <- "deployment_id"
+
+        # ---- Re-index track data so deployment_id is the key column ----
+        # orig_td already has deployment_id (it came from Movebank track data).
+        # We just need to: coerce it to character, move it to position 1,
+        # and drop the old track id column (e.g. individual_local_identifier).
+        # No join required — orig_td is already one row per deployment.
+        new_td <- orig_td %>%
+          dplyr::mutate(deployment_id = as.character(deployment_id)) %>%
+          dplyr::select(
+            deployment_id,
+            dplyr::everything(),
+            -dplyr::any_of(setdiff(orig_track_col, "deployment_id"))
+          )
+
+        b <- move2::mt_set_track_data(b, new_td)
+
+        .msg(
+          "  Re-keyed to deployment_id (",
+          dplyr::n_distinct(b$deployment_id, na.rm = TRUE),
+          " deployments)."
+        )
+        b
+      } else {
+        .msg(
+          "  deployment_id not in track data; keeping original track id: ",
+          orig_track_col
+        )
+        b
+      }
+    },
+    error = function(e) {
+      .msg(
+        "  Re-key to deployment_id failed (",
+        conditionMessage(e),
+        "); using original track id."
+      )
+      b
+    }
+  )
+
+  # .fix_track_data_lists only needed if re-keying failed (multi-deployment individual track)
+  b <- .fix_track_data_lists(b)
+  b <- .add_event_attrs(b)
+  b <- .set_tag_type(b, study_id_current = id, tag_type = tag_type)
+  # Add these diagnostic checks:
+  if (.verbose()) {
+    .msg("  Diagnostic: tag_type distribution after .set_tag_type:")
+    print(table(b$tag_type, useNA = "ifany"))
+    
+    .msg("  Diagnostic: Checking raw columns used for model/firmware:")
+    for (check_col in c("model", "tag_firmware", "format_type")) {
+      if (check_col %in% names(b)) {
+        .msg("    ", check_col, ": ", sum(!is.na(b[[check_col]])), " non-NA values")
+        if (sum(!is.na(b[[check_col]])) > 0) {
+          .msg("      Unique values: ", paste(unique(na.omit(b[[check_col]]))[1:min(5, length(unique(na.omit(b[[check_col]]))))], collapse=", "))
+        }
+      } else {
+        .msg("    ", check_col, ": column not found")
+      }
+    }
+  }
+  b <- .standardise_model_firmware(b, study_id_current = id)
+  b <- .add_lonlat(b)
+  b <- .label_sensor_type(b, sensor_selected)
+  
+  # Diagnostic: report a safe summary of what came back from the download.
+  # Never paste raw column values — only names and table summaries.
+  if (.verbose()) {
+    col_names <- names(b)
+    .msg("  Downloaded: ", nrow(b), " rows x ", ncol(b), " columns.")
+    .msg("  Columns: ", paste(col_names, collapse = ", "))
+    if ("sensor_type" %in% col_names) {
+      .msg("  sensor_type distribution:")
+      print(table(b$sensor_type, useNA = "ifany"))
+    }
+    if ("tag_type" %in% col_names) {
+      .msg(
+        "  tag_type: ",
+        paste(
+          names(table(b$tag_type)),
+          table(b$tag_type),
+          sep = "=",
+          collapse = ", "
+        )
+      )
+    }
+    pcols <- grep(
+      "pressure|baro|altitude|tinyfox",
+      col_names,
+      value = TRUE,
+      ignore.case = TRUE
+    )
+    if (length(pcols)) {
+      .msg("  TinyFox/pressure columns: ", paste(pcols, collapse = ", "))
+    }
+  }
+  b <- tryCatch(.add_start(b), error = function(e) {
+    .msg("  .add_start failed: ", conditionMessage(e))
+    b
+  })
+
+  b <- .safe_try(
+    add_min_pressure_to_locations(df = b),
+    "add_min_pressure_to_locations"
+  ) %||%
+    b
+
+  # Populate temperature_min, temperature_max, avg_temp on location rows for
+  # all tag types (TinyFox flat columns + NanoFox sensor-row join fallback).
+
+  # Convert pressure to altitude for all tag types.
+  # NanoFox: min_3h_pressure is joined by add_min_pressure_to_locations() above.
+  # TinyFox: tinyfox_pressure_min_last_24h is a flat column on location rows.
+  # Both are handled by a single direct hypsometric conversion — no sourced
+  # script dependency, no window grouping, no row-ordering issues.
+  b <- .add_altitude_from_pressure_col(b)
+
+  # Expand TinyFox flat-schema columns into separate sensor rows (one per
+  # measurement type per transmission), adding time_start and time_end.
+  # Must run AFTER .add_altitude_from_pressure_col() so altitude_m is already
+  # on rows, and BEFORE .add_night_day_id() so new rows get night/day labels too.
+  b <- .safe_try(.expand_tinyfox_rows(b), "expand_tinyfox_rows") %||% b
+
+  b <- .safe_try(.add_night_day_id(b), "add_night_day_id") %||% b
+
+  # Location subset: speed (km/h), distance (km), delta_altitude_m (m)
+  b_loc <- .loc_metrics(b)
+  b_loc <- .add_prev_latlon(b_loc)
+
+  # Join per-transmission sensor aggregates onto location rows
+  b_loc <- .safe_try(
+    .add_location_sensor_metrics(b, b_loc),
+    "add_location_sensor_metrics"
+  ) %||% b_loc
+
+  # Apply VEDBA scaling correction (post-Movebank import workaround)
+  # Nanofox VEDBA in current Movebank export uses per-sample scaling (÷504).
+  # Auto-detect and correct to per-burst scaling (÷18) on import.
+  b_loc <- .safe_try(
+    .correct_vedba_scaling(b_loc),
+    "correct_vedba_scaling"
+  ) %||% b_loc
+
+  # Also correct raw sensor-level VeDBA values in the full object so they are
+  # expressed in per-burst units and directly comparable to Tinyfox per-burst.
+  b <- .safe_try(
+    .correct_sensor_vedba_scaling(b),
+    "correct_sensor_vedba_scaling"
+  ) %||% b
+
+  # TinyFox: per-message change in cumulative VeDBA counter.
+  # Must run before detect_tag_fell_off_loc so the diff column is available
+  # as the activity signal.
+  b_loc <- .safe_try(
+    .add_tinyfox_diff_vedba(b_loc),
+    "add_tinyfox_diff_vedba"
+  ) %||% b_loc
+
+  # Flag likely tag-fell-off rows per deployment and tag type.
+  # tag_type is still present here (dropped later in the cleanup loop).
+  b_loc <- .safe_try(
+    .detect_tag_fell_off_loc(b_loc),
+    "detect_tag_fell_off_loc"
+  ) %||% b_loc
+
+  # Tinyfox V13P/V14P scaling correction (data-driven).
+  # Runs after tag-fall-off detection so the stationary baseline is available.
+  b_loc <- .safe_try(
+    .correct_tinyfox_vedba_scaling(
+      b_loc,
+      force_factor = tinyfox_v13p_v14p_force_factor
+    ),
+    "correct_tinyfox_vedba_scaling"
+  ) %||% b_loc
+
+  # Climb rate + flight-gated altitude change (needs vedba_sum finalized above).
+  b_loc <- .safe_try(
+    .add_flight_altitude_metrics(b_loc, threshold = flight_vedba_threshold),
+    "add_flight_altitude_metrics"
+  ) %||% b_loc
+
+  # Count Sigfox base stations per location fix.
+  b_loc <- .safe_try(
+    .add_n_base_stations(b_loc),
+    "add_n_base_stations"
+  ) %||% b_loc
+
+  # Propagate tag_fell_off from b_loc to the full multi-sensor object.
+  # All sensor rows (VeDBA, temp, pressure) at or after the cutoff timestamp
+  # per deployment are also flagged.
+  b <- .safe_try(
+    .propagate_fell_off(b_loc, b),
+    "propagate_fell_off_full"
+  ) %||% b
+
+  # Propagate b_loc-derived columns back onto b (location rows only via
+  # timestamp join; all other sensor rows receive NA).
+  #
+  # vedba_sum and avg_temp are computed by .add_location_sensor_metrics() and
+  # only exist on b_loc.  mt_add_daily_sensor_metrics() receives b_all = b, so
+  # it must find these columns on b's location rows to produce non-NA daily
+  # NanoFox summaries.
+  b <- .safe_try(
+    .propagate_n_base_stations(b_loc, b),
+    "propagate_n_base_stations_full"
+  ) %||% b
+
+  for (.col in c("vedba_sum", "avg_temp",
+                 "tinyfox_total_vedba", "tinyfox_total_vedba_orig",
+                 "tinyfox_diff_vedba", "tinyfox_diff_vedba_orig",
+                 "tinyfox_vedba_rate", "tinyfox_vedba_rate_orig",
+                 ".tinyfox_scaling_factor", ".tinyfox_scaling_note",
+                 "speed_kmh", "step_km",
+                 "delta_altitude_m", "climb_rate_ms", "is_flight",
+                 "delta_altitude_flight_m", "climb_rate_flight_ms")) {
+    b <- .safe_try(
+      .propagate_col_from_loc(b_loc, b, .col),
+      paste0("propagate_", .col, "_full")
+    ) %||% b
+  }
+  rm(.col)
+
+  # Daily subset: same metrics pipeline (speed km/h, delta_altitude_m)
+  b_daily <- if (isTRUE(run_daily_metrics)) {
+    .make_daily(b, daily_method = daily_method, tz = tz)
+  }
+  if (is.null(b_daily) || nrow(b_daily) == 0) {
+    .msg(
+      "Warning: daily dataset empty for study ",
+      id,
+      " \u2014 skipping metrics."
+    )
+    b_daily2 <- b_daily
+  } else {
+    b_daily2 <- .loc_metrics(b_daily)
+    b_daily2 <- .add_prev_latlon(b_daily2)
+    # Climb rate + flight-gated altitude change (vedba_sum already
+    # propagated onto b before .make_daily() was called above).
+    b_daily2 <- .safe_try(
+      .add_flight_altitude_metrics(b_daily2, threshold = flight_vedba_threshold),
+      "add_flight_altitude_metrics_daily"
+    ) %||% b_daily2
+    b_daily2 <- .safe_try(
+      .propagate_fell_off(b_loc, b_daily2, use_date = TRUE),
+      "propagate_fell_off_daily"
+    ) %||% b_daily2
+    b_daily2 <- .safe_try(
+      .propagate_n_base_stations(b_loc, b_daily2),
+      "propagate_n_base_stations_daily"
+    ) %||% b_daily2
+    # Daily diff: change in cumulative VeDBA between consecutive daily fixes.
+    b_daily2 <- .safe_try(
+      .add_tinyfox_diff_vedba(b_daily2),
+      "add_tinyfox_diff_vedba_daily"
+    ) %||% b_daily2
+
+    # Apply the same Tinyfox V13P/V14P scaling correction to daily rows.
+    b_daily2 <- .safe_try(
+      .correct_tinyfox_vedba_scaling(
+        b_daily2,
+        force_factor = tinyfox_v13p_v14p_force_factor
+      ),
+      "correct_tinyfox_vedba_scaling_daily"
+    ) %||% b_daily2
+  }
+
+  # Report VEDBA scaling status
+  if (".vedba_scaling_note" %in% names(b_loc)) {
+    scaling_status <- sf::st_drop_geometry(b_loc) %>%
+      tibble::as_tibble() %>%
+      dplyr::filter(!is.na(vedba_sum)) %>%
+      dplyr::group_by(`.vedba_scaling_note`) %>%
+      dplyr::summarise(n_rows = dplyr::n(), .groups = "drop")
+
+    if (nrow(scaling_status) > 0) {
+      .msg("[VEDBA scaling] Status report:")
+      for (i in seq_len(nrow(scaling_status))) {
+        .msg(sprintf(
+          "  %s: %d rows",
+          scaling_status$.vedba_scaling_note[i],
+          scaling_status$n_rows[i]
+        ))
+      }
+    }
+  }
+
+  # Temporal covariates + final cleanup on all three objects
+  for (obj_name in c("b", "b_loc", "b_daily2")) {
+    obj <- get(obj_name)
+    if (!is.null(obj) && nrow(obj) > 0) {
+      obj <- .standardise_model_firmware(obj, study_id_current = id)
+
+      # Guarantee tag_fell_off exists on every output (FALSE if not computed)
+      if (!"tag_fell_off" %in% names(obj)) obj$tag_fell_off <- FALSE
+      obj$tag_fell_off <- as.logical(obj$tag_fell_off)
+
+      obj$year <- as.character(lubridate::year(obj$timestamp))
+      obj$yday <- as.character(lubridate::yday(obj$timestamp))
+      obj$season <- ifelse(
+        lubridate::month(obj$timestamp) > 7,
+        "Fall",
+        "Spring"
+      )
+      # Guarantee species on every output object (re-apply after row filtering).
+      obj <- .fill_from_td(obj, "taxon_canonical_name", "species")
+      obj$species <- as.character(obj$species)
+      # Remove internal columns not needed in outputs:
+      #   taxon_canonical_name — redundant with species
+      drop_cols <- intersect(
+        names(obj),
+        c("taxon_canonical_name")
+      )
+      if (length(drop_cols) > 0) {
+        obj <- obj[, !names(obj) %in% drop_cols, drop = FALSE]
+      }
+
+      # ---- tag_tech_spec → min_temp_c + min_temp_group ----
+      # tag_tech_spec carries ordinal minimum-temperature bins from the
+      # "derived" / "min.temp" sensor: "<=0", ">0 / <=5", ">5 / <=10", ">10".
+      # Rename to min_temp_c (the raw text label) and add min_temp_group,
+      # an ordered factor with levels in ascending temperature order so that
+      # model.matrix(), lm(), and ggplot2 all treat it as ordinal automatically.
+      if ("tag_tech_spec" %in% names(obj)) {
+        obj$min_temp_c <- as.character(obj$tag_tech_spec)
+        obj$min_temp_group <- factor(
+          obj$min_temp_c,
+          levels = c("<=0", ">0 / <=5", ">5 / <=10", ">10"),
+          ordered = TRUE
+        )
+        obj <- obj[, !names(obj) %in% "tag_tech_spec", drop = FALSE]
+      }
+      # Mask consecutive exact-zero temperature runs (≥ 48 h → biologically invalid)
+      .temp_cols_mask <- c(
+        "external_temperature", "avg_temp",
+        "tinyfox_temperature_min_last_24h", "tinyfox_temperature_max_last_24h"
+      )
+      for (.tc in intersect(.temp_cols_mask, names(obj))) {
+        v_orig <- suppressWarnings(as.numeric(obj[[.tc]]))
+        if (!any(!is.na(v_orig) & v_orig == 0)) next
+        v_new <- v_orig
+        ts    <- obj$timestamp
+        if ("individual_local_identifier" %in% names(obj)) {
+          trk <- as.character(obj$individual_local_identifier)
+          for (.id in unique(trk[!is.na(trk)])) {
+            ridx         <- which(trk == .id)
+            ord          <- order(ts[ridx])
+            v_new[ridx[ord]] <- .mask_zero_temp_run(v_orig[ridx[ord]], ts[ridx[ord]])
+          }
+        } else {
+          ord        <- order(ts)
+          v_new[ord] <- .mask_zero_temp_run(v_orig[ord], ts[ord])
+        }
+        obj[[paste0(.tc, "_zero_flag")]] <- !is.na(v_orig) & v_orig == 0 & is.na(v_new)
+        obj[[.tc]] <- v_new
+      }
+
+      # Coerce factors/ordered → character for merge safety
+      obj <- .normalise_cols(obj)
+      # Drop all-NA columns
+      obj <- .drop_all_na_cols(obj)
+      assign(obj_name, obj)
+    }
+  }
+
+  list(study_id = id, full = b, location = b_loc, daily = b_daily2)
+}
+
+# Create a typed NA vector that matches `src` in class so bind_rows
+# doesn't see a logical vs POSIXct / numeric / character clash.
+
+.merge_stack <- function(objs, track_combine = "merge") {
+  objs <- Filter(Negate(is.null), objs)
+  if (length(objs) == 0) {
+    return(NULL)
+  }
+  if (length(objs) == 1) {
+    return(objs[[1]])
+  }
+
+  # Step 1: normalise all objects (key to deployment_id, fix column types)
+  objs <- lapply(objs, .normalise_one)
+
+  # Step 2: try mt_stack directly — it handles track data merging correctly
+  # including sfc geometry columns.  Uses .track_combine = track_combine which
+  # defaults to "merge" (keeps all track data columns from all studies).
+  out <- tryCatch(
+    Reduce(
+      function(a, b) move2::mt_stack(a, b, .track_combine = track_combine),
+      objs
+    ),
+    error = function(e) {
+      .msg(
+        "  .merge_stack: mt_stack failed (",
+        conditionMessage(e),
+        "); falling back to manual bind_rows merge."
+      )
+      NULL
+    }
+  )
+
+  if (!is.null(out)) {
+    return(out)
+  }
+
+  # Fallback: strip units from event columns, drop move2 class, bind_rows, re-cast
+  .to_plain_sf <- function(x) {
+    x <- .strip_units_cols(sf::st_as_sf(x))
+    class(x) <- class(x)[!class(x) %in% "move2"]
+    x
+  }
+  sf_objs <- lapply(objs, .to_plain_sf)
+
+  # Build union column set and typed-NA fill map
+  geom_cols <- vapply(sf_objs, function(x) attr(x, "sf_column"), character(1))
+  all_cols <- unique(unlist(mapply(
+    function(x, gc) setdiff(names(x), gc),
+    sf_objs,
+    geom_cols,
+    SIMPLIFY = FALSE
+  )))
+
+  type_map <- list()
+  for (x in sf_objs) {
+    for (nm in names(x)) {
+      if (!nm %in% names(type_map) && !inherits(x[[nm]], "sfc")) {
+        type_map[[nm]] <- x[[nm]]
+      }
+    }
+  }
+
+  align_one <- function(x, gc) {
+    n <- nrow(x)
+    for (col in setdiff(all_cols, names(x))) {
+      src <- type_map[[col]]
+      x[[col]] <- if (!is.null(src)) {
+        .na_like(src, n)
+      } else {
+        rep(NA_character_, n)
+      }
+    }
+    x[, c(all_cols, gc), drop = FALSE]
+  }
+  sf_objs <- mapply(align_one, sf_objs, geom_cols, SIMPLIFY = FALSE)
+
+  combined <- tryCatch(
+    do.call(dplyr::bind_rows, sf_objs),
+    error = function(e) {
+      .msg(
+        "  .merge_stack: bind_rows failed (",
+        conditionMessage(e),
+        "); coercing all non-geometry columns to character."
+      )
+      sf_objs2 <- lapply(sf_objs, function(x) {
+        gc <- attr(x, "sf_column")
+        for (nm in setdiff(names(x), gc)) {
+          x[[nm]] <- if (!inherits(x[[nm]], "sfc")) {
+            as.character(x[[nm]])
+          } else {
+            x[[nm]]
+          }
+        }
+        x
+      })
+      do.call(dplyr::bind_rows, sf_objs2)
+    }
+  )
+
+  track_col <- if (
+    "deployment_id" %in%
+      names(combined) &&
+      !all(is.na(combined$deployment_id))
+  ) {
+    "deployment_id"
+  } else if (
+    "individual_local_identifier" %in%
+      names(combined) &&
+      !all(is.na(combined$individual_local_identifier))
+  ) {
+    "individual_local_identifier"
+  } else {
+    combined$..row_id <- as.character(seq_len(nrow(combined)))
+    "..row_id"
+  }
+
+  combined[[track_col]] <- as.character(combined[[track_col]])
+  combined <- combined[order(combined[[track_col]], combined$timestamp), ]
+  move2::mt_as_move2(
+    combined,
+    track_id_column = track_col,
+    time_column = "timestamp",
+    crs = sf::st_crs(sf_objs[[1]])
+  )
+}
+
+
+# ---------------------------------------------------------------------------
+# Summaries
+# ---------------------------------------------------------------------------
+# Prints flight-altitude summary stats (fix count, is_flight count,
+# median/mean climb_rate_flight_ms) for one merged output (full/loc/daily).
+.summarize_flight_altitude <- function(x, label) {
+  if (is.null(x) || nrow(x) == 0 || !"is_flight" %in% names(x)) return(invisible(NULL))
+  n_flight <- sum(as.logical(x$is_flight), na.rm = TRUE)
+  climb <- as.numeric(x$climb_rate_flight_ms)
+  climb <- climb[is.finite(climb)]
+  .msg(
+    "  Flight altitude (", label, "): ", n_flight, " flight fixes of ", nrow(x),
+    "; climb_rate_flight_ms median = ",
+    if (length(climb)) round(stats::median(climb), 3) else NA,
+    ", mean = ",
+    if (length(climb)) round(mean(climb), 3) else NA
+  )
+}

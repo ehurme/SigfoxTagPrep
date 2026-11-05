@@ -13,11 +13,10 @@
 #' @return The input data frame with an additional column \code{min_3h_pressure}
 #'   (numeric, hPa) populated only on rows where \code{sensor_type == "location"}.
 #' @seealso \code{\link{pressure_to_altitude_m}}, \code{\link{add_altitude_from_pressure}}
+#' @export
 add_min_pressure_to_locations <- function(df,
                                           track_col = individual_local_identifier,
                                           time_col  = timestamp) {
-  require(dplyr)
-  require(rlang)
 
   track_col <- enquo(track_col)
   time_col  <- enquo(time_col)

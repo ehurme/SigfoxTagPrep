@@ -24,7 +24,7 @@ Usage:
     python download_era5.py era5_config.json
     python download_era5.py era5_config.json --dataset single
     python download_era5.py era5_config.json --dataset pressure
-    python download_era5.py era5_config.json --outdir //10.0.16.7/grpdechmann/.../EnvData
+    python download_era5.py era5_config.json --outdir path/to/EnvData
     python download_era5.py era5_config.json --verify
     python download_era5.py era5_config.json --verify --retries 3
 

@@ -31,6 +31,7 @@
 #' \dontrun{
 #'   m <- add_moonlit_to_move2(m)
 #' }
+#' @export
 add_moonlit_to_move2 <- function(x,
                                  time_col = "timestamp",
                                  e = NULL,
@@ -41,9 +42,6 @@ add_moonlit_to_move2 <- function(x,
                                  prefix = "moonlit_",
                                  quiet = FALSE) {
   # ---- deps inside function (as requested) ----
-  require(move2)
-  require(sf)
-  require(dplyr)
 
   if (!requireNamespace("moonlit", quietly = TRUE)) {
     stop(

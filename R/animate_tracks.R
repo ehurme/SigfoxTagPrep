@@ -1,8 +1,3 @@
-library(dplyr)
-library(sf)
-library(ggplot2)
-library(gganimate)
-library(rnaturalearth)
 
 # ── animate_tracks() ──────────────────────────────────────────────────────────
 # Animate bat migration tracks from a move2 sf object.

@@ -4,3 +4,6 @@
 ^\.claude$
 ^CLAUDE\.md$
 ^AGENTS\.md$
+^LICENSE$
+^\.github$
+^\.vscode$

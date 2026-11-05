@@ -6,14 +6,6 @@ mt_filter_daily_solar_noon <- function(
     fallback = c("drop_day", "first_location_geom", "first", "last", "random"),
     require_location_geom = TRUE
 ) {
-  require(move2)
-  require(dplyr)
-  require(assertthat)
-  require(lubridate)
-  require(sf)
-  require(suncalc)
-  require(rlang)
-  require(tibble)
 
   fallback <- match.arg(fallback)
 
@@ -129,6 +121,21 @@ mt_filter_daily_solar_noon <- function(
   sel
 }
 
+#' Thin a move2 track to one location per day, nearest solar noon
+#'
+#' For each track and calendar day, keeps the location fix closest to local
+#' solar noon (computed with \pkg{suncalc} at the fix position).
+#'
+#' @param x A time-ordered `move2` object.
+#' @param tz Time zone used to define calendar days.
+#' @param sensor_type_col,location_label Column and value that mark location
+#'   rows; only those rows are candidates.
+#' @param fallback What to do on days without a usable location fix:
+#'   `"drop_day"` (default), `"first_location_geom"`, `"first"`, `"last"` or
+#'   `"random"`.
+#' @param require_location_geom Logical; ignore rows with empty geometry.
+#' @return `x` filtered to one row per track and day.
+#' @export
 mt_thin_daily_solar_noon <- function(
     x,
     tz = "UTC",
@@ -137,7 +144,6 @@ mt_thin_daily_solar_noon <- function(
     fallback = "drop_day",
     require_location_geom = TRUE
 ) {
-  require(move2)
 
   # order within track by time
   x <- x[order(move2::mt_track_id(x), move2::mt_time(x)), ]

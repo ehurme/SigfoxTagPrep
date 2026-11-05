@@ -1,6 +1,6 @@
 #' Find pairs of individuals whose tracks overlap in time
 #'
-#' Uses a sort-and-sweep over each track's [start, end] interval so that,
+#' Uses a sort-and-sweep over each track's `[start, end]` interval so that,
 #' for deployments spanning many years/sites, individuals are only ever
 #' compared against others that were tracked at the same time (and,
 #' optionally, in the same group) -- not against every other individual in
@@ -45,8 +45,8 @@
 #' time and, if a \code{group} column is present in \code{tracks} (e.g.
 #' roost/colony/region), restricted to pairs within the same group.
 #'
-#' @param tracks A data.table as returned by \code{\link{regularize_tracks}}
-#'   (or \code{\link{shift_tracks}}), with columns \code{id}, \code{timestamp},
+#' @param tracks A data.table as returned by \code{\link{regularize_tracks}},
+#'   with columns \code{id}, \code{timestamp},
 #'   \code{x}, \code{y}, and optionally \code{group}.
 #' @param max_pairs_warn Warn if more candidate pairs than this are found
 #'   (a sign that grouping or time-overlap filtering isn't narrowing things
@@ -55,6 +55,7 @@
 #'   \code{timestamp}, \code{distance} (metres, in the CRS used by
 #'   \code{regularize_tracks}).
 #' @importFrom data.table setDT setkey rbindlist
+#' @export
 pairwise_track_distance <- function(tracks, max_pairs_warn = 20000) {
   data.table::setDT(tracks)
   has_group <- "group" %in% names(tracks)
@@ -95,6 +96,7 @@ pairwise_track_distance <- function(tracks, max_pairs_warn = 20000) {
 #'   the proportion of shared fixes within this distance.
 #' @return A data.table with one row per (id1, id2) pair.
 #' @importFrom data.table setDT
+#' @export
 summarize_pairwise_distance <- function(pw, threshold_m = NULL) {
   data.table::setDT(pw)
   if (nrow(pw) == 0) {

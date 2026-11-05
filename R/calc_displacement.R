@@ -18,10 +18,8 @@
 #' }
 #' @importFrom sf st_geometry st_is_empty st_distance
 #' @importFrom move2 mt_track_id
+#' @export
 calc_displacement <- function(x, units = "km") {
-  require(dplyr)
-  require(sf)
-  require(move2)
 
   if (!inherits(x, "move2")) stop("x must be a 'move2' object.")
   if (!units %in% c("km", "m")) stop("units must be 'km' or 'm'")

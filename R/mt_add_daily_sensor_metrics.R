@@ -6,7 +6,6 @@
     return(list(dist_m = d, bearing_deg = b))
   } else {
     # fallback: approximate distance via sf in EPSG:3857
-    require(sf)
     p1 <- sf::st_as_sf(data.frame(lon = lon1, lat = lat1), coords = c("lon", "lat"), crs = 4326)
     p2 <- sf::st_as_sf(data.frame(lon = lon2, lat = lat2), coords = c("lon", "lat"), crs = 4326)
     p1m <- sf::st_transform(p1, 3857)
@@ -22,10 +21,6 @@
 mt_add_message_timediff <- function(x,
                                     dt_prev_s_col = "dt_prev_s",
                                     dt_prev_h_col = "dt_prev_h") {
-  require(move2)
-  require(dplyr)
-  require(rlang)
-  require(assertthat)
 
   assert_that(move2::mt_is_time_ordered(x))
 
@@ -49,6 +44,17 @@ mt_add_message_timediff <- function(x,
 # daily rows; calendar as.Date(timestamp) is not, since an afternoon day fix
 # and that evening's night fix can share a date. Fixes without a usable
 # position fall back to the bat day.
+#' Night date for each daily fix
+#'
+#' Labels each daily fix with the date of the evening of the night that ends
+#' at that fix (noon-to-noon "bat day"). Use it, not `as.Date(timestamp)`, to
+#' join night-level data to daily rows.
+#'
+#' @param x A `move2` object of daily fixes.
+#' @param tz Time zone for calendar dates.
+#' @param day_anchor_hour Hour (local to `tz`) at which a bat day starts.
+#' @return A `Date` vector, one per row of `x`.
+#' @export
 mt_daily_night_date <- function(x, tz = "UTC", day_anchor_hour = 12) {
   ts <- move2::mt_time(x)
   bat_day <- as.Date(ts - lubridate::hours(day_anchor_hour), tz = tz)
@@ -68,6 +74,31 @@ mt_daily_night_date <- function(x, tz = "UTC", day_anchor_hour = 12) {
   out
 }
 
+#' Add night-level sensor summaries to daily fixes
+#'
+#' Summarises the sensor rows of a full multi-sensor `move2` object (VeDBA,
+#' temperature, pressure, activity) over the night that precedes each daily
+#' fix and joins them as `daily_*` columns (e.g. `daily_vedba_sum`,
+#' `daily_temp_mean`, `daily_p_min`, `daily_alt_night_max_m`). NanoFox and
+#' TinyFox columns are handled separately.
+#'
+#' @param b_all Full multi-sensor `move2` object.
+#' @param b_daily Daily `move2` object (e.g. from [mt_thin_daily_solar_noon()]).
+#' @param tz Time zone for day boundaries.
+#' @param day_anchor_hour Hour at which a bat day starts.
+#' @param night_key `"preceding_night"` (default, via [mt_daily_night_date()])
+#'   or `"bat_day"` to key summaries to daily rows.
+#' @param tag_type_col,model_col Columns with tag type and model.
+#' @param skip_if_model,skip_uwasp If `skip_uwasp` is `TRUE` and any row's
+#'   model is in `skip_if_model`, `b_daily` is returned unchanged.
+#' @param nano_vedba_col,nano_temp_col,nano_pres_col NanoFox sensor columns.
+#' @param nano_vedba_active_threshold,nano_vedba_flying_threshold NanoFox
+#'   VeDBA thresholds for counting active and flying bursts.
+#' @param tiny_act_col,tiny_pmin_col,tiny_tmax_col,tiny_tmin_col,tiny_vedba_col
+#'   TinyFox 24-hour summary columns.
+#' @param p0_hpa Sea-level reference pressure (hPa) for altitude conversion.
+#' @return `b_daily` with added `daily_*` columns.
+#' @export
 mt_add_daily_sensor_metrics <- function(b_all,
                                         b_daily,
                                         tz = "UTC",
@@ -94,14 +125,6 @@ mt_add_daily_sensor_metrics <- function(b_all,
 
                                         # altitude
                                         p0_hpa = 1013.25) {
-  require(move2)
-  require(dplyr)
-  require(lubridate)
-  require(sf)
-  require(suncalc)
-  require(rlang)
-  require(assertthat)
-  require(tibble)
 
   b_all   <- b_all[order(mt_track_id(b_all),   mt_time(b_all)), ]
   b_daily <- b_daily[order(mt_track_id(b_daily), mt_time(b_daily)), ]

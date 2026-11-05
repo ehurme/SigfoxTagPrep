@@ -3,10 +3,11 @@
 #' This function processes Sigfox tracking data, prepares it for analysis,
 #' and optionally plots it using move2 and related geospatial packages.
 #'
-#' @param data A data frame containing tracking data.
+#' @param tracks A data frame containing tracking data.
 #' @param plot_tracks Logical; if TRUE, generates a plot of the tracking data.
 #' @param include_legend Logical; controls the presence of a legend in the plot.
 #' @param motionless Logical; check if the tag fell off
+#' @param make_lines Logical; also build per-tag track lines.
 #' @return A list containing move2 objects and optionally a plot.
 #' @importFrom pacman p_load
 #' @importFrom dplyr filter arrange group_by
@@ -282,6 +283,7 @@ sigfox_to_move2 <- function(tracks,
 #' Ensures move2 data is clean and ready for analysis.
 #' @param m move2 object.
 #' @return Preprocessed move2 object.
+#' @export
 mt_preprocess <- function(m) {
   if (!move2::mt_is_track_id_cleaved(m)) {
     m <- dplyr::arrange(m, move2::mt_track_id(m))
@@ -310,7 +312,9 @@ mt_preprocess <- function(m) {
 #' @param m move2 object with tracking data.
 #' @param ml Lines representing movements of tags.
 #' @param legend Logical; whether to include a legend.
+#' @param plot_lines Logical; draw the track lines `ml`.
 #' @return A ggplot object.
+#' @export
 plot_tracking_data <- function(m, ml, legend, plot_lines = TRUE) {
   extent <- m$geometry %>% sf::st_bbox()
 

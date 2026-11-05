@@ -13,11 +13,10 @@
 #' @return The input data frame with additional columns \code{vedba_sum} (numeric)
 #'   and \code{avg_temp} (numeric, \eqn{^\circ}C) populated only on location rows.
 #' @seealso \code{\link{add_min_pressure_to_locations}}
+#' @export
 add_vedba_temp_to_locations <- function(df,
                                         track_col = individual_local_identifier,
                                         time_col  = timestamp) {
-  require(dplyr)
-  require(rlang)
 
   track_col <- enquo(track_col)
   time_col  <- enquo(time_col)

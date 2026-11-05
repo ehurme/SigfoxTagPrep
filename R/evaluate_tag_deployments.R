@@ -156,28 +156,3 @@ evaluate_tag_deployments <- function(
   )
 }
 
-qa <- evaluate_tag_deployments(
-  track_data          = track_data,
-  bats_full           = bats_full,
-  tag_type            = "nanofox",
-  max_duration_days   = 60,
-  min_transmissions   = 2,
-  capture_sheet_cols  = c(
-    "deploy_on_timestamp", "animal_mass", "sex",
-    "age", "capture_location", "individual_local_identifier"
-  )
-)
-
-
-
-# Inspect flagged deployments
-qa$summary %>% filter(any_flag) %>% View()
-
-# Tags safe to use downstream
-qa$complete_tags
-
-# Duration histogram for complete tags only
-qa$summary %>%
-  filter(!flag_long_dur, !flag_no_start) %>%
-  pull(duration_days) %>%
-  hist(breaks = 30, main = "Deployment duration (days)", xlab = "days")

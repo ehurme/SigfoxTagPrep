@@ -10,38 +10,62 @@ Description: Tools for working with ICARUS/Sigfox wildlife tracking tags
     objects, compute movement metrics (speed, distance, bearing, displacement,
     VeDBA), add environmental covariates from ERA5 rasters, detect tag
     fall-off events, and identify continuous nocturnal flight bouts.
-License: MIT + file LICENSE
+License: GPL (>= 3)
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
-RoxygenNote: 7.3.2
 Depends:
     R (>= 4.1.0)
 Imports:
+    assertthat,
     data.table,
     dplyr,
+    fs,
     ggplot2,
     janitor,
     lubridate,
     mapview,
     move2,
+    pacman,
+    purrr,
+    readr,
+    rlang,
     rnaturalearth,
     rvest,
     sf,
     stringr,
-    suncalc
+    suncalc,
+    terra,
+    tibble,
+    tidyr,
+    units,
+    vctrs
 Suggests:
+    av,
     devtools,
     elevatr,
+    forcats,
+    furrr,
+    future,
+    future.apply,
     geosphere,
+    gganimate,
+    ggforce,
+    ggpp,
+    ggpubr,
+    ggrain,
     ggridges,
+    gifski,
+    jsonlite,
     lme4,
-    pacman,
-    purrr,
-    terra,
+    momentuHMM,
+    moonlit,
+    raster,
+    readxl,
     testthat (>= 3.0.0),
-    tidyr,
-    tidyverse,
-    units
+    tidyterra
+Remotes:
+    msmielak/moonlit
 Config/testthat/edition: 3
 URL: https://github.com/ehurme/SigfoxTagPrep
 BugReports: https://github.com/ehurme/SigfoxTagPrep/issues
+Config/roxygen2/version: 8.1.0

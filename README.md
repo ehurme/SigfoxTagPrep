@@ -121,7 +121,6 @@ p      <- result[[4]]   # ggplot map
 |---|---|
 | `process_bat_capturesheet_to_movebank()` | Format a bat capture sheet as Movebank reference data |
 | `wildcloud_to_movebank()` | Convert Wildcloud CSV exports to Movebank upload format |
-| `wildcloud_nanofox30d_to_movebank()` | As above for 30-day NanoFox deployments |
 | `prep_wildcloud_movebank()` | Prepare Wildcloud data for Movebank |
 | `fix_basestation_locations()` | Correct base station coordinates in Sigfox data |
 | `parse_basestations()` | Parse base station fields from raw Sigfox messages |
@@ -152,12 +151,11 @@ p      <- result[[4]]   # ggplot map
 
 | Function | Description |
 |---|---|
-| `add_env_to_move2()` | Extract ERA5/ECMWF raster values at each fix location and time (GRIB stacks) |
 | `annotate_era5()` | Extract ERA5 surface + pressure-level wind at each fix, compute altitude-matched wind support (NetCDF from `download_era5.py`) |
 | `calculate_wind_features()` | Wind support, crosswind, and airspeed from U/V components |
 | `altitude_to_pressure_hPa()` | Convert altitude (m) to pressure (hPa) — inverse of `pressure_to_altitude_m()` |
 | `add_moonlit_to_move2()` | Moonlight intensity and sun altitude at each fix |
-| `extract_avg_night_env()` | Average environmental values over the preceding night |
+| `annotate_era5_night_avg()` | Average ERA5 values over the preceding night |
 | `extract_sunset_env()` | Environmental values at sunset for each fix |
 | `extract_elevation_segments()` | Elevation profile along flight paths |
 
@@ -178,9 +176,7 @@ p      <- result[[4]]   # ggplot map
 | `regularize_to_daily()` | Aggregate to daily summaries (TinyFox/NanoFox/uWasp) |
 | `mt_thin_daily_solar_noon()` / `mt_filter_daily_solar_noon()` | Select the fix closest to solar noon per day |
 | `mt_add_daily_sensor_metrics()` | Append nightly sensor aggregates to a daily move2 object |
-| `mt_add_start()` | Insert a synthetic deployment-start row at the capture location |
 | `mt_previous()` / `mt_add_prev_metrics()` | Add lagged speed, distance, and bearing columns |
-| `mt_distance2()` | Distance to previous fix (alternate implementation) |
 
 ### Migration analysis
 
@@ -213,10 +209,9 @@ p      <- result[[4]]   # ggplot map
 
 ## Dependencies
 
-Core: `move2`, `sf`, `dplyr`, `lubridate`, `ggplot2`, `rvest`, `suncalc`, `janitor`
+Core (installed automatically): `move2`, `sf`, `dplyr`, `tidyr`, `lubridate`, `ggplot2`, `terra`, `data.table`, `suncalc` and others listed in `DESCRIPTION`.
 
 Optional (for specific functions):
-- `terra` — ERA5 raster extraction (`add_env_to_move2`, `annotate_era5`)
 - `moonlit` — moonlight covariates (`add_moonlit_to_move2`):
   `devtools::install_github("msmielak/moonlit")`
 - `elevatr` — ground elevation lookup
@@ -230,18 +225,17 @@ Python (for ERA5 downloads only):
 
 ## ERA5 pressure-level wind annotation
 
-`annotate_era5()` complements the existing `add_env_to_move2()` (which works
-with yearly GRIB stacks) by adding **pressure-level wind extraction** and
-**altitude-matched wind support**.  It is designed for the NetCDF folder
-structure produced by `inst/python/download_era5.py`.
+`annotate_era5()` adds **pressure-level wind extraction** and
+**altitude-matched wind support**. It is designed for the monthly file
+structure produced by `python/download_era5.py`.
 
 ### Download ERA5 data
 
 ```bash
-# Edit inst/python/era5_config.json with your study area, dates, and levels
+# Edit python/era5_config.json with your study area, dates, levels and output_dir
 # then:
 pip install cdsapi
-python inst/python/download_era5.py inst/python/era5_config.json
+python python/download_era5.py python/era5_config.json
 ```
 
 Data is saved to the configured output directory (default:
@@ -291,4 +285,4 @@ If you use this package please cite:
 
 ## License
 
-MIT © Edward Hurme
+GPL (>= 3) © Edward Hurme. See [LICENSE](LICENSE).

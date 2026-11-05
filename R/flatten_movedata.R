@@ -1,6 +1,3 @@
-library(dplyr)
-library(purrr)
-library(lubridate)
 
 flatten_mb <- function(result) {
   ## unlisting track data columns of class list

@@ -18,7 +18,6 @@
 #   plot_basestation_correction(before, after, ...)   — standalone plot
 # =============================================================================
 
-source("../SigfoxTagPrep/R/parse_basestations.R")   # adjust path as needed
 
 # -----------------------------------------------------------------------------
 # .parse_correction_times(corrections)
@@ -390,8 +389,7 @@ if (FALSE) {
   )
 
   result <- fix_basestation_locations(
-    csv_path    = "../../../Downloads/Swiss_FSP_22_06_2026_records.csv",
-      #"//10.0.16.7/grpdechmann/Bat projects/Noctule captures/Movebank/Switzerland/wildcloud/Swiss2026_NanofoxFSP_05_05_2026_records_corrected.csv",
+    csv_path    = "path/to/Swiss_FSP_22_06_2026_records.csv",
     corrections = corrections
     # plot     = TRUE   # default: shows before/after map
     # bs_col   = "Base Stations (ID, RSSI, Reps)"  # default

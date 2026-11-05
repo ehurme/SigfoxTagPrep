@@ -13,13 +13,15 @@ sigfox_to_move2(
 )
 }
 \arguments{
+\item{tracks}{A data frame containing tracking data.}
+
 \item{plot_tracks}{Logical; if TRUE, generates a plot of the tracking data.}
 
 \item{include_legend}{Logical; controls the presence of a legend in the plot.}
 
 \item{motionless}{Logical; check if the tag fell off}
 
-\item{data}{A data frame containing tracking data.}
+\item{make_lines}{Logical; also build per-tag track lines.}
 }
 \value{
 A list containing move2 objects and optionally a plot.

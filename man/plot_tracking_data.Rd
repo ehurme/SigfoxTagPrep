@@ -12,6 +12,8 @@ plot_tracking_data(m, ml, legend, plot_lines = TRUE)
 \item{ml}{Lines representing movements of tags.}
 
 \item{legend}{Logical; whether to include a legend.}
+
+\item{plot_lines}{Logical; draw the track lines \code{ml}.}
 }
 \value{
 A ggplot object.

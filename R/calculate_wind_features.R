@@ -32,7 +32,7 @@ airspeed <- function(ground_speed, ws, cw) {
 #' Calculate wind support, crosswind, and airspeed from ERA5 wind components
 #'
 #' Given U/V wind component columns at one or more time offsets (e.g. from
-#' \code{\link{add_env_to_move2}}), computes:
+#' \code{\link{annotate_era5_offsets}}), computes:
 #' \itemize{
 #'   \item Wind speed and cardinal direction
 #'   \item Wind support (tailwind component along heading)
@@ -80,6 +80,7 @@ airspeed <- function(ground_speed, ws, cw) {
 #'     time_diff_units = "minutes"
 #'   )
 #' }
+#' @export
 calculate_wind_features <- function(
     data,
     u_col_base, v_col_base,
@@ -92,7 +93,6 @@ calculate_wind_features <- function(
     suffix = "h",
     quiet = FALSE
 ) {
-  require(stringr)
 
   offset_units <- match.arg(offset_units)
   time_diff_units <- match.arg(time_diff_units)
@@ -101,7 +101,7 @@ calculate_wind_features <- function(
   offsets_h <- if (offset_units == "days") as.integer(offsets * 24) else as.integer(offsets)
 
   # infer elevation from base name like u10/u100
-  elevation <- str_extract(v_col_base, "[0-9]+$") %||% ""
+  elevation <- dplyr::coalesce(str_extract(v_col_base, "[0-9]+$"), "")
 
   # sensible default output bases if not given
   if (is.null(windsp_col_base))  windsp_col_base  <- paste0("windsp", elevation)
@@ -158,8 +158,6 @@ calculate_wind_features <- function(
   data
 }
 
-# small infix helper (keeps function self-contained)
-`%||%` <- function(a, b) if (!is.null(a) && length(a) && !is.na(a)) a else b
 
 # n_env <- calculate_wind_features(
 #   data = n_env,

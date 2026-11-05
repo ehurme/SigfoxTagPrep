@@ -43,6 +43,7 @@
 #' @importFrom sf st_geometry st_coordinates st_transform st_crs st_as_sf st_is_empty
 #' @importFrom move2 mt_track_id
 #' @importFrom data.table data.table setDT setorder
+#' @export
 plot_regularized_track <- function(raw, reg, ids = NULL,
                                     id_col = "individual_local_identifier",
                                     time_col = "timestamp",
@@ -53,7 +54,6 @@ plot_regularized_track <- function(raw, reg, ids = NULL,
                                     verbose = TRUE) {
   requireNamespace("sf")
   requireNamespace("data.table")
-  suppressPackageStartupMessages(library(ggplot2))
 
   # ── 0. Prep `reg` (grab attrs before subsetting -- data.table's `[`
   #      doesn't preserve custom attributes) ────────────────────────────────

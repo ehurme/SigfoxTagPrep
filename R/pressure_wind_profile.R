@@ -18,8 +18,6 @@
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
-`%||%`     <- function(a, b) if (!is.null(a)) a else b
-`%||_plt%` <- function(a, b) if (!is.null(a)) a else b
 
 
 # ── setup_pressure_wind_config() ──────────────────────────────────────────────
@@ -252,7 +250,6 @@ find_complete_periods <- function(
     min_coverage = 0.3,
     verbose      = TRUE
 ) {
-  suppressPackageStartupMessages({ library(dplyr); library(sf) })
 
   stopifnot(inherits(data, "sf"))
   ts_col <- cfg$timestamp_col
@@ -547,26 +544,7 @@ pressure_wind_profile <- function(
     theme_dark  = FALSE,
     verbose     = TRUE
 ) {
-  suppressPackageStartupMessages({
-    library(dplyr); library(tidyr); library(sf)
-    library(ggplot2); library(ggpubr)
-    library(terra); library(tidyterra)
-    library(rnaturalearth); library(elevatr)
-  })
 
-  for (.src in c("R/pressure_to_altitude_m.R",
-                 "../SigfoxTagPrep/R/pressure_to_altitude_m.R"))
-    if (!exists("pressure_to_altitude_m", mode = "function") && file.exists(.src))
-      source(.src)
-  if (!exists("pressure_to_altitude_m", mode = "function") && verbose)
-    message("  pressure_to_altitude_m() not found; using built-in approximation")
-
-  for (.src in c("R/extract_elevation_segments.R",
-                 "../SigfoxTagPrep/R/extract_elevation_segments.R"))
-    if (!exists("extract_elevation_segments", mode = "function") && file.exists(.src))
-      source(.src)
-  if (!exists("extract_elevation_segments", mode = "function") && verbose)
-    message("  extract_elevation_segments() not found; elevation profile panel will be skipped")
 
   .has <- function(df, col)
     !is.null(col) && nchar(col) > 0 && col %in% names(df) && any(!is.na(df[[col]]))
@@ -772,9 +750,9 @@ pressure_wind_profile <- function(
 
   # ─ Panel 1: Map ────────────────────────────────────────────────────────────
   p_map <- ggplot() +
-    { if (!is.null(elev_rast)) geom_spatraster(data = elev_rast) } +
+    { if (!is.null(elev_rast)) tidyterra::geom_spatraster(data = elev_rast) } +
     { if (!is.null(elev_rast))
-        scale_fill_hypso_c(name = "Elevation\n(m)", palette = "arctic_bathy",
+        tidyterra::scale_fill_hypso_c(name = "Elevation\n(m)", palette = "arctic_bathy",
                            limits = c(0, 4000), na.value = NA) } +
     { if (!is.null(countries))
         geom_sf(data = countries, fill = NA,
@@ -1017,21 +995,21 @@ pressure_wind_profile <- function(
   # ─ Assemble panels ──────────────────────────────────────────────────────────
   # Row 1: map  |  elevation profile  (elevation omitted if unavailable)
   p_top <- if (!is.null(p_elev))
-    ggarrange(p_map, p_elev, ncol = 2, widths = c(1.3, 1))
+    ggpubr::ggarrange(p_map, p_elev, ncol = 2, widths = c(1.3, 1))
   else
-    ggarrange(p_map, ncol = 1)
+    ggpubr::ggarrange(p_map, ncol = 1)
 
   # Row 2: heatmap  |  tag pressure
-  p_mid <- ggarrange(
-    p_heatmap %||_plt% (ggplot() + .pt() +
+  p_mid <- ggpubr::ggarrange(
+    p_heatmap %||% (ggplot() + .pt() +
                           labs(title = "Wind heatmap\n(no wind data available)")),
     p_pressure,
     ncol = 2, widths = c(1.4, 1)
   )
 
   # Row 3: wind lines per level  |  comparison
-  p_lower <- ggarrange(
-    p_ws_lines %||_plt% (ggplot() + .pt() +
+  p_lower <- ggpubr::ggarrange(
+    p_ws_lines %||% (ggplot() + .pt() +
                            labs(title = "Wind per level\n(heading required for wind support)")),
     p_comparison,
     ncol = 2
@@ -1043,11 +1021,11 @@ pressure_wind_profile <- function(
   # Optional row: VeDBA and/or temperature
   extra <- Filter(Negate(is.null), list(p_vedba, p_temp))
   if (length(extra) > 0) {
-    rows    <- c(rows, list(ggarrange(plotlist = extra, ncol = length(extra))))
+    rows    <- c(rows, list(ggpubr::ggarrange(plotlist = extra, ncol = length(extra))))
     heights <- c(heights, 0.9)
   }
 
-  p_all  <- ggarrange(plotlist = rows, ncol = 1, heights = heights)
+  p_all  <- ggpubr::ggarrange(plotlist = rows, ncol = 1, heights = heights)
   fig_h  <- sum(heights) * 2.0
 
   # ─ Save ─────────────────────────────────────────────────────────────────────

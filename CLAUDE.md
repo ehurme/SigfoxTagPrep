@@ -19,7 +19,7 @@ discovered; delete entries that become wrong.
 - Python helpers are in `python/`, not `inst/python/`.
 - Network paths (`//10.0.16.7/grpdechmann/...`) are MPI-only; never assume they exist, never hard-code new ones into package functions — take them as arguments.
 - Never commit credentials (`~/.cdsapirc`, `.Renviron`, Movebank logins).
-- Validate changes to core functions on real/representative data — the test suite is a placeholder.
+- Validate changes to core functions on real/representative data — unit tests are offline and don't cover Movebank download.
 - `sigfox_download()` is legacy (NanoFox only); new data flows Wildcloud → Movebank → `import_nanofox_movebank()`.
 - VeDBA scaling: follow `claude/vedba_calculation_guide.md` and `claude/tinyfox_vedba_scaling_correction.md`.
 
@@ -38,4 +38,6 @@ discovered; delete entries that become wrong.
 ### Tags
 - Three schemas: tinyfox (flat columns), nanofox (separate sensor rows), uwasp (simpler).
 - `detect_tag_fell_off()` has wrappers `tag_fell_off_tinyfox/nanofox/uwasp`.
-- `import_nanofox_movebank()` is monolithic; helpers are nested closures (`.correct_vedba_scaling()` etc.).
+- `import_nanofox_movebank()` helpers are top-level internals in `R/import_nanofox_movebank_helpers.R`. `verbose` reaches them via `options(SigfoxTagPrep.verbose)` (set + restored by the main function); `.msg()` reads it.
+- **2026-11-04 — no duplicate top-level names.** R collates `R/` alphabetically and a later file silently replaces an earlier same-named function (this hid fixes in `extract_avg_night_env*` and gave `%||%` three meanings). `%||%` lives only in `R/utils.R`.
+- No `library()`/`require()` in `R/`: Imports go in `R/SigfoxTagPrep-package.R`, optional packages are called `pkg::fn()`.

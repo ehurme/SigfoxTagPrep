@@ -1,7 +1,3 @@
-library(terra)
-library(dplyr)
-library(geosphere)
-library(ggplot2)
 
 extract_elevation_segments <- function(raster, tag) {
 

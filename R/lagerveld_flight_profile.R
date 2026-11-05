@@ -78,7 +78,7 @@ bat_flight_params <- data.frame(
 #' Uses the International Standard Atmosphere tropospheric lapse rate
 #' (-6.5 K/km) to compute air density at altitude.
 #'
-#' @param alt_m Numeric vector of altitudes (m). Clamped to [0, 11000] m
+#' @param alt_m Numeric vector of altitudes (m). Clamped to `[0, 11000]` m
 #'   (troposphere only).
 #' @return Numeric vector of air densities (kg/m³).
 #' @export
@@ -329,7 +329,6 @@ compute_night_profiles <- function(
                      1600, 1800, 2000, 2500, 3000),
     min_speed_ms = 1
 ) {
-  suppressPackageStartupMessages(library(sf))
   if (!exists("pressure_to_altitude_m", mode = "function"))
     stop("Source pressure_to_altitude_m.R before calling this function.")
 
@@ -448,6 +447,7 @@ compute_night_profiles <- function(
 #' @param vmr_sd_ms SD of Vmr reference band.  Default 1.1.
 #' @param observed_alt_m  Optional scalar or vector: observed bat altitude(s)
 #'   in metres.  Drawn as a vertical dashed line (median if multiple).
+#' @param ground_elev_m   Optional ground elevation (m), shaded on the plot.
 #' @param species_label   Character label for the subtitle.
 #' @param theme_dark Logical. Default \code{FALSE}.
 #'
@@ -464,8 +464,6 @@ plot_lagerveld_profile <- function(
     species_label   = NULL,
     theme_dark      = FALSE
 ) {
-  suppressPackageStartupMessages(library(ggplot2))
-  suppressPackageStartupMessages(library(dplyr))
 
   if (is.null(vmr_sl_ms)) vmr_sl_ms <- vmp_sl_ms * 3^(1/4)
 
@@ -646,7 +644,6 @@ summarise_optimal_altitudes <- function(
     vmr_sl_ms    = NULL,
     tolerance_ms = 1.5
 ) {
-  suppressPackageStartupMessages(library(dplyr))
   if (is.null(vmr_sl_ms)) vmr_sl_ms <- vmp_sl_ms * 3^(1/4)
 
   profiles %>%

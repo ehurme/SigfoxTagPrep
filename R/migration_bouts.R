@@ -10,12 +10,6 @@ mt_add_migration_bouts <- function(
     gap_break = TRUE,                     # if TRUE: missing dates break bouts
     prefix = "mig"
 ) {
-  suppressPackageStartupMessages({
-    library(dplyr)
-    library(lubridate)
-    library(move2)
-    library(tidyr)
-  })
 
   daily_agg <- match.arg(daily_agg)
 
@@ -54,7 +48,7 @@ mt_add_migration_bouts <- function(
 
   # Build per-day indicator. A Date time_col (e.g. night_date) is used as-is,
   # so callers can define "day" themselves instead of calendar UTC date.
-  to_day <- function(t) if (inherits(t, "Date")) t else as.Date(with_tz(t, tz = tz))
+  to_day <- function(t) if (inherits(t, "Date")) t else as.Date(with_tz(t, tzone = tz))
   df_day <- df %>%
     mutate(..date = to_day(..t)) %>%
     group_by(..id, ..date) %>%
@@ -129,10 +123,6 @@ mt_add_migration_bout_n <- function(
     prefix = "mig",
     out_col = paste0(prefix, "_n_bouts")
 ) {
-  suppressPackageStartupMessages({
-    library(dplyr)
-    library(move2)
-  })
 
   if (!inherits(x, "move2")) stop("x must be a <move2> object.")
 

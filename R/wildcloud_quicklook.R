@@ -3,10 +3,6 @@
 # Extracts step distance, speed, VeDBA; produces diagnostic plots
 # Edward Hurme | MPI-AB
 
-library(data.table)
-library(tidyverse)
-library(geosphere)  # distHaversine
-library(ggforce)    # facet_wrap_paginate
 
 # ─────────────────────────────────────────────────────────────
 # MAIN FUNCTION
@@ -162,14 +158,14 @@ wildcloud_quicklook <- function(
   # ── 7. Step distance & speed ──────────────────────────────
   setorder(dt, device, datetime)
   dt[, `:=`(
-    lag_lat      = shift(latitude,  1, type = "lag"),
-    lag_lon      = shift(longitude, 1, type = "lag"),
-    lag_time     = shift(datetime,  1, type = "lag"),
-    lag_coord_ok = shift(coord_ok,  1, type = "lag")
+    lag_lat      = data.table::shift(latitude,  1, type = "lag"),
+    lag_lon      = data.table::shift(longitude, 1, type = "lag"),
+    lag_time     = data.table::shift(datetime,  1, type = "lag"),
+    lag_coord_ok = data.table::shift(coord_ok,  1, type = "lag")
   ), by = device]
   dt[, step_dist_m := ifelse(
     coord_ok & !is.na(lag_coord_ok) & lag_coord_ok & !is.na(lag_lat),
-    mapply(function(lo1, la1, lo2, la2) distHaversine(c(lo1, la1), c(lo2, la2)),
+    mapply(function(lo1, la1, lo2, la2) geosphere::distHaversine(c(lo1, la1), c(lo2, la2)),
            lag_lon, lag_lat, longitude, latitude),
     NA_real_
   )]
@@ -345,7 +341,6 @@ build_vedba_long <- function(dt, vedba_cols, msg_interval_min = 60) {
 # Uses each device's own median coordinates, so sites at different
 # latitudes/longitudes get correct night lengths.
 get_device_sun_windows <- function(dt_full, tz = "UTC") {
-  library(suncalc)
 
   device_locs <- dt_full[coord_ok == TRUE, .(
     lat   = median(latitude,  na.rm = TRUE),
@@ -359,7 +354,7 @@ get_device_sun_windows <- function(dt_full, tz = "UTC") {
   windows <- rbindlist(lapply(seq_len(nrow(device_locs)), function(i) {
     dates <- seq(as.Date(device_locs$t_min[i], tz = tz) - 1,
                  as.Date(device_locs$t_max[i], tz = tz) + 1, by = "day")
-    sun <- as.data.table(getSunlightTimes(
+    sun <- as.data.table(suncalc::getSunlightTimes(
       date = dates, lat = device_locs$lat[i], lon = device_locs$lon[i],
       keep = c("sunset", "sunrise"), tz = tz
     ))
@@ -390,8 +385,6 @@ make_diagnostic_plots <- function(
     plot_dir        = NULL
 ) {
 
-  library(suncalc)
-  library(ggforce)
 
   y_scales <- if (free_y_raw) "free_y" else "fixed"
   n_devices <- dplyr::n_distinct(dt$device)
@@ -436,7 +429,7 @@ make_diagnostic_plots <- function(
     avg_lon <- mean(device_locs$lon, na.rm = TRUE)
     dates <- seq(as.Date(t_min, tz = tz) - 1,
                  as.Date(t_max, tz = tz) + 1, by = "day")
-    sun <- as.data.table(getSunlightTimes(
+    sun <- as.data.table(suncalc::getSunlightTimes(
       date = dates, lat = avg_lat, lon = avg_lon,
       keep = c("sunset", "sunrise"), tz = tz
     ))
@@ -471,7 +464,7 @@ make_diagnostic_plots <- function(
     page_list <- vector("list", n_pages_local)
     for (pg in seq_len(n_pages_local)) {
       p <- base_plot +
-        facet_wrap_paginate(
+        ggforce::facet_wrap_paginate(
           ~device,
           scales   = y_scales,
           ncol     = ncol_fac,
@@ -719,21 +712,4 @@ make_diagnostic_plots <- function(
   }
 
   plots
-}
-
-# ─────────────────────────────────────────────────────────────
-# EXAMPLE
-# ─────────────────────────────────────────────────────────────
-run <- FALSE
-if (run) {
-  wildcloud_quicklook(
-    "../../../Downloads/8_13_2026_records (2).csv",
-    start_time      = "2026-04-09",
-    plot_daily      = TRUE,
-    plot_raw        = TRUE,
-    plot_temp       = TRUE,
-    free_y_raw      = FALSE,
-    facets_per_page = 20,
-    plot_dir        = "../../../Dropbox/MPI/Noctule/Plots/Fall26/Oder/Quicklook/"
-  )
 }

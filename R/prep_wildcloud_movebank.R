@@ -10,17 +10,6 @@ prep_sigfox_movebank <- function(
     clean_lat_range      = NULL,  # e.g. c(30, 60) or NULL to skip
     clean_lon_range      = NULL   # e.g. c(0, 30) or NULL to skip
 ) {
-  suppressPackageStartupMessages({
-    library(dplyr)
-    library(tidyr)
-    library(stringr)
-    library(lubridate)
-    library(readr)
-    library(fs)
-    library(data.table)
-    library(janitor)
-    library(purrr)
-  })
 
   # ------------------------------------------------------------------
   # 0. Sanity checks on inputs
@@ -28,7 +17,7 @@ prep_sigfox_movebank <- function(
   if (is.null(wc_path) && is.null(movebank_csv_path)) {
     stop("Provide either 'wc_path' (WildCloud directory) or 'movebank_csv_path' (existing movebank-style CSV).")
   }
-  if (!is.null(wc_path) && !dir_exists(wc_path)) {
+  if (!is.null(wc_path) && !fs::dir_exists(wc_path)) {
     stop("wc_path does not exist: ", wc_path)
   }
   if (!is.null(movebank_csv_path) && !file.exists(movebank_csv_path)) {
@@ -37,7 +26,7 @@ prep_sigfox_movebank <- function(
   if (!file.exists(animals_path)) {
     stop("animals_path does not exist: ", animals_path)
   }
-  if (!dir_exists(output_dir)) dir_create(output_dir)
+  if (!fs::dir_exists(output_dir)) fs::dir_create(output_dir)
 
   # ------------------------------------------------------------------
   # helpers
@@ -50,11 +39,6 @@ prep_sigfox_movebank <- function(
                               location_name,
                               counter_pad = 2,
                               tz = "UTC") {
-    suppressPackageStartupMessages({
-      library(dplyr)
-      library(stringr)
-      library(lubridate)
-    })
 
     stopifnot(
       genus_col %in% names(df),
@@ -738,7 +722,7 @@ prep_sigfox_movebank <- function(
   for (proj in projects) {
     safe_proj_name <- str_replace_all(proj, "[^A-Za-z0-9_\\-]", "_")
     project_folder <- file.path(output_dir, "Projects", safe_proj_name)
-    if (!dir_exists(project_folder)) dir_create(project_folder)
+    if (!fs::dir_exists(project_folder)) fs::dir_create(project_folder)
 
     loc_proj      <- loc_data      %>% filter(Movebank.Project == proj)
     vedba_proj    <- vedba_data    %>% filter(Movebank.Project == proj)
@@ -749,12 +733,12 @@ prep_sigfox_movebank <- function(
       filter(Movebank.Project == proj) %>%
       select(-Movebank.Project)
 
-    write_csv(loc_proj,      file.path(project_folder, "data.csv"))
-    write_csv(vedba_proj,    file.path(project_folder, "dataVeDBA.csv"))
-    write_csv(bar_proj,      file.path(project_folder, "dataBar.csv"))
-    write_csv(temp_proj,     file.path(project_folder, "dataTemp.csv"))
-    write_csv(min_temp_proj, file.path(project_folder, "dataMinTemp.csv"))
-    write_csv(dep_proj,      file.path(project_folder, "deployment.csv"))
+    readr::write_csv(loc_proj,      file.path(project_folder, "data.csv"))
+    readr::write_csv(vedba_proj,    file.path(project_folder, "dataVeDBA.csv"))
+    readr::write_csv(bar_proj,      file.path(project_folder, "dataBar.csv"))
+    readr::write_csv(temp_proj,     file.path(project_folder, "dataTemp.csv"))
+    readr::write_csv(min_temp_proj, file.path(project_folder, "dataMinTemp.csv"))
+    readr::write_csv(dep_proj,      file.path(project_folder, "deployment.csv"))
 
     message("Saved Movebank CSVs for project: ", proj,
             " → folder: ", project_folder)
@@ -777,9 +761,9 @@ prep_sigfox_movebank <- function(
 
 # res <- prep_sigfox_movebank(
 #   wc_path           = NULL,
-#   movebank_csv_path = "../../../Dropbox/MPI/Moths/Data/movebank/movebank_fall_2025.csv",
-#   animals_path      = "../../../Dropbox/MPI/Moths/Data/CaptureSheets/Deathshead2025.csv",
-#   output_dir        = "../../../Dropbox/MPI/Moths/Data/movebank",
+#   movebank_csv_path = "path/to/Moths/Data/movebank/movebank_fall_2025.csv",
+#   animals_path      = "path/to/Moths/Data/CaptureSheets/Deathshead2025.csv",
+#   output_dir        = "path/to/Moths/Data/movebank",
 #   movebank_project_name = "ICARUS Insects. Death's-head hawkmoth. Germany and Switzerland.",
 #   clean_lat_range   = NULL,
 #   clean_lon_range   = NULL
@@ -787,9 +771,9 @@ prep_sigfox_movebank <- function(
 #
 # res <- prep_sigfox_movebank(
 #   wc_path           = NULL,
-#   movebank_csv_path = "../../../Dropbox/MPI/Moths/Data/movebank/movebank_fall_2025.csv",
-#   animals_path      = "../../../Dropbox/MPI/Moths/Data/CaptureSheets/Deathshead2025.csv",
-#   output_dir        = "../../../Dropbox/MPI/Moths/Data/movebank",
+#   movebank_csv_path = "path/to/Moths/Data/movebank/movebank_fall_2025.csv",
+#   animals_path      = "path/to/Moths/Data/CaptureSheets/Deathshead2025.csv",
+#   output_dir        = "path/to/Moths/Data/movebank",
 #   movebank_project_name = "ICARUS Insects. Death's-head hawkmoth. Germany and Switzerland.",
 #   clean_lat_range   = NULL,
 #   clean_lon_range   = NULL
@@ -797,10 +781,10 @@ prep_sigfox_movebank <- function(
 
 
 # res <- prep_sigfox_movebank(
-#   wc_path           = "../../../Dropbox/MPI/Noctule/Data/movebank/Navarre/wildcloud/",
+#   wc_path           = "path/to/Noctule/Data/movebank/Navarre/wildcloud/",
 #   movebank_csv_path = NULL,
-#   animals_path      = "../../../Dropbox/MPI/Noctule/Data/movebank/Navarre/Tags_Navarre.csv",
-#   output_dir        = "../../../Dropbox/MPI/Noctule/Data/movebank/Navarre/movebank/",
+#   animals_path      = "path/to/Noctule/Data/movebank/Navarre/Tags_Navarre.csv",
+#   output_dir        = "path/to/Noctule/Data/movebank/Navarre/movebank/",
 #   movebank_project_name = "ICARUS Bats. Nyctalus leisleri Nyctalus noctula Nyctalus lasiopterus. Navarre, Spain",
 #   location_name = "navarre",
 #   clean_lat_range   = c(30, 60),

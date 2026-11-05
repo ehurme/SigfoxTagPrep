@@ -45,17 +45,6 @@ scan_track_plot <- function(
 
     verbose = TRUE
 ) {
-  suppressPackageStartupMessages({
-    library(dplyr)
-    library(sf)
-    library(ggplot2)
-    library(ggpubr)
-    library(terra)
-    library(tidyterra)
-    library(rnaturalearth)
-    library(elevatr)
-    library(units)
-  })
 
   # -------------------- helpers --------------------
   .has_col <- function(df, nm) !is.null(nm) && nm %in% names(df)
@@ -232,8 +221,8 @@ scan_track_plot <- function(
   base_countries <- rnaturalearth::ne_countries(scale = country_scale)
 
   p_map <- ggplot() +
-    { if (!is.null(elev_rast)) geom_spatraster(data = elev_rast) } +
-    { if (!is.null(elev_rast)) scale_fill_hypso_c(name = "Elevation (m)", palette = "arctic_bathy", limits = elev_limits) } +
+    { if (!is.null(elev_rast)) tidyterra::geom_spatraster(data = elev_rast) } +
+    { if (!is.null(elev_rast)) tidyterra::scale_fill_hypso_c(name = "Elevation (m)", palette = "arctic_bathy", limits = elev_limits) } +
     geom_sf(data = base_countries, fill = NA, color = ifelse(theme_dark, "gray70", "gray80")) +
     geom_path(data = df_f_g, aes(.data[[lon]], .data[[lat]]), linewidth = path_size, alpha = alpha_full) +
     geom_path(data = df_t_g, aes(.data[[lon]], .data[[lat]]),
@@ -352,8 +341,8 @@ scan_track_plot <- function(
   if (length(panel_list) == 0) {
     p_all <- p_map
   } else {
-    grid <- ggarrange(plotlist = panel_list, ncol = 2, nrow = ceiling(length(panel_list) / 2))
-    p_all <- ggarrange(p_map, grid, ncol = 1, heights = c(2, 1.6))
+    grid <- ggpubr::ggarrange(plotlist = panel_list, ncol = 2, nrow = ceiling(length(panel_list) / 2))
+    p_all <- ggpubr::ggarrange(p_map, grid, ncol = 1, heights = c(2, 1.6))
   }
 
   if (!is.null(out_path)) {
@@ -375,7 +364,7 @@ scan_track_plot <- function(
 #       df_thin = y$daily,
 #       individual_id = tag,   # example
 #       idcol = "individual_local_identifier",
-#       out_path = "../../../Dropbox/MPI/Noctule/Plots/ScanTrack/"
+#       out_path = "path/to/Noctule/Plots/ScanTrack/"
 #     )
 #   })
 # }

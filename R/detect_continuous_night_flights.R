@@ -58,6 +58,7 @@
 #'     min_duration_h = 2
 #'   )
 #' }
+#' @export
 detect_continuous_night_flights <- function(
     loc_data,
     daily_data = NULL,
@@ -101,13 +102,6 @@ detect_continuous_night_flights <- function(
     tz = "UTC"
 ) {
 
-  suppressPackageStartupMessages({
-    library(dplyr)
-    library(lubridate)
-    library(rlang)
-    library(tidyr)
-    library(purrr)
-  })
 
   # ---------------------------
   # helpers
@@ -408,9 +402,9 @@ detect_continuous_night_flights <- function(
   )
 }
 
-# load("../../../Dropbox/MPI/Noctule/Data/rdata/move_icarus_bats.robj")
+# load("path/to/Noctule/Data/rdata/move_icarus_bats.robj")
 # bats_loc <- bats_loc %>% filter(species == "Nyctalus leisleri")
-# load("../../../Dropbox/MPI/Leisleri/Data/rdata/Daily_Leisler_Env.robj")
+# load("path/to/Leisleri/Data/rdata/Daily_Leisler_Env.robj")
 # res <- detect_continuous_night_flights(
 #   loc_data = bats_loc,
 #   daily_data = b_daily_wind,
