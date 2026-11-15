@@ -577,6 +577,136 @@
   x
 }
 
+# ---------------------------------------------------------------------------
+# .add_forearm_length
+#
+# Derive forearm length (mm) per deployment from Movebank track data and
+# promote it to an event column `forearm_length`.
+#
+# Sources, in priority order:
+#   1. deploy_on_comments — the correct Movebank field for forearm length.
+#      Values are used when they parse as a plain number.
+#   2. comments — legacy fallback, used ONLY when every non-empty value in the
+#      column is numeric. If any value contains letters the column is treated
+#      as genuine free-text comments and left untouched (not used for forearm).
+#      When numeric values are taken from `comments`, a warning asks the user
+#      to move them to deploy_on_comments in Movebank.
+#
+# The `comments` track-data column itself is never modified.
+# Adds `forearm_length` and `forearm_length_source` to track data and events.
+# ---------------------------------------------------------------------------
+.add_forearm_length <- function(x) {
+  td <- tryCatch(move2::mt_track_data(x), error = function(e) NULL)
+  if (is.null(td) || nrow(td) == 0) {
+    return(x)
+  }
+
+  .as_chr <- function(v) {
+    v <- trimws(as.character(v))
+    v[v == ""] <- NA_character_
+    v
+  }
+  .to_num <- function(v) suppressWarnings(as.numeric(sub(",", ".", v, fixed = TRUE)))
+  .is_num_str <- function(v) {
+    !is.na(v) & grepl("^[+-]?([0-9]+([.,][0-9]*)?|[.,][0-9]+)$", v)
+  }
+
+  n <- nrow(td)
+  fa <- rep(NA_real_, n)
+  src <- rep(NA_character_, n)
+
+  # ---- 1. deploy_on_comments (preferred) ----
+  if ("deploy_on_comments" %in% names(td)) {
+    doc <- .as_chr(td$deploy_on_comments)
+    ok <- .is_num_str(doc)
+    fa[ok] <- .to_num(doc[ok])
+    src[ok] <- "deploy_on_comments"
+    n_text <- sum(!is.na(doc) & !ok)
+    if (n_text > 0) {
+      .msg(
+        "  .add_forearm_length: ", n_text,
+        " deploy_on_comments value(s) are not plain numbers; ",
+        "not interpreted as forearm length."
+      )
+    }
+  }
+
+  # ---- 2. comments (fallback, numeric-only column) ----
+  if ("comments" %in% names(td)) {
+    com <- .as_chr(td$comments)
+    non_empty <- com[!is.na(com)]
+    if (length(non_empty) > 0) {
+      if (any(grepl("[[:alpha:]]", non_empty))) {
+        .msg(
+          "  .add_forearm_length: 'comments' contains text; ",
+          "kept as comments and not used for forearm length."
+        )
+      } else {
+        use <- is.na(fa) & .is_num_str(com)
+        if (any(use)) {
+          fa[use] <- .to_num(com[use])
+          src[use] <- "comments"
+          id_col <- intersect(
+            c(
+              "individual_local_identifier", "deployment_id",
+              move2::mt_track_id_column(x)
+            ),
+            names(td)
+          )[1]
+          ids <- if (!is.na(id_col)) {
+            unique(as.character(td[[id_col]][use]))
+          } else {
+            character(0)
+          }
+          warning(
+            sum(use), " numeric value(s) in Movebank 'comments' are being ",
+            "interpreted as forearm length (mm)",
+            if (length(ids)) {
+              paste0(
+                " for: ", paste(utils::head(ids, 10), collapse = ", "),
+                if (length(ids) > 10) paste0(" (+", length(ids) - 10, " more)")
+              )
+            },
+            ". Please move these values to 'deploy_on_comments' in Movebank, ",
+            "which is the correct field for forearm length.",
+            call. = FALSE
+          )
+        }
+      }
+    }
+  }
+
+  if (all(is.na(fa))) {
+    return(x)
+  }
+
+  td$forearm_length <- fa
+  td$forearm_length_source <- src
+  x_new <- tryCatch(move2::mt_set_track_data(x, td), error = function(e) {
+    .msg(
+      "  .add_forearm_length: could not update track data (",
+      conditionMessage(e), ")."
+    )
+    NULL
+  })
+  if (is.null(x_new)) {
+    return(x)
+  }
+  x <- x_new
+  for (attr in c("forearm_length", "forearm_length_source")) {
+    x <- .safe_try(
+      x %>% mt_as_event_attribute(dplyr::all_of(attr), .keep = TRUE),
+      paste0("mt_as_event_attribute(", attr, ")")
+    ) %||%
+      x
+  }
+  .msg(
+    "  Forearm length found for ", sum(!is.na(fa)), "/", n, " deployment(s) (",
+    paste(names(table(src)), table(src), sep = "=", collapse = ", "), ")."
+  )
+  x
+}
+
 .set_tag_type <- function(x, study_id_current = NULL, tag_type = NULL) {
   allowed <- c("uWasp", "Nanofox", "Tinyfox")
 
@@ -3103,6 +3233,7 @@ x[, keep, drop = FALSE]
   # .fix_track_data_lists only needed if re-keying failed (multi-deployment individual track)
   b <- .fix_track_data_lists(b)
   b <- .add_event_attrs(b)
+  b <- .add_forearm_length(b)
   b <- .set_tag_type(b, study_id_current = id, tag_type = tag_type)
   # Add these diagnostic checks:
   if (.verbose()) {
