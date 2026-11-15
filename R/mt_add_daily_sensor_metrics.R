@@ -89,8 +89,9 @@ mt_daily_night_date <- function(x, tz = "UTC", day_anchor_hour = 12) {
 #' @param night_key `"preceding_night"` (default, via [mt_daily_night_date()])
 #'   or `"bat_day"` to key summaries to daily rows.
 #' @param tag_type_col,model_col Columns with tag type and model.
-#' @param skip_if_model,skip_uwasp If `skip_uwasp` is `TRUE` and any row's
-#'   model is in `skip_if_model`, `b_daily` is returned unchanged.
+#' @param skip_if_model,skip_uwasp If `skip_uwasp` is `TRUE`, rows whose model
+#'   or tag type is in `skip_if_model` (uWasp: no sensor data) are left out of
+#'   the summaries; their daily rows get `NA` metrics.
 #' @param nano_vedba_col,nano_temp_col,nano_pres_col NanoFox sensor columns.
 #' @param nano_vedba_active_threshold,nano_vedba_flying_threshold NanoFox
 #'   VeDBA thresholds for counting active and flying bursts.
@@ -135,10 +136,14 @@ mt_add_daily_sensor_metrics <- function(b_all,
   track_col      <- move2::mt_track_id_column(b_all)
   time_col_daily <- move2::mt_time_column(b_daily)
 
-  # --- optional: skip if uWasp present ---
-  if (skip_uwasp && model_col %in% names(b_all)) {
-    mods <- unique(tolower(as.character(b_all[[model_col]])))
-    if (any(mods %in% tolower(skip_if_model))) return(b_daily)
+  # --- uWasp tags carry no sensor data: drop their rows, keep other tags ---
+  if (skip_uwasp) {
+    skip <- rep(FALSE, nrow(b_all))
+    for (col in intersect(c(model_col, tag_type_col), names(b_all))) {
+      skip <- skip | tolower(as.character(b_all[[col]])) %in% tolower(skip_if_model)
+    }
+    b_all <- b_all[!skip, ]
+    if (nrow(b_all) == 0) return(b_daily)
   }
 
   get_bat_day <- function(ts) as.Date(ts - lubridate::hours(day_anchor_hour), tz = tz)
@@ -449,40 +454,10 @@ mt_add_daily_sensor_metrics <- function(b_all,
     tiny_daily <- dplyr::left_join(tiny_gap_alt, tiny_from_noon, by = c(track_col, ".bat_day"))
   }
 
-  # ---------- uWasp: external_temperature daily summaries ----------
-  uwasp_daily <- NULL
-  if ("uwasp" %in% tolower(unique(b2_attr[[tag_type_col]])) &&
-      "external_temperature" %in% names(b2_attr)) {
-    uwasp_daily <- b2_attr %>%
-      dplyr::filter(tolower(.data[[tag_type_col]]) == "uwasp") %>%
-      dplyr::group_by(.data[[track_col]], .bat_day) %>%
-      dplyr::summarise(
-        daily_n_msg           = dplyr::n(),
-        daily_gap_h_mean      = mean(.dt_prev_h, na.rm = TRUE),
-        daily_gap_h_max       = suppressWarnings(max(.dt_prev_h, na.rm = TRUE)),
-        daily_temp_min        = suppressWarnings(min(as.numeric(external_temperature), na.rm = TRUE)),
-        daily_temp_max        = suppressWarnings(max(as.numeric(external_temperature), na.rm = TRUE)),
-        daily_temp_mean       = mean(as.numeric(external_temperature), na.rm = TRUE),
-        daily_temp_n          = sum(!is.na(external_temperature)),
-        daily_alt_day_mean_m  = mean(altitude_m[.is_day %in% TRUE], na.rm = TRUE),
-        daily_alt_day_mean_n  = sum(is.finite(altitude_m) & (.is_day %in% TRUE)),
-        daily_alt_night_max_m = suppressWarnings(max(altitude_m[.is_night %in% TRUE], na.rm = TRUE)),
-        daily_alt_night_max_n = sum(is.finite(altitude_m) & (.is_night %in% TRUE)),
-        .groups = "drop"
-      ) %>%
-      dplyr::mutate(
-        daily_gap_h_max       = dplyr::if_else(is.infinite(daily_gap_h_max), NA_real_, daily_gap_h_max),
-        daily_temp_min        = dplyr::if_else(is.infinite(daily_temp_min), NA_real_, daily_temp_min),
-        daily_temp_max        = dplyr::if_else(is.infinite(daily_temp_max), NA_real_, daily_temp_max),
-        daily_alt_night_max_m = dplyr::if_else(is.infinite(daily_alt_night_max_m), NA_real_, daily_alt_night_max_m)
-      )
-  }
-
   # ---------- combine summaries (PLAIN TIBBLE ONLY) ----------
   sensor_daily <- dplyr::bind_rows(
     if (!is.null(nano_daily)) nano_daily,
-    if (!is.null(tiny_daily)) tiny_daily,
-    if (!is.null(uwasp_daily)) uwasp_daily
+    if (!is.null(tiny_daily)) tiny_daily
   )
 
   if (nrow(sensor_daily) == 0) return(b_daily)

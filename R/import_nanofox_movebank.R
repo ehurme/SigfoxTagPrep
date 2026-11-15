@@ -14,8 +14,10 @@
 #' (÷504). The import pipeline auto-detects and corrects this to per-burst scaling
 #' (÷18) on import via the `.correct_vedba_scaling()` function.
 #'
-#' Auto-detection: if median(vedba_sum) < 5 m/s², assumes per-sample scaling and
-#' applies correction factor of 28 (= 504/18).
+#' Auto-detection runs separately for each NanoFox \code{tag_firmware}: if that
+#' firmware's median(vedba_sum) < 5 m/s², it is assumed per-sample and multiplied
+#' by 28 (= 504/18). TinyFox and uWasp rows are never changed by this step, and
+#' their \code{.vedba_scaling_note} is \code{NA}.
 #'
 #' After correction, vedba_sum represents per-burst values (~10-200 m/s² typical range).
 #' Original per-sample values are preserved in the \code{vedba_sum_orig} column.

@@ -37,6 +37,48 @@ test_that(".correct_vedba_scaling leaves per-burst values alone", {
   expect_true(all(out$.vedba_scaling_note == "already_per_burst"))
 })
 
+test_that(".correct_vedba_scaling never touches TinyFox rows in a mixed study", {
+  # Many NanoFox zeros pull a study-wide median below 5; TinyFox counters
+  # must still not be multiplied.
+  d <- data.frame(
+    tag_type = c("Nanofox", "Nanofox", "Nanofox", "Tinyfox", "Tinyfox"),
+    tag_firmware = c("30Days", "30Days", "30Days", "V13", "V13"),
+    vedba_sum = c(0, 0, 1, 27553, 30000)
+  )
+  out <- .correct_vedba_scaling(d)
+  expect_equal(out$vedba_sum, c(0, 0, 28, 27553, 30000))
+  expect_equal(out$.vedba_scaling_note,
+               c(rep("corrected_per_sample_to_per_burst", 3), NA, NA))
+})
+
+test_that(".correct_vedba_scaling decides per NanoFox firmware", {
+  d <- data.frame(
+    tag_type = "Nanofox",
+    tag_firmware = c("30Days", "30Days", "10Days", "10Days"),
+    vedba_sum = c(1, 2, 20, 30)
+  )
+  out <- .correct_vedba_scaling(d)
+  expect_equal(out$vedba_sum, c(28, 56, 20, 30))
+  expect_equal(out$.vedba_scaling_note,
+               rep(c("corrected_per_sample_to_per_burst", "already_per_burst"), each = 2))
+})
+
+test_that(".correct_sensor_vedba_scaling keeps units on the vedba column", {
+  d <- data.frame(tag_type = "Nanofox", tag_firmware = "30Days", vedba = 1:3)
+  d$vedba <- units::set_units(d$vedba, "m/s^2")
+  out <- .correct_sensor_vedba_scaling(d)
+  expect_s3_class(out$vedba, "units")
+  expect_equal(as.numeric(out$vedba), (1:3) * 28)
+})
+
+test_that("mt_add_daily_sensor_metrics ignores uWasp rows instead of skipping the study", {
+  x <- make_track(n = 4)
+  x$tag_type <- c("uWasp", "uWasp", "Nanofox", "Nanofox")
+  out <- mt_add_daily_sensor_metrics(b_all = x, b_daily = x[3, ], skip_uwasp = TRUE)
+  expect_s3_class(out, "move2")
+  expect_equal(nrow(out), 1)
+})
+
 test_that(".correct_tinyfox_vedba_scaling applies force_factor without stationary data", {
   d <- data.frame(
     tag_type = "Tinyfox",

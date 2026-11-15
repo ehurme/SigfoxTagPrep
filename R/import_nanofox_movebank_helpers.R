@@ -469,6 +469,89 @@
   combined
 }
 
+# ---------------------------------------------------------------------------
+# .add_undetected_deployments()
+#
+# movebank_download_study() keeps only deployments that have events, so a bat
+# that was tagged but never produced a location fix disappears (or, with only
+# sensor rows, ends up with no location row). For every deployment in `deps`
+# (movebank_download_deployment() output) with a deploy_on_timestamp but no
+# located fix in `x`, add one location-sensor row at deploy_on_timestamp /
+# deploy_on_location (fallback capture_location), and add missing deployments
+# to the track data. .add_start() later marks that row "start" in place.
+# Expects x keyed by deployment_id (as after the re-key in .download_one_study).
+# ---------------------------------------------------------------------------
+.add_undetected_deployments <- function(x, deps, location_sensor_id) {
+  track_col <- move2::mt_track_id_column(x)
+  time_col <- move2::mt_time_column(x)
+  if (track_col != "deployment_id" || length(location_sensor_id) == 0 ||
+      !all(c("deployment_id", "deploy_on_timestamp") %in% names(deps))) {
+    return(x)
+  }
+  deps$deployment_id <- as.character(deps$deployment_id)
+  ids <- as.character(move2::mt_track_id(x))
+  located <- unique(ids[
+    as.character(x$sensor_type_id) %in% as.character(location_sensor_id) &
+      !sf::st_is_empty(sf::st_geometry(x))
+  ])
+  miss <- deps[!deps$deployment_id %in% located & !is.na(deps$deploy_on_timestamp), ]
+  n <- nrow(miss)
+  if (n == 0) return(x)
+
+  # Geometry: deploy_on_location, else capture_location, else empty point
+  geom <- sf::st_sfc(rep(list(sf::st_point()), n), crs = sf::st_crs(x))
+  for (loc_col in rev(intersect(c("deploy_on_location", "capture_location"), names(miss)))) {
+    if (!inherits(miss[[loc_col]], "sfc")) next
+    g <- sf::st_transform(miss[[loc_col]], sf::st_crs(x))
+    ok <- !sf::st_is_empty(g)
+    geom[ok] <- g[ok]
+  }
+
+  # New event rows: every column NA (same class), then fill the identity fields
+  ev <- sf::st_as_sf(x)[rep(1L, n), ]
+  class(ev) <- class(ev)[!class(ev) %in% "move2"]
+  for (nm in setdiff(names(ev), attr(ev, "sf_column"))) {
+    ev[[nm]] <- x[[nm]][rep(NA_integer_, n)]
+  }
+  ev$deployment_id <- miss$deployment_id
+  ev[[time_col]] <- miss$deploy_on_timestamp
+  ev$sensor_type_id <- rep(location_sensor_id[1], n)
+  if ("individual_local_identifier" %in% names(ev) &&
+      "individual_local_identifier" %in% names(miss)) {
+    ev$individual_local_identifier <- as.character(miss$individual_local_identifier)
+  }
+  sf::st_geometry(ev) <- geom
+
+  # Track data rows for deployments that have no events at all
+  td <- move2::mt_track_data(x)
+  new_td <- miss[!miss$deployment_id %in% td$deployment_id, intersect(names(td), names(miss))]
+  if (nrow(new_td) > 0) {
+    for (nm in names(new_td)) {
+      if (is.character(td[[nm]])) new_td[[nm]] <- as.character(new_td[[nm]])
+    }
+    k <- nrow(td)
+    td <- dplyr::bind_rows(td, new_td)
+    # Study-level columns (from study info) are constant: copy them over
+    for (nm in setdiff(names(td), names(miss))) td[[nm]][-seq_len(k)] <- td[[nm]][1]
+  }
+
+  x_plain <- sf::st_as_sf(x)
+  class(x_plain) <- class(x_plain)[!class(x_plain) %in% "move2"]
+  combined <- dplyr::bind_rows(x_plain, ev)
+  combined <- combined[order(combined[[track_col]], combined[[time_col]]), ]
+  class(combined) <- c("move2", class(combined))
+  attr(combined, "track_id_column") <- track_col
+  attr(combined, "time_column") <- time_col
+  combined <- move2::mt_set_track_data(combined, td)
+
+  .msg(
+    "  Added deploy-on location row for ", n,
+    " deployment(s) without location fixes (", sum(!miss$deployment_id %in% ids),
+    " with no data at all)."
+  )
+  combined
+}
+
 .add_prev_latlon <- function(x, lat_name = "lat_prev", lon_name = "lon_prev") {
   if (!inherits(x, "move2")) {
     stop("x must be a move2 object")
@@ -1784,129 +1867,64 @@ x
 }
 
 # ---------------------------------------------------------------------------
-# .correct_vedba_scaling()
+# .correct_nanofox_vedba_by_firmware()
 #
-# Nanofox VEDBA in current Movebank export is scaled as per-sample average (÷504)
-# but should be per-burst average (÷18). This function detects and corrects the
-# scaling issue post-import.
+# NanoFox VeDBA in the Movebank export is a per-sample average (/504) but
+# should be per-burst (/18), i.e. x 28. Whether a dataset is affected depends
+# on the firmware, not on the study, so detection runs separately for each
+# NanoFox tag_firmware: a firmware whose median is < 5 m/s^2 (per-sample
+# signature; per-burst medians are ~10-30) is multiplied by 28. TinyFox and
+# uWasp rows are never touched (TinyFox has its own V13P/V14P correction).
 #
-# Detection logic:
-#   - Per-sample (current Movebank data): typical median < 5 m/s²
-#   - Per-burst (correct): typical median 10-30 m/s²
-#   - Threshold: if median(vedba_sum) < 5, assume per-sample and correct
-#
-# Correction: vedba_sum_corrected = vedba_sum × (504/18) = vedba_sum × 28
-#
-# Returns: data with corrected vedba_sum column (per-burst) and metadata columns:
-#   - vedba_sum_orig: original per-sample values (for transparency/reversibility)
-#   - .vedba_scaling_note: correction status ("corrected_per_sample_to_per_burst"
-#     or "already_per_burst")
-#
-# Expected ranges after correction (realistic bat activity):
-#   - Rest: ~9 m/s²
-#   - Moderate activity: ~27 m/s²
-#   - High activity (flight): ~205 m/s²
-#   - Daily median (mixed activity): ~18 m/s²
+# Adds <col>_orig (pre-correction values) and note_col ("corrected_per_sample_
+# to_per_burst" / "already_per_burst" on NanoFox rows, NA elsewhere).
+# Used for vedba_sum on location rows and vedba on sensor rows.
 # ---------------------------------------------------------------------------
-.correct_vedba_scaling <- function(data) {
+.correct_nanofox_vedba_by_firmware <- function(data, col, note_col, label = "VEDBA") {
+  if (!col %in% names(data)) return(data)
 
-  # Return early if no vedba column
-  if (!"vedba_sum" %in% names(data)) return(data)
-
-  vedba_vals <- data$vedba_sum[!is.na(data$vedba_sum)]
-  if (length(vedba_vals) == 0) return(data)
-
-  median_vedba <- median(vedba_vals, na.rm = TRUE)
-
-  # Detection: if median < 5, likely per-sample (÷504); needs correction
-  # Conversion: per_sample_vedba × (504/18) = per_burst_vedba
-  # Or: per_sample_vedba × 28 = per_burst_vedba
-
-  is_per_sample <- median_vedba < 5
-  correction_factor <- 504 / 18  # 28
-
-  if (is_per_sample) {
-    .msg(sprintf(
-      "[VEDBA] Detected per-sample scaling (median=%.2f m/s²). ",
-      median_vedba
-    ),
-    sprintf("Correcting by factor %.1f (÷18 instead of ÷504)...", correction_factor)
-    )
-
-    data <- data %>%
-      dplyr::mutate(
-        vedba_sum_orig = vedba_sum,
-        vedba_sum = vedba_sum * correction_factor,
-        `.vedba_scaling_note` = "corrected_per_sample_to_per_burst"
-      )
-
-    .msg(sprintf(
-      "[VEDBA] Correction applied. Median before: %.2f, after: %.2f m/s²",
-      median_vedba, median(data$vedba_sum, na.rm = TRUE)
-    ))
+  is_nano <- if ("tag_type" %in% names(data)) {
+    tolower(as.character(data$tag_type)) %in% "nanofox"
   } else {
-    .msg(sprintf(
-      "[VEDBA] Detected per-burst scaling (median=%.2f m/s²). No correction needed.",
-      median_vedba
-    ))
-    data <- data %>%
-      dplyr::mutate(`.vedba_scaling_note` = "already_per_burst")
+    rep(TRUE, nrow(data))
+  }
+  fw <- if ("tag_firmware" %in% names(data)) as.character(data$tag_firmware) else NA_character_
+  fw <- rep_len(fw, nrow(data))
+  fw[is.na(fw)] <- "(unknown)"
+
+  correction_factor <- 504 / 18  # 28
+  vals <- as.numeric(data[[col]])
+  note <- rep(NA_character_, nrow(data))
+  orig <- data[[col]]
+
+  for (g in unique(fw[is_nano])) {
+    idx <- which(is_nano & fw == g)
+    med <- stats::median(vals[idx], na.rm = TRUE)
+    if (is.na(med)) next
+    if (med < 5) {
+      data[[col]][idx] <- data[[col]][idx] * correction_factor
+      note[idx] <- "corrected_per_sample_to_per_burst"
+      .msg(sprintf("[%s] NanoFox firmware %s: per-sample scaling (median=%.2f); x %.0f.",
+                   label, g, med, correction_factor))
+    } else {
+      note[idx] <- "already_per_burst"
+      .msg(sprintf("[%s] NanoFox firmware %s: per-burst scaling (median=%.2f); unchanged.",
+                   label, g, med))
+    }
   }
 
+  if (all(is.na(note))) return(data)
+  data[[paste0(col, "_orig")]] <- orig
+  data[[note_col]] <- note
   data
 }
 
-# ---------------------------------------------------------------------------
-# .correct_sensor_vedba_scaling()
-#
-# Correct raw per-sample VeDBA sensor values in the full multi-sensor object to
-# per-burst units. Movebank exports Nanofox VeDBA as per-sample averages (÷504);
-# this function multiplies by 28 (= 504/18) so each row represents the total
-# VeDBA for one 1-second accelerometer burst. This makes full$vedba directly
-# comparable with location-level per-burst values and Tinyfox per-burst VEDBA.
-#
-# The function only operates on rows where `vedba` is present and median < 5,
-# which is the per-sample signature. Original values are preserved in `vedba_orig`
-# and the metadata column `.vedba_sensor_scaling_note` records the status.
-# ---------------------------------------------------------------------------
+.correct_vedba_scaling <- function(data) {
+  .correct_nanofox_vedba_by_firmware(data, "vedba_sum", ".vedba_scaling_note", "VEDBA")
+}
+
 .correct_sensor_vedba_scaling <- function(data) {
-
-  if (!"vedba" %in% names(data)) return(data)
-
-  vedba_vals <- data$vedba[!is.na(data$vedba)]
-  if (length(vedba_vals) == 0) return(data)
-
-  median_vedba <- median(vedba_vals, na.rm = TRUE)
-  correction_factor <- 504 / 18  # 28
-  is_per_sample <- median_vedba < 5
-
-  if (is_per_sample) {
-    .msg(sprintf(
-      "[VEDBA sensor] Detected per-sample scaling (median=%.2f m/s²). Correcting by factor %.1f...",
-      median_vedba, correction_factor
-    ))
-
-    data <- data %>%
-      dplyr::mutate(
-        vedba_orig = vedba,
-        vedba = vedba * correction_factor,
-        `.vedba_sensor_scaling_note` = "corrected_per_sample_to_per_burst"
-      )
-
-    .msg(sprintf(
-      "[VEDBA sensor] Correction applied. Median before: %.2f, after: %.2f m/s²",
-      median_vedba, median(data$vedba, na.rm = TRUE)
-    ))
-  } else {
-    .msg(sprintf(
-      "[VEDBA sensor] Detected per-burst scaling (median=%.2f m/s²). No correction needed.",
-      median_vedba
-    ))
-    data <- data %>%
-      dplyr::mutate(`.vedba_sensor_scaling_note` = "already_per_burst")
-  }
-
-  data
+  .correct_nanofox_vedba_by_firmware(data, "vedba", ".vedba_sensor_scaling_note", "VEDBA sensor")
 }
 
 # ---------------------------------------------------------------------------
@@ -3099,6 +3117,21 @@ x[, keep, drop = FALSE]
       b
     }
   )
+
+  # Keep deployed bats that have no location fixes: one row at deploy-on time/place.
+  loc_sensor_id <- intersect(
+    sensor_selected$id[sensor_selected$sensor_type == "location"],
+    wanted_ids
+  )
+  b <- .safe_try({
+    deps <- .movebank_retry(
+      function() move2::movebank_download_deployment(study_id = id),
+      what = paste0("movebank_download_deployment(", id, ")"),
+      max_tries = movebank_max_retries,
+      wait_sec = movebank_retry_wait
+    )
+    .add_undetected_deployments(b, deps, loc_sensor_id)
+  }, "add_undetected_deployments") %||% b
 
   # .fix_track_data_lists only needed if re-keying failed (multi-deployment individual track)
   b <- .fix_track_data_lists(b)
