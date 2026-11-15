@@ -162,6 +162,17 @@ as \code{delta_altitude_m / dt_prev}. Each interval is also flagged
 50 m/s\eqn{^2}, per-burst-corrected scale). \code{delta_altitude_flight_m}
 and \code{climb_rate_flight_ms} mirror \code{delta_altitude_m} and
 \code{climb_rate_ms} but are \code{NA} outside flight intervals.
+
+\strong{Forearm Length}
+
+Forearm length (mm) is read per deployment from Movebank track data and
+added as \code{forearm_length} (with \code{forearm_length_source}) to both
+track data and event rows. The correct Movebank field is
+\code{deploy_on_comments}; a plain numeric value there is used directly.
+As a fallback, the \code{comments} column is used only if all of its
+non-empty values are numeric, and a warning asks you to move those values to
+\code{deploy_on_comments}. If \code{comments} contains any text, it is
+treated as ordinary comments and not used for forearm length.
 }
 \examples{
 \dontrun{

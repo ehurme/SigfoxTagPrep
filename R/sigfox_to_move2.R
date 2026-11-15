@@ -11,7 +11,6 @@
 #' @return A list containing move2 objects and optionally a plot.
 #' @importFrom pacman p_load
 #' @importFrom dplyr filter arrange group_by
-#' @importFrom mapview mapview
 #' @importFrom sf st_set_crs st_bbox
 #' @importFrom move2 mt_as_move2 mt_track_id mt_time mt_filter_unique
 #' @importFrom janitor clean_names
@@ -33,7 +32,7 @@ sigfox_to_move2 <- function(tracks,
                             make_lines = FALSE) {
   # source("./R/tracking_data_processing.R")
   # Load required libraries dynamically
-  pacman::p_load(tidyverse, dplyr, mapview, sf, move2, janitor,
+  pacman::p_load(tidyverse, dplyr, sf, move2, janitor,
                  rnaturalearth, update = FALSE)
 
   # Ensure devtools is available

@@ -221,6 +221,20 @@ plot_basestation_correction <- function(
 #                      where other stations are present alongside it. (default: TRUE)
 #
 # Returns (invisibly) the corrected data frame.
+#
+# Example:
+#   corrections <- data.frame(
+#     station_id  = "1228B",
+#     correct_lat = 47.57225,
+#     correct_lon = 8.894595,
+#     start       = "2026-04-01 12:00",
+#     end         = "2026-04-22 14:00",
+#     stringsAsFactors = FALSE
+#   )
+#   result <- fix_basestation_locations(
+#     csv_path    = "path/to/Swiss_FSP_22_06_2026_records.csv",
+#     corrections = corrections
+#   )
 # -----------------------------------------------------------------------------
 fix_basestation_locations <- function(
     csv_path,
@@ -372,30 +386,3 @@ fix_basestation_locations <- function(
 
   invisible(df)
 }
-
-# =============================================================================
-# Example usage
-# =============================================================================
-if (FALSE) {
-
-  # Define correction rules matching your table
-  corrections <- data.frame(
-    station_id  = c("1228B"),
-    correct_lat = c(47.57225),
-    correct_lon = c(8.894595),
-    start       = c("2026-04-01 12:00"),
-    end         = c("2026-04-22 14:00"),
-    stringsAsFactors = FALSE
-  )
-
-  result <- fix_basestation_locations(
-    csv_path    = "path/to/Swiss_FSP_22_06_2026_records.csv",
-    corrections = corrections
-    # plot     = TRUE   # default: shows before/after map
-    # bs_col   = "Base Stations (ID, RSSI, Reps)"  # default
-    # time_col = "Time (UTC)"                       # default
-    # pos_col  = "Position"                         # default
-    # sep      = ";"                                # default
-  )
-}
-

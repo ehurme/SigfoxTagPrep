@@ -7,3 +7,13 @@
 ^LICENSE$
 ^\.github$
 ^\.vscode$
+^\.conda$
+^claude$
+^explore$
+^output$
+^python$
+^fig$
+^example\.Rmd$
+^example\.html$
+^example_files$
+^wildcloud_to_movebank_guide\.Rmd$

@@ -16,7 +16,7 @@ extract_elevation_segments <- function(raster, tag) {
     segment_distance <- geosphere::distHaversine(segment_coords[1, ], segment_coords[2, ]) / 1000 # Convert meters to km
 
     # Create a line for the segment
-    segment_line <- terra::vect(x = segment_coords, type = "lines", crs = crs(raster))
+    segment_line <- terra::vect(x = segment_coords, type = "lines", crs = terra::crs(raster))
 
     # Extract elevation values along the segment
     extracted <- terra::extract(raster, segment_line, along = TRUE)

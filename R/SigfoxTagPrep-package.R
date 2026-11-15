@@ -15,7 +15,6 @@
 #' @importFrom tibble tibble as_tibble
 #' @importFrom lubridate as_datetime days with_tz ymd_hms hour second
 #' @importFrom data.table := as.data.table fread melt setnames setorder setorderv
-#' @importFrom terra crs
 #' @importFrom assertthat assert_that
 #' @importFrom stats approx approxfun as.formula ave median na.omit predict
 #'   quantile sd setNames

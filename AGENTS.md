@@ -15,7 +15,7 @@ SigfoxTagPrep is an **R package** for downloading, processing, and analysing wil
 
 - **Primary language:** R (>= 4.1.0)
 - **Package framework:** Standard R package using `roxygen2` for documentation and `devtools` for development
-- **Core R dependencies:** `move2`, `sf`, `dplyr`, `lubridate`, `ggplot2`, `rvest`, `suncalc`, `janitor`, `data.table`, `mapview`, `rnaturalearth`, `stringr`
+- **Core R dependencies:** `move2`, `sf`, `dplyr`, `lubridate`, `ggplot2`, `rvest`, `suncalc`, `janitor`, `data.table`, `rnaturalearth`, `stringr`
 - **Optional R dependencies:** `terra` (ERA5 raster extraction), `moonlit` (GitHub-only moonlight covariates), `elevatr` (ground elevation), `geosphere`, `lme4`, `cmdstanr`/`posterior` (Bayesian HMMs), `testthat` (>= 3.0.0)
 - **Python:** Used only for ERA5 data download and animation (`python/` directory)
   - Key packages: `cdsapi`, `xarray`, `netCDF4`, `cfgrib`, `numpy`, `pandas`, `matplotlib`, `cartopy`, `Pillow`, `tqdm`

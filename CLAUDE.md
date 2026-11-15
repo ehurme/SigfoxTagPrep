@@ -41,3 +41,6 @@ discovered; delete entries that become wrong.
 - `import_nanofox_movebank()` helpers are top-level internals in `R/import_nanofox_movebank_helpers.R`. `verbose` reaches them via `options(SigfoxTagPrep.verbose)` (set + restored by the main function); `.msg()` reads it.
 - **2026-11-04 — no duplicate top-level names.** R collates `R/` alphabetically and a later file silently replaces an earlier same-named function (this hid fixes in `extract_avg_night_env*` and gave `%||%` three meanings). `%||%` lives only in `R/utils.R`.
 - No `library()`/`require()` in `R/`: Imports go in `R/SigfoxTagPrep-package.R`, optional packages are called `pkg::fn()`.
+
+### Package load time
+- **2026-11-15 — keep heavy packages out of Imports.** `load_all()` loads every Imports namespace: `mapview` (unused, ~12 s) and `terra` (~5 s) made loading take ~20 s; now ~8 s. `terra` is in Suggests: always call `terra::fn()` (no `@importFrom terra`) and guard entry points with `requireNamespace("terra")`. Time a candidate import with `system.time(loadNamespace("pkg"))` before adding it.
