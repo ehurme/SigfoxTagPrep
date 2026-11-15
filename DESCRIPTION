@@ -23,7 +23,7 @@ Imports:
     ggplot2,
     janitor,
     lubridate,
-    move2,
+    move2 (>= 0.2.7),
     pacman,
     purrr,
     readr,

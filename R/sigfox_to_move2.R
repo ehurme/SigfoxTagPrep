@@ -9,7 +9,6 @@
 #' @param motionless Logical; check if the tag fell off
 #' @param make_lines Logical; also build per-tag track lines.
 #' @return A list containing move2 objects and optionally a plot.
-#' @importFrom pacman p_load
 #' @importFrom dplyr filter arrange group_by
 #' @importFrom sf st_set_crs st_bbox
 #' @importFrom move2 mt_as_move2 mt_track_id mt_time mt_filter_unique
@@ -30,32 +29,6 @@ sigfox_to_move2 <- function(tracks,
                             include_legend = FALSE,
                             motionless = FALSE,
                             make_lines = FALSE) {
-  # source("./R/tracking_data_processing.R")
-  # Load required libraries dynamically
-  pacman::p_load(tidyverse, dplyr, sf, move2, janitor,
-                 rnaturalearth, update = FALSE)
-
-  # Ensure devtools is available
-  if (!requireNamespace("devtools", quietly = TRUE)) {
-    install.packages("devtools")
-  }
-
-  # Check if move2 is installed and compare version
-  if ("move2" %in% rownames(installed.packages())) {
-    current_version <- packageVersion("move2")
-    required_version <- as.package_version("0.2.7")
-
-    if (current_version < required_version) {
-      message("Updating 'move2' package to the latest version from GitLab.")
-      devtools::install_git('https://gitlab.com/bartk/move2.git')
-    } else {
-      message("Installed 'move2' package is up to date (Version: ", as.character(current_version), ").")
-    }
-  } else {
-    message("'move2' package is not installed. Installing the latest version from GitLab.")
-    devtools::install_git('https://gitlab.com/bartk/move2.git')
-  }
-
   # Clean column names for consistency
   tracks <- tracks |> janitor::clean_names()
 
