@@ -134,7 +134,6 @@ altitude_to_pressure_hPa <- function(alt_m, p0_hpa = 1013.25) {
 #'
 #' @importFrom move2 mt_time mt_azimuth mt_track_id_column mt_speed
 #' @importFrom sf st_coordinates st_is_empty
-#' @importFrom terra rast time extract nlyr
 #' @importFrom dplyr mutate group_by ungroup lag across all_of
 #' @export
 annotate_era5 <- function(
@@ -148,8 +147,10 @@ annotate_era5 <- function(
     verbose = TRUE
 ) {
 
-
   # ── Validate ──────────────────────────────────────────────────────────────
+  if (!requireNamespace("terra", quietly = TRUE)) {
+    stop("Package 'terra' is required for annotate_era5(); install.packages('terra')")
+  }
   era5_dir <- gsub("\\\\", "/", era5_dir)   # UNC paths need forward slashes for GDAL
   stopifnot(inherits(data, "sf"))
   stopifnot(dir.exists(era5_dir))
@@ -321,9 +322,9 @@ annotate_era5 <- function(
                        " single-level file(s) matching needed months ...")
   catalog <- vector("list", length(grib_files))
   for (fi in seq_along(grib_files)) {
-    r_tmp <- tryCatch(rast(grib_files[fi], md = FALSE), error = function(e) NULL)
+    r_tmp <- tryCatch(terra::rast(grib_files[fi], md = FALSE), error = function(e) NULL)
     if (is.null(r_tmp)) next
-    rt <- time(r_tmp)
+    rt <- terra::time(r_tmp)
     rm(r_tmp); gc(verbose = FALSE)
     if (length(rt) == 0) next
     n_v <- sum(rt == rt[1])
@@ -361,7 +362,7 @@ annotate_era5 <- function(
     if (!any(obs_mask)) next
 
     cat_entry <- catalog[[fi]]
-    r <- tryCatch(rast(cat_entry$file, md = FALSE), error = function(e) {
+    r <- tryCatch(terra::rast(cat_entry$file, md = FALSE), error = function(e) {
       if (verbose) message("    [skip] Could not load: ", basename(cat_entry$file))
       NULL
     })
@@ -439,9 +440,9 @@ annotate_era5 <- function(
     # ── Metadata scan for this level ───────────────────────────────────────────
     catalog <- vector("list", length(level_files))
     for (fi in seq_along(level_files)) {
-      r_tmp <- tryCatch(rast(level_files[fi], md = FALSE), error = function(e) NULL)
+      r_tmp <- tryCatch(terra::rast(level_files[fi], md = FALSE), error = function(e) NULL)
       if (is.null(r_tmp)) next
-      rt  <- time(r_tmp)
+      rt  <- terra::time(r_tmp)
       lnm <- names(r_tmp)
       rm(r_tmp); gc(verbose = FALSE)
       if (length(rt) == 0) next
@@ -494,7 +495,7 @@ annotate_era5 <- function(
       if (!any(obs_mask)) next
 
       cat_entry <- catalog[[fi]]
-      r <- tryCatch(rast(cat_entry$file, md = FALSE), error = function(e) {
+      r <- tryCatch(terra::rast(cat_entry$file, md = FALSE), error = function(e) {
         if (verbose) message("    [skip] Could not load: ", basename(cat_entry$file))
         NULL
       })

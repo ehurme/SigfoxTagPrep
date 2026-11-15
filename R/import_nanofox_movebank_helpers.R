@@ -629,16 +629,15 @@
   }
 
   # ---- Promote attributes from track data to event columns ----
-  for (attr in c(
-    "sex",
-    "model",
-    "tag_firmware",
-    "attachment_comments",
-    "tag_local_identifier",
-    "deployment_id"
+  # Only attributes the study actually has (e.g. many studies lack
+  # attachment_comments, some lack model / tag_firmware).
+  for (attr in intersect(
+    c("sex", "model", "tag_firmware", "attachment_comments",
+      "tag_local_identifier", "deployment_id"),
+    names(move2::mt_track_data(x))
   )) {
     x <- .safe_try(
-      x %>% mt_as_event_attribute(attr, .keep = TRUE),
+      x %>% mt_as_event_attribute(dplyr::all_of(attr), .keep = TRUE),
       paste0("mt_as_event_attribute(", attr, ")")
     ) %||%
       x
@@ -657,6 +656,187 @@
     }
   }
 
+  x
+}
+
+# ---------------------------------------------------------------------------
+# .fill_tag_mass_total
+#
+# In our Movebank studies both `tag_mass_total` and `weight` hold the tag
+# mass (g); different studies filled different fields. Fill missing
+# `tag_mass_total` in track data from `weight`. Existing tag_mass_total values
+# are never overwritten. Units (move2 may return `units` objects) are
+# respected: values are converted to tag_mass_total's unit, else grams.
+# ---------------------------------------------------------------------------
+.fill_tag_mass_total <- function(x) {
+  td <- tryCatch(move2::mt_track_data(x), error = function(e) NULL)
+  if (is.null(td) || nrow(td) == 0 || !"weight" %in% names(td)) {
+    return(x)
+  }
+
+  to_grams <- function(v) {
+    if (inherits(v, "units")) as.numeric(units::set_units(v, "g", mode = "standard"))
+    else suppressWarnings(as.numeric(as.character(v)))
+  }
+  w_g <- to_grams(td$weight)
+
+  had_col <- "tag_mass_total" %in% names(td)
+  tm_g <- if (had_col) to_grams(td$tag_mass_total) else rep(NA_real_, nrow(td))
+
+  fill <- is.na(tm_g) & !is.na(w_g)
+  if (!any(fill)) {
+    return(x)
+  }
+  tm_g[fill] <- w_g[fill]
+
+  # Preserve the original unit of tag_mass_total when it had one.
+  td$tag_mass_total <- if (had_col && inherits(td$tag_mass_total, "units")) {
+    units::set_units(units::set_units(tm_g, "g", mode = "standard"),
+                     units::deparse_unit(td$tag_mass_total), mode = "standard")
+  } else {
+    units::set_units(tm_g, "g", mode = "standard")
+  }
+
+  x_new <- tryCatch(move2::mt_set_track_data(x, td), error = function(e) {
+    .msg("  .fill_tag_mass_total: could not update track data (",
+         conditionMessage(e), ").")
+    NULL
+  })
+  if (is.null(x_new)) {
+    return(x)
+  }
+  .msg("  tag_mass_total: filled ", sum(fill), "/", nrow(td),
+       " deployment(s) from `weight`.")
+  x_new
+}
+
+# ---------------------------------------------------------------------------
+# .add_forearm_length
+#
+# Derive forearm length (mm) per deployment from Movebank track data and
+# promote it to an event column `forearm_length`.
+#
+# Sources, in priority order:
+#   1. deploy_on_comments — the correct Movebank field for forearm length.
+#      Values are used when they parse as a plain number.
+#   2. comments — legacy fallback, used ONLY when every non-empty value in the
+#      column is numeric. If any value contains letters the column is treated
+#      as genuine free-text comments and left untouched (not used for forearm).
+#      When numeric values are taken from `comments`, a warning asks the user
+#      to move them to deploy_on_comments in Movebank.
+#
+# The `comments` track-data column itself is never modified.
+# Adds `forearm_length` and `forearm_length_source` to track data and events.
+# ---------------------------------------------------------------------------
+.add_forearm_length <- function(x) {
+  td <- tryCatch(move2::mt_track_data(x), error = function(e) NULL)
+  if (is.null(td) || nrow(td) == 0) {
+    return(x)
+  }
+
+  .as_chr <- function(v) {
+    v <- trimws(as.character(v))
+    v[v == ""] <- NA_character_
+    v
+  }
+  .to_num <- function(v) suppressWarnings(as.numeric(sub(",", ".", v, fixed = TRUE)))
+  .is_num_str <- function(v) {
+    !is.na(v) & grepl("^[+-]?([0-9]+([.,][0-9]*)?|[.,][0-9]+)$", v)
+  }
+
+  n <- nrow(td)
+  fa <- rep(NA_real_, n)
+  src <- rep(NA_character_, n)
+
+  # ---- 1. deploy_on_comments (preferred) ----
+  if ("deploy_on_comments" %in% names(td)) {
+    doc <- .as_chr(td$deploy_on_comments)
+    ok <- .is_num_str(doc)
+    fa[ok] <- .to_num(doc[ok])
+    src[ok] <- "deploy_on_comments"
+    n_text <- sum(!is.na(doc) & !ok)
+    if (n_text > 0) {
+      .msg(
+        "  .add_forearm_length: ", n_text,
+        " deploy_on_comments value(s) are not plain numbers; ",
+        "not interpreted as forearm length."
+      )
+    }
+  }
+
+  # ---- 2. comments (fallback, numeric-only column) ----
+  if ("comments" %in% names(td)) {
+    com <- .as_chr(td$comments)
+    non_empty <- com[!is.na(com)]
+    if (length(non_empty) > 0) {
+      if (any(grepl("[[:alpha:]]", non_empty))) {
+        .msg(
+          "  .add_forearm_length: 'comments' contains text; ",
+          "kept as comments and not used for forearm length."
+        )
+      } else {
+        use <- is.na(fa) & .is_num_str(com)
+        if (any(use)) {
+          fa[use] <- .to_num(com[use])
+          src[use] <- "comments"
+          id_col <- intersect(
+            c(
+              "individual_local_identifier", "deployment_id",
+              move2::mt_track_id_column(x)
+            ),
+            names(td)
+          )[1]
+          ids <- if (!is.na(id_col)) {
+            unique(as.character(td[[id_col]][use]))
+          } else {
+            character(0)
+          }
+          warning(
+            sum(use), " numeric value(s) in Movebank 'comments' are being ",
+            "interpreted as forearm length (mm)",
+            if (length(ids)) {
+              paste0(
+                " for: ", paste(utils::head(ids, 10), collapse = ", "),
+                if (length(ids) > 10) paste0(" (+", length(ids) - 10, " more)")
+              )
+            },
+            ". Please move these values to 'deploy_on_comments' in Movebank, ",
+            "which is the correct field for forearm length.",
+            call. = FALSE
+          )
+        }
+      }
+    }
+  }
+
+  if (all(is.na(fa))) {
+    return(x)
+  }
+
+  td$forearm_length <- fa
+  td$forearm_length_source <- src
+  x_new <- tryCatch(move2::mt_set_track_data(x, td), error = function(e) {
+    .msg(
+      "  .add_forearm_length: could not update track data (",
+      conditionMessage(e), ")."
+    )
+    NULL
+  })
+  if (is.null(x_new)) {
+    return(x)
+  }
+  x <- x_new
+  for (attr in c("forearm_length", "forearm_length_source")) {
+    x <- .safe_try(
+      x %>% mt_as_event_attribute(dplyr::all_of(attr), .keep = TRUE),
+      paste0("mt_as_event_attribute(", attr, ")")
+    ) %||%
+      x
+  }
+  .msg(
+    "  Forearm length found for ", sum(!is.na(fa)), "/", n, " deployment(s) (",
+    paste(names(table(src)), table(src), sep = "=", collapse = ", "), ")."
+  )
   x
 }
 
@@ -778,7 +958,7 @@
   x
 }
 
-.standardise_model_firmware <- function(x, study_id_current = NULL) {
+.standardise_model_firmware <- function(x, study_id_current = NULL, report = TRUE) {
 if (is.null(x) || nrow(x) == 0) return(x)
 
 # Save originals before any transformation
@@ -791,7 +971,7 @@ if (!"tag_firmware_raw" %in% names(x) && "tag_firmware" %in% names(x)) {
 
 # Only proceed with standardisation if model/firmware columns exist
 if (!"model" %in% names(x) || !"tag_firmware" %in% names(x)) {
-  if (.verbose()) {
+  if (isTRUE(report) && .verbose()) {
     .msg("  model/firmware columns missing; skipping standardisation")
   }
   return(x)
@@ -830,6 +1010,18 @@ if ("tag_type" %in% names(x)) {
   firmware[model == "uWasp"] <- NA_character_
 }
 
+# Canonicalise NanoFox firmware spellings (Movebank has e.g. "30day", "30days")
+nano_fw_canon <- c(
+  daily = "Daily",
+  "10day" = "10Days", "10days" = "10Days",
+  "30day" = "30Days", "30days" = "30Days",
+  "30dayfinescalepressure"  = "30DaysFineScalePressure",
+  "30daysfinescalepressure" = "30DaysFineScalePressure"
+)
+fw_key <- tolower(gsub("[^A-Za-z0-9]", "", firmware))
+fw_hit <- model %in% "Nanofox" & fw_key %in% names(nano_fw_canon)
+firmware[fw_hit] <- unname(nano_fw_canon[fw_key[fw_hit]])
+
 # Validation
 nano_fw <- c("Daily", "10Days", "30Days", "30DaysFineScalePressure")
 tiny_fw <- c("V13", "V13P", "V14P", "battTorpor", "BBX5", "BBV6", "TV1")
@@ -847,7 +1039,7 @@ x$model_firmware_ok <- issue == "ok"
 x$model_firmware_issue <- issue
 
 n_unknown <- sum(issue == "model_unknown")
-if (n_unknown > 0) {
+if (isTRUE(report) && n_unknown > 0) {
   warning(
     "study ", study_id_current %||% "?", ": ",
     n_unknown, " row(s) with unknown tag model (model_firmware_issue = 'model_unknown'). ",
@@ -856,7 +1048,7 @@ if (n_unknown > 0) {
   )
 }
 
-if (.verbose()) {
+if (isTRUE(report) && .verbose()) {
   .msg("  model / firmware check for study ", study_id_current %||% "?", ":")
   print(
     sf::st_drop_geometry(x) |>
@@ -1473,17 +1665,13 @@ x
 #   climb_rate_flight_ms    : climb_rate_ms where is_flight, else NA
 # ---------------------------------------------------------------------------
 .add_flight_altitude_metrics <- function(x, threshold = 50) {
-  if (!"delta_altitude_m" %in% names(x)) {
-    warning(".add_flight_altitude_metrics: 'delta_altitude_m' column not found; skipping.")
-    return(x)
-  }
-  if (!"dt_prev" %in% names(x)) {
-    warning(".add_flight_altitude_metrics: 'dt_prev' column not found; skipping.")
-    return(x)
-  }
-  if (!"vedba_sum" %in% names(x)) {
-    warning(".add_flight_altitude_metrics: 'vedba_sum' column not found; skipping.")
-    return(x)
+  # Missing inputs are expected for some tag types (e.g. uWasp has no VeDBA),
+  # so these are informational, not warnings.
+  for (req in c("delta_altitude_m", "dt_prev", "vedba_sum")) {
+    if (!req %in% names(x)) {
+      .msg("  flight altitude metrics: '", req, "' not available; skipping.")
+      return(x)
+    }
   }
 
   delta_alt_m <- as.numeric(x$delta_altitude_m)
@@ -1629,15 +1817,21 @@ x
   # ---- Ground elevation from AWS DEM (elevatr) ----
   if (isTRUE(run_elevation) && requireNamespace("elevatr", quietly = TRUE)) {
     .safe_try({
-      idx <- which(!sf::st_is_empty(b_loc$geometry) & !is.na(b_loc$lon))
+      # Reuse elevation already present (e.g. daily rows inherit it from the
+      # location fixes via .propagate_col_from_loc); fetch only the rest.
+      if (!"elevation" %in% names(b_loc)) b_loc$elevation <- NA_real_
+      b_loc$elevation <- as.numeric(b_loc$elevation)
+      idx <- which(!sf::st_is_empty(b_loc$geometry) & !is.na(b_loc$lon) &
+                     is.na(b_loc$elevation))
       if (length(idx) > 0) {
         elev_pts <- data.frame(x = b_loc$lon[idx], y = b_loc$lat[idx])
         elev_vals <- elevatr::get_elev_point(
           locations = elev_pts, src = "aws", prj = 4326
         )$elevation
-        b_loc$elevation <- NA_real_
         b_loc$elevation[idx] <- elev_vals
         .msg("  elevation: ", sum(!is.na(elev_vals)), " values fetched from AWS DEM.")
+      } else {
+        .msg("  elevation: reused for all ", nrow(b_loc), " rows (no DEM fetch).")
       }
     }, "get_elev_point")
 
@@ -3136,6 +3330,8 @@ x[, keep, drop = FALSE]
   # .fix_track_data_lists only needed if re-keying failed (multi-deployment individual track)
   b <- .fix_track_data_lists(b)
   b <- .add_event_attrs(b)
+  b <- .add_forearm_length(b)
+  b <- .fill_tag_mass_total(b)
   b <- .set_tag_type(b, study_id_current = id, tag_type = tag_type)
   # Add these diagnostic checks:
   if (.verbose()) {
@@ -3194,11 +3390,15 @@ x[, keep, drop = FALSE]
     b
   })
 
-  b <- .safe_try(
-    add_min_pressure_to_locations(df = b),
-    "add_min_pressure_to_locations"
-  ) %||%
-    b
+  # NanoFox pressure rows only; uWasp / TinyFox-only studies have no
+  # barometric_pressure column.
+  if ("barometric_pressure" %in% names(b)) {
+    b <- .safe_try(
+      add_min_pressure_to_locations(df = b),
+      "add_min_pressure_to_locations"
+    ) %||%
+      b
+  }
 
   # Populate temperature_min, temperature_max, avg_temp on location rows for
   # all tag types (TinyFox flat columns + NanoFox sensor-row join fallback).
@@ -3305,7 +3505,7 @@ x[, keep, drop = FALSE]
                  "tinyfox_diff_vedba", "tinyfox_diff_vedba_orig",
                  "tinyfox_vedba_rate", "tinyfox_vedba_rate_orig",
                  ".tinyfox_scaling_factor", ".tinyfox_scaling_note",
-                 "speed_kmh", "step_km",
+                 "speed_kmh", "step_km", "elevation",
                  "delta_altitude_m", "climb_rate_ms", "is_flight",
                  "delta_altitude_flight_m", "climb_rate_flight_ms")) {
     b <- .safe_try(
@@ -3383,7 +3583,7 @@ x[, keep, drop = FALSE]
   for (obj_name in c("b", "b_loc", "b_daily2")) {
     obj <- get(obj_name)
     if (!is.null(obj) && nrow(obj) > 0) {
-      obj <- .standardise_model_firmware(obj, study_id_current = id)
+      obj <- .standardise_model_firmware(obj, study_id_current = id, report = FALSE)
 
       # Guarantee tag_fell_off exists on every output (FALSE if not computed)
       if (!"tag_fell_off" %in% names(obj)) obj$tag_fell_off <- FALSE
@@ -3596,7 +3796,7 @@ x[, keep, drop = FALSE]
 .summarize_flight_altitude <- function(x, label) {
   if (is.null(x) || nrow(x) == 0 || !"is_flight" %in% names(x)) return(invisible(NULL))
   n_flight <- sum(as.logical(x$is_flight), na.rm = TRUE)
-  climb <- as.numeric(x$climb_rate_flight_ms)
+  climb <- if ("climb_rate_flight_ms" %in% names(x)) as.numeric(x$climb_rate_flight_ms) else numeric(0)
   climb <- climb[is.finite(climb)]
   .msg(
     "  Flight altitude (", label, "): ", n_flight, " flight fixes of ", nrow(x),

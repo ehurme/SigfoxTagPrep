@@ -101,3 +101,26 @@ test_that("%||% returns the default only for NULL", {
   expect_equal(NA %||% 1, NA)
   expect_equal(0 %||% 1, 0)
 })
+
+test_that(".fill_tag_mass_total fills only missing values from weight", {
+  x <- move2::mt_stack(make_track(id = "d1"), make_track(id = "d2"),
+                       make_track(id = "d3"))
+  td <- move2::mt_track_data(x)
+  td$tag_mass_total <- units::set_units(c(1, NA, NA), "g")
+  td$weight <- units::set_units(c(1.3, 1.25, NA), "g")
+  x <- move2::mt_set_track_data(x, td)
+
+  out <- move2::mt_track_data(.fill_tag_mass_total(x))
+  expect_s3_class(out$tag_mass_total, "units")
+  expect_equal(as.numeric(out$tag_mass_total), c(1, 1.25, NA))
+})
+
+test_that(".fill_tag_mass_total creates tag_mass_total when only weight exists", {
+  x <- make_track(id = "d1")
+  td <- move2::mt_track_data(x)
+  td$weight <- 1.44
+  x <- move2::mt_set_track_data(x, td)
+
+  out <- move2::mt_track_data(.fill_tag_mass_total(x))
+  expect_equal(as.numeric(out$tag_mass_total), 1.44)
+})

@@ -54,6 +54,32 @@
 #'   * `end_corrected`     – Corrected window end = receipt timestamp (POSIXct)
 #'
 #'   The fitted lme4 model is attached as `attr(result, "drift_model")`.
+#' @examples
+#' \dontrun{
+#' bats_corrected <- correct_time_drift(
+#'   data                = bats,
+#'   tag_col             = "tag_id",
+#'   timestamp_col       = "timestamp",   # message receipt time
+#'   start_col           = "start_time",  # programmed window start
+#'   end_col             = "end_time",    # programmed window end
+#'   temp_col            = "avg_temp",    # NULL to omit temperature term
+#'   programmed_interval = 3 * 3600,      # 3-hour schedule; NULL to infer
+#'   poly_degree         = 2L,
+#'   max_drift_filter    = 0.10,
+#'   min_obs_per_tag     = 5L
+#' )
+#'
+#' # Fitted lme4 model
+#' summary(attr(bats_corrected, "drift_model"))
+#'
+#' # Diagnostic plots
+#' diag_plots <- plot_drift_diagnostics(bats_corrected,
+#'                                      tag_col  = "tag_id",
+#'                                      temp_col = "avg_temp")
+#' diag_plots$drift_vs_temp
+#' diag_plots$drift_by_tag
+#' diag_plots$window_shift
+#' }
 #' @export
 correct_time_drift <- function(
     data,
@@ -357,36 +383,4 @@ plot_drift_diagnostics <- function(
     theme_bw()
 
   plots
-}
-
-
-# =============================================================================
-# Example usage
-# =============================================================================
-if (FALSE) {
-
-  bats_corrected <- correct_time_drift(
-    data                = bats,
-    tag_col             = "tag_id",
-    timestamp_col       = "timestamp",       # message receipt time
-    start_col           = "start_time",      # programmed window start
-    end_col             = "end_time",        # programmed window end
-    temp_col            = "avg_temp",        # NULL to omit temperature term
-    programmed_interval = 3 * 3600,          # 3-hour schedule; NULL to infer
-    poly_degree         = 2L,
-    max_drift_filter    = 0.10,
-    min_obs_per_tag     = 5L
-  )
-
-  # Retrieve the fitted lme4 model for inspection
-  drift_model <- attr(bats_corrected, "drift_model")
-  summary(drift_model)
-
-  # Diagnostic plots
-  diag_plots <- plot_drift_diagnostics(bats_corrected,
-                                       tag_col  = "tag_id",
-                                       temp_col = "avg_temp")
-  diag_plots$drift_vs_temp
-  diag_plots$drift_by_tag
-  diag_plots$window_shift
 }

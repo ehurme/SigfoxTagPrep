@@ -23,8 +23,7 @@ Imports:
     ggplot2,
     janitor,
     lubridate,
-    mapview,
-    move2,
+    move2 (>= 0.2.7),
     pacman,
     purrr,
     readr,
@@ -34,7 +33,6 @@ Imports:
     sf,
     stringr,
     suncalc,
-    terra,
     tibble,
     tidyr,
     units,
@@ -61,6 +59,7 @@ Suggests:
     moonlit,
     raster,
     readxl,
+    terra,
     testthat (>= 3.0.0),
     tidyterra
 Remotes:

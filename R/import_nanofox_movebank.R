@@ -53,6 +53,17 @@
 #' and \code{climb_rate_flight_ms} mirror \code{delta_altitude_m} and
 #' \code{climb_rate_ms} but are \code{NA} outside flight intervals.
 #'
+#' \strong{Forearm Length}
+#'
+#' Forearm length (mm) is read per deployment from Movebank track data and
+#' added as \code{forearm_length} (with \code{forearm_length_source}) to both
+#' track data and event rows. The correct Movebank field is
+#' \code{deploy_on_comments}; a plain numeric value there is used directly.
+#' As a fallback, the \code{comments} column is used only if all of its
+#' non-empty values are numeric, and a warning asks you to move those values to
+#' \code{deploy_on_comments}. If \code{comments} contains any text, it is
+#' treated as ordinary comments and not used for forearm length.
+#'
 #' @param study_id Integer or character vector of Movebank study IDs.
 #' @param tag_type Character or named list. When tag type cannot be inferred
 #'   automatically from tag metadata, supply it here: a single string for all

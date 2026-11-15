@@ -119,7 +119,6 @@ importFrom(lubridate,
   with_tz,
   ymd_hms
 )
-importFrom(mapview,mapview)
 importFrom(move2,
   mt_as_move2,
   mt_azimuth,
@@ -177,13 +176,6 @@ importFrom(stringr,
   str_to_lower,
   str_to_title,
   str_trim
-)
-importFrom(terra,
-  crs,
-  extract,
-  nlyr,
-  rast,
-  time
 )
 importFrom(tibble,
   as_tibble,
